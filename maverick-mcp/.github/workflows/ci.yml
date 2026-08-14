@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Sync dependencies
+        run: uv sync --extra dev --frozen
+      - name: Ruff check
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: Import contracts
+        run: uv run lint-imports
+
+  docs:
+    name: Docs catalog
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Check docs catalog
+        run: make docs-check
+
+  typecheck:
+    name: Type check (ty, baseline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Sync dependencies
+        # `--extra backtesting` pulls in vectorbt/numba/scikit-learn/scipy/
+        # pandas-ta, needed to resolve `maverick/backtesting/**` imports.
+        # `--extra research` pulls in langchain/langgraph/exa-py, needed to
+        # resolve `maverick/platform/llm.py` (lazy `langchain_anthropic`/
+        # `langchain_openai` imports inside `get_llm()`), `maverick/research/
+        # agents/graph.py` (`langgraph.graph`/`langgraph.types`), and
+        # `maverick/research/providers/exa.py` (lazy `exa_py`/`exa_py.api`).
+        # ty statically resolves imports on every code path regardless of
+        # the runtime lazy-import guard, so it needs these packages
+        # installed even though they never import eagerly at module load
+        # time on a base install.
+        run: uv sync --extra dev --extra backtesting --extra research --frozen
+      # Strict-zone run over the maverick/ package. Legacy maverick_mcp/
+      # was deleted at the Phase 8 cutover, so this is now the whole
+      # codebase's type-check gate; any diagnostic in this scope fails
+      # the job.
+      - name: ty check, strict zone (maverick/)
+        run: uv run ty check maverick
+
+  test-unit:
+    name: Unit tests (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@94527f2e458b27549849d47d273a16bec83a01e9
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: Sync dependencies
+        # `--extra dev` pulls in pytest, testcontainers, etc. `--extra
+        # backtesting` pulls in vectorbt/numba/scikit-learn/scipy/pandas-ta:
+        # the `tests/backtesting` tree imports them at collection time.
+        # `--extra research` pulls in langchain/langgraph/exa-py: the
+        # `tests/research` tree imports them at collection time.
+        run: uv sync --extra dev --extra backtesting --extra research --frozen
+      - name: Run unit tests
+        run: |
+          uv run pytest \
+            -m "not integration and not slow and not external" \
+            --maxfail=5 \
+            --timeout=60

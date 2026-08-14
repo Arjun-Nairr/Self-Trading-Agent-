@@ -1,0 +1,96 @@
+# Documentation Catalog
+
+Status labels:
+
+- `current`: source of truth for active behavior.
+- `historical`: useful context, but not the active source of truth.
+- `archived`: retained only for reference.
+- `deleted`: intentionally removed because it was stale, fabricated, redundant,
+  or superseded.
+
+## Current
+
+| Path | Status | Owner | Notes |
+| --- | --- | --- | --- |
+| `../AGENTS.md` | current | agents | Canonical agent entry point. |
+| `../CLAUDE.md` | current | agents | Claude-specific pointer to canonical docs. |
+| `../GEMINI.md` | current | agents | Gemini-specific pointer to canonical docs. |
+| `../README.md` | current | project | User-facing overview and quick start. |
+| `../CONTRIBUTING.md` | current | project | Contributor workflow. |
+| `../SECURITY.md` | current | project | Vulnerability reporting and security guidance. |
+| `../CODE_OF_CONDUCT.md` | current | project | Community standards. |
+| `INDEX.md` | current | docs | Documentation entry point. |
+| `CATALOG.md` | current | docs | Inventory and cleanup state. |
+| `ARCHITECTURE.md` | current | engineering | Package layout and system boundaries. |
+| `design-docs/2026-07-18-mcp-modernization.md` | current | engineering | Approved v1.0 modernization design and migration plan. |
+| `exec-plans/completed/2026-07-18-phase-0-harness-and-cleanup.md` | current | engineering | Phase 0 execution plan (harness scaffold and cleanup). |
+| `exec-plans/completed/2026-07-18-phase-1-platform-seam.md` | current | engineering | Phase 1 execution plan (platform seam). |
+| `exec-plans/completed/2026-07-19-phase-2-market-data-domain.md` | current | engineering | Phase 2 execution plan (market data domain). |
+| `exec-plans/completed/2026-07-19-phase-3-screening-domain.md` | current | engineering | Phase 3 execution plan (screening domain and technical core). |
+| `exec-plans/completed/2026-07-19-phase-4-portfolio-domain.md` | current | engineering | Phase 4 execution plan (portfolio domain). |
+| `exec-plans/completed/2026-07-19-phase-5-technical-domain.md` | current | engineering | Phase 5 execution plan (technical domain completion). |
+| `exec-plans/completed/2026-07-19-phase-6-backtesting-extra.md` | current | engineering | Phase 6 execution plan (backtesting extra). |
+| `exec-plans/completed/2026-07-20-phase-7-research-extra.md` | current | engineering | Phase 7 execution plan (research extra). |
+| `exec-plans/completed/2026-07-20-phase-8-server-cutover.md` | current | engineering | Phase 8 execution plan (server assembly and cutover). |
+| `exec-plans/active/2026-07-20-phase-9-distribution.md` | current | engineering | Phase 9 execution plan (distribution and registry rollout). |
+| `exec-plans/tech-debt-tracker.md` | current | engineering | Known debt, one line each. |
+| `product-specs/index.md` | current | product | Product spec index, empty until the tool surface is curated. |
+| `generated/README.md` | current | docs | Marker for script-generated docs. |
+| `generated/registry/README.md` | current | docs | Index of registry submission drafts (Phase 9 Task 3). |
+| `generated/registry/docker-mcp-catalog.md` | current | docs | Docker MCP Catalog PR draft (server.yaml + PR body). |
+| `generated/registry/glama.md` | current | docs | Glama submission draft. |
+| `generated/registry/pulsemcp.md` | current | docs | PulseMCP submission draft (submission mechanism unconfirmed). |
+| `generated/registry/mcp-so.md` | current | docs | mcp.so submission draft. |
+| `generated/registry/smithery.yaml` | current | docs | Smithery config draft (YAML, not scanned by the docs-catalog checker; listed here for completeness). |
+| `QUALITY_SCORE.md` | current | engineering | Per-area quality grades. |
+| `RELIABILITY.md` | current | engineering | Reliability state and gaps. |
+| `SECURITY.md` | current | engineering | Engineering security posture. |
+| `api/backtesting.md` | current | engineering | Backtesting API reference. |
+| `features/portfolio.md` | current | product/engineering | Portfolio persistence and cost-basis behavior. |
+| `features/deep-research.md` | current | engineering | Research agent behavior and configuration. |
+| `runbooks/claude-desktop.md` | current | operations | MCP client setup and transport guidance. |
+| `runbooks/database-setup.md` | current | operations | Database setup and schema creation (no migrations). |
+| `runbooks/self-contained-setup.md` | current | operations | Full local setup. |
+| `runbooks/migrating-to-v1.md` | current | operations | Config/database migration guide from pre-v1.0 installs. |
+| `runbooks/releasing.md` | current | operations | Owner-run publish sequence: PyPI, official MCP Registry, GHCR, third-party registries, `.mcpb` release asset. |
+| `testing/README.md` | current | engineering | Canonical test commands and marker policy. |
+| `testing/in-memory.md` | current | engineering | FastMCP in-memory test patterns. |
+| `testing/integration.md` | current | engineering | Integration test guidance. |
+| `testing/exa-research.md` | current | engineering | Exa/research provider test strategy. |
+| `testing/speed.md` | current | engineering | Research speed validation. |
+| `references/llm-documentation-hygiene.md` | current | docs | Agent-legible documentation rules. |
+
+## Historical
+
+| Path | Status | Notes |
+| --- | --- | --- |
+| `../conductor/` | historical | Tool-owned planning context. Keep cataloged, but do not treat as the current product docs. |
+| `superpowers/` | historical | Historical specs and plans. Current plans should live under `docs/plans/` or a new approved plan location. |
+
+## Deleted Or Consolidated
+
+| Old path | Status | Replacement |
+| --- | --- | --- |
+| `../PLANS.md` | deleted | Removed as unrelated Rust parser placeholder content. |
+| `../DATABASE_SETUP.md` | deleted | `runbooks/database-setup.md` |
+| `BACKTESTING.md` | deleted | `api/backtesting.md` |
+| `COST_BASIS_SPECIFICATION.md` | deleted | `features/portfolio.md` |
+| `PORTFOLIO.md` | deleted | `features/portfolio.md` |
+| `PORTFOLIO_PERSONALIZATION_PLAN.md` | deleted | `features/portfolio.md` |
+| `SETUP_SELF_CONTAINED.md` | deleted | `runbooks/self-contained-setup.md` |
+| `deep_research_agent.md` | deleted | `features/deep-research.md` |
+| `exa_research_testing_strategy.md` | deleted | `testing/exa-research.md` |
+| `speed_testing_framework.md` | deleted | `testing/speed.md` |
+| `../scripts/INSTALLATION_GUIDE.md` | deleted | `runbooks/tiingo-loader.md` |
+| `../scripts/README_TIINGO_LOADER.md` | deleted | `runbooks/tiingo-loader.md` |
+| `../tests/README.md` | deleted | `testing/README.md` |
+| `../tests/integration/README.md` | deleted | `testing/integration.md` |
+| `../maverick_mcp/tests/README_INMEMORY_TESTS.md` | deleted | `testing/in-memory.md` |
+| `../maverick_mcp/README.md` | deleted | `ARCHITECTURE.md` |
+| `runbooks/tiingo-loader.md` | deleted | `runbooks/migrating-to-v1.md`; the Tiingo bulk data loader and its scripts were removed at the v1.0.0 cutover (`maverick_mcp` deletion). Market data now comes from `yfinance` with no API key required. |
+
+## Allowlisted Non-Documentation Text
+
+No entries. `scripts/requirements_tiingo.txt` (the Tiingo loader's pinned
+dependency file) was removed at the v1.0.0 cutover along with the loader
+scripts it supported.

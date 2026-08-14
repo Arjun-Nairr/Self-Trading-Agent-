@@ -1,0 +1,123 @@
+# server.yaml
+#
+# Docker MCP Registry Configuration
+# Location: /server.yaml
+# Purpose: Metadata for Docker MCP Registry submission and container deployment
+
+name: alpaca-mcp-server
+image: alpaca/mcp-server
+type: server
+
+meta:
+  category: finance
+  tags:
+    - trading
+    - finance
+    - alpaca
+    - stocks
+    - options
+    - crypto
+    - portfolio
+    - market-data
+    - ai
+    - llm
+
+about:
+  title: Alpaca MCP Server
+  description: |
+    Alpaca Trading API integration for Model Context Protocol.
+
+    V2 generates 60+ MCP tools directly from Alpaca's published OpenAPI specs
+    using FastMCP's from_openapi(). Covers account management, order placement,
+    position tracking, market data (stocks, options, crypto), watchlists,
+    corporate actions, and more.
+
+    Key capabilities:
+    - Account & portfolio — balances, buying power, positions, portfolio history, activity log
+    - Order management — place, replace, cancel orders for stocks, options, and crypto
+    - Stock market data — historical bars, quotes, trades, snapshots, screener
+    - Options data — contract search, quotes with Greeks, snapshots
+    - Crypto data — bars, quotes, trades, orderbook, snapshots
+    - Watchlists — create, update, delete, add/remove symbols
+    - Corporate actions — dividends, splits, earnings
+    - Market calendar & clock
+
+    Toolset filtering lets you control exactly which capabilities the model can access
+    via the ALPACA_TOOLSETS environment variable.
+
+source:
+  project: https://github.com/alpacahq/alpaca-mcp-server
+  documentation: https://github.com/alpacahq/alpaca-mcp-server#readme
+  issues: https://github.com/alpacahq/alpaca-mcp-server/issues
+
+config:
+  description: |
+    Configure your Alpaca API credentials to connect to your trading account.
+
+    Get free API keys for paper trading at:
+    https://app.alpaca.markets/dashboard/overview
+
+  secrets:
+    - name: ALPACA_API_KEY
+      description: Your Alpaca API key for account access
+      required: true
+
+    - name: ALPACA_SECRET_KEY
+      description: Your Alpaca secret key for account access
+      required: true
+
+  env:
+    - name: ALPACA_TOOLSETS
+      description: Comma-separated list of toolsets to enable (e.g. account,trading,stock-data). All enabled by default.
+      default: ""
+
+    - name: DATA_API_URL
+      description: Custom Alpaca data API URL (leave empty for default)
+      default: ""
+
+    - name: DEBUG
+      description: Enable debug logging (true/false)
+      default: "false"
+
+metadata:
+  license: MIT
+  maintainer: Alpaca <https://alpaca.markets/contact>
+  version: "2.2.1"
+
+  docker:
+    transport: stdio
+    working_dir: /app
+    user: alpaca
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import alpaca_mcp_server"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  platforms:
+    - linux/amd64
+    - linux/arm64
+
+  examples:
+    basic_usage: |
+      docker run -e ALPACA_API_KEY -e ALPACA_SECRET_KEY alpaca/mcp-server
+
+    claude_desktop: |
+      {
+        "mcpServers": {
+          "alpaca": {
+            "command": "docker",
+            "args": ["run", "-i", "--rm", "-e", "ALPACA_API_KEY", "-e", "ALPACA_SECRET_KEY", "alpaca/mcp-server"],
+            "env": {
+              "ALPACA_API_KEY": "your_api_key",
+              "ALPACA_SECRET_KEY": "your_secret_key"
+            }
+          }
+        }
+      }
+
+    filtered_toolsets: |
+      docker run -e ALPACA_API_KEY -e ALPACA_SECRET_KEY \
+        -e ALPACA_TOOLSETS=account,stock-data,crypto-data \
+        alpaca/mcp-server

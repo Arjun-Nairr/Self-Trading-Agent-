@@ -1,0 +1,50 @@
+# Docker Compose Override Configuration Example
+# Copy this file to docker-compose.override.yml and customize for your local environment
+# This file will override settings in docker-compose.yml without modifying the main file
+
+services:
+  backend:
+    # Development mode
+    command: python -m maverick.server --transport http --host 0.0.0.0 --port 8003
+    environment:
+      # Override for development
+      - LOG_LEVEL=debug
+
+      # Add any additional API keys you want to test
+      # - EXA_API_KEY=your_key_here
+      # - LLM_PROVIDER=anthropic
+      # - LLM_API_KEY=your_key_here
+      # - LLM_MODEL=claude-sonnet-4-5
+
+      # Performance tuning
+      - CACHE_ENABLED=true
+      - CACHE_TTL_SECONDS=3600
+
+    # Mount additional volumes for development
+    volumes:
+      - ./tests:/app/tests
+
+    # Enable stdin and tty for interactive debugging
+    stdin_open: true
+    tty: true
+
+  # Optional: Add pgAdmin for database management
+  # pgadmin:
+  #   image: dpage/pgadmin4:latest
+  #   environment:
+  #     - PGADMIN_DEFAULT_EMAIL=admin@maverick.local
+  #     - PGADMIN_DEFAULT_PASSWORD=admin
+  #   ports:
+  #     - "5050:80"
+  #   depends_on:
+  #     - postgres
+
+  # Optional: Add Redis Commander for cache inspection
+  # redis-commander:
+  #   image: rediscommander/redis-commander:latest
+  #   environment:
+  #     - REDIS_HOSTS=local:redis:6379
+  #   ports:
+  #     - "8081:8081"
+  #   depends_on:
+  #     - redis

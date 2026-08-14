@@ -1,0 +1,138 @@
+#
+# hermes-trading-agent — a SEPARATE Hermes Agent instance, isolated from:
+#   - the Telegram-bot install at AppData\Local\hermes\hermes-agent
+#   - the hermes-pipeline instance at ~/.hermes-pipeline
+#
+# Isolation is via the data volume + container names/network below: same
+# public image, own ~/.hermes-trading-agent data dir, own network, own
+# containers. Nothing shared.
+#
+# Headless: no chat platform (Telegram/etc) configured — the cron scheduler
+# runs standalone via CLI per Hermes' own docs, gateway delivery to a
+# platform is optional and can be added later without a rebuild.
+#
+# Topology: separate container per tool, HTTP transport. Each tool gets
+# its own bridge network shared only with `gateway` — no tool can reach
+# another tool, only `gateway` can reach any of them, and nothing is
+# published to the host (see §12B).
+#
+# Usage:
+#   docker compose up -d
+#
+services:
+  gateway:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes-trading-agent
+    restart: unless-stopped
+    networks:
+      - net-maverick
+      - net-newsrss
+      - net-journal
+      - net-execution
+    volumes:
+      - ${USERPROFILE}/.hermes-trading-agent:/opt/data
+    environment:
+      - HERMES_UID=10000
+      - HERMES_GID=10000
+    command: ["gateway", "run"]
+
+  # maverick-mcp — third-party (wshobson/maverick-mcp), free, no API key,
+  # yfinance-based technicals. HTTP transport, own container, no host port
+  # published — reachable only from `gateway` on net-maverick.
+  # ponytail: upstream's example compose wires Postgres+Redis, but both are
+  # opt-in (maverick/platform/config.py falls back to SQLite for either one
+  # when DATABASE_URL/REDIS_HOST are unset) — at our scale (one process,
+  # hourly cron, a handful of tickers) SQLite covers it with 2 fewer
+  # containers. Revisit if maverick-mcp is ever run as >1 instance.
+  maverick-mcp:
+    build:
+      context: ./maverick-mcp
+    container_name: hermes-trading-agent-maverick-mcp
+    restart: unless-stopped
+    networks:
+      - net-maverick
+    environment:
+      - DATABASE_URL=sqlite:////app/data/maverick.db
+      - CACHE_SQLITE_PATH=/app/data/maverick_cache.db
+    volumes:
+      - maverick-data:/app/data
+    # No HEALTHCHECK: upstream ships none (MCP server, not a REST API, no
+    # /health endpoint). Milestone 1's step 5 verifies liveness via
+    # Hermes' own logs (tool registration), not a container healthcheck.
+
+  # google-news-rss-mcp — our own minimal wrapper (feedparser + FastMCP)
+  # around news.google.com/rss/search. One tool: fetch_headlines. Returns
+  # raw headline data only, no parsing-as-instructions — see server.py.
+  google-news-rss-mcp:
+    build:
+      context: ./google-news-rss-mcp
+    container_name: hermes-trading-agent-google-news-rss-mcp
+    restart: unless-stopped
+    networks:
+      - net-newsrss
+
+  # trade-journal-mcp — our own tool (asyncpg + FastMCP) over Neon
+  # (eu-central-1). Writes with the full-credential NEON_DATABASE_URL from
+  # .env; the dashboard reads separately via Neon's Data API using the
+  # anonymous role (SELECT-only, see schema.sql) — two different paths,
+  # this container never serves the browser directly.
+  trade-journal:
+    build:
+      context: ./trade-journal-mcp
+    container_name: hermes-trading-agent-trade-journal
+    restart: unless-stopped
+    networks:
+      - net-journal
+    env_file:
+      - .env
+
+  # execution-sim-mcp — DEV/MANUAL TOOL ONLY, not the active execution
+  # backend. Was the fallback while Upstox (then Alpaca) wasn't wired up
+  # yet; kept around for local testing without burning real Alpaca API
+  # calls. NOT auto-registered in config.yaml — deliberately not an
+  # automatic failover if alpaca-mcp has an outage (see
+  # project_hermes_trading_agent memory for why: idempotency and
+  # execution_mode tagging both assume one execution path per decision,
+  # and §6's "pause, don't fallback" principle applies here too).
+  execution-sim:
+    build:
+      context: ./execution-sim-mcp
+    container_name: hermes-trading-agent-execution-sim
+    restart: "no"
+    networks:
+      - net-execution
+
+  # alpaca-mcp — Alpaca's OFFICIAL MCP server (alpacahq/alpaca-mcp-server),
+  # vendored + patched (upstream Dockerfile COPYs a .github/core/ dir that
+  # doesn't exist in a plain clone, and ships no non-root user — both
+  # fixed here). Paper trading by default (ALPACA_PAPER_TRADE=true).
+  # ALPACA_TOOLSETS restricts to trading+account+stock-data — no
+  # crypto/options (plan is long-only equities) and no news/corporate-
+  # actions toolsets (we already have google-news-rss for sentiment;
+  # two overlapping sentiment sources would just confuse which one
+  # Hermes' skills are supposed to trust).
+  alpaca-mcp:
+    build:
+      context: ./alpaca-mcp
+    container_name: hermes-trading-agent-alpaca-mcp
+    restart: unless-stopped
+    networks:
+      - net-execution
+    environment:
+      - ALPACA_PAPER_TRADE=true
+      - ALPACA_TOOLSETS=trading,account,stock-data
+    env_file:
+      - .env
+
+networks:
+  net-maverick:
+    driver: bridge
+  net-newsrss:
+    driver: bridge
+  net-journal:
+    driver: bridge
+  net-execution:
+    driver: bridge
+
+volumes:
+  maverick-data:

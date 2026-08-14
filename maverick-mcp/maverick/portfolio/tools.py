@@ -1,0 +1,432 @@
+"""MCP tool registrations for portfolio. Top layer: imports service and below."""
+
+import json
+from decimal import Decimal
+from typing import Any
+
+from fastmcp import FastMCP
+
+from maverick.portfolio import tools_journal
+from maverick.portfolio.service import PortfolioService
+from maverick.portfolio.service_journal import JournalService
+from maverick.portfolio.tools_journal import (
+    portfolio_get_strategy_performance,
+    portfolio_journal_add_trade,
+    portfolio_journal_close_trade,
+    portfolio_journal_list_trades,
+    portfolio_journal_review,
+)
+
+_READ_ONLY_ANNOTATIONS = {"readOnlyHint": True}
+_ADD_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "destructiveHint": False,
+    "idempotentHint": False,
+}
+_REMOVE_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": False,
+}
+_CLEAR_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": True,
+}
+# A watchlist remove deletes every matching row in one call, so repeat calls
+# for the same (watchlist_id, symbol) are a no-op after the first --
+# idempotent, unlike partial-shares `portfolio_remove_position`.
+_WATCHLIST_REMOVE_ANNOTATIONS = {
+    "readOnlyHint": False,
+    "destructiveHint": True,
+    "idempotentHint": True,
+}
+
+_service: PortfolioService | None = None
+
+
+def configure(
+    service: PortfolioService, journal_service: JournalService | None = None
+) -> None:
+    """Wire the module-level service instances every tool function calls
+    through. `journal_service` is forwarded to `tools_journal.configure`:
+    `JournalService` is a standalone domain service (see
+    `service_journal.py`'s module docstring for why it isn't composed
+    inside `PortfolioService`), so its tool functions live in, and are
+    configured by, that sibling module -- optional here so every
+    pre-existing `configure(service)` call site keeps working unchanged.
+
+    The server assembly phase will replace this globals-based wiring with
+    proper dependency injection; this module-level seam keeps the tool
+    functions themselves free of any service-construction concerns.
+    """
+    global _service
+    _service = service
+    tools_journal.configure(journal_service)
+
+
+def _require_service() -> PortfolioService:
+    if _service is None:
+        raise RuntimeError("portfolio.tools: configure(service) was not called")
+    return _service
+
+
+async def portfolio_add_position(
+    ticker: str,
+    shares: float,
+    purchase_price: float,
+    purchase_date: str | None = None,
+    notes: str | None = None,
+    user_id: str = "default",
+    portfolio_name: str = "My Portfolio",
+) -> dict[str, Any]:
+    """Add (or average into) a position in `portfolio_name`."""
+    try:
+        service = _require_service()
+        position = await service.add_position(
+            user_id,
+            portfolio_name,
+            ticker,
+            Decimal(str(shares)),
+            Decimal(str(purchase_price)),
+            purchase_date,
+            notes,
+        )
+        return {"status": "success", "position": position.model_dump(mode="json")}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_get_my_portfolio(
+    user_id: str = "default",
+    portfolio_name: str = "My Portfolio",
+) -> dict[str, Any]:
+    """Full portfolio snapshot: every position plus live-priced metrics."""
+    try:
+        service = _require_service()
+        snapshot = await service.get_portfolio(user_id, portfolio_name)
+        payload = snapshot.model_dump(mode="json")
+        payload["status"] = "success"
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_remove_position(
+    ticker: str,
+    shares: float | None = None,
+    user_id: str = "default",
+    portfolio_name: str = "My Portfolio",
+) -> dict[str, Any]:
+    """Remove `shares` from `ticker` (or the entire position when omitted)."""
+    try:
+        service = _require_service()
+        result = await service.remove_position(
+            user_id,
+            portfolio_name,
+            ticker,
+            Decimal(str(shares)) if shares is not None else None,
+        )
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_clear_portfolio(
+    confirm: bool = False,
+    user_id: str = "default",
+    portfolio_name: str = "My Portfolio",
+) -> dict[str, Any]:
+    """Remove every position from `portfolio_name`. Requires `confirm=True`."""
+    if not confirm:
+        return {
+            "status": "error",
+            "error": "Must set confirm=True to clear portfolio",
+        }
+    try:
+        service = _require_service()
+        count = await service.clear_portfolio(user_id, portfolio_name)
+        return {"status": "success", "positions_cleared": count}
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_risk_adjusted_analysis(
+    ticker: str,
+    risk_level: float = 50.0,
+    user_id: str = "default",
+    portfolio_name: str = "My Portfolio",
+) -> dict[str, Any]:
+    """ATR-based position sizing/stop/target for `ticker`, plus an
+    existing-position block if `portfolio_name` already holds it."""
+    try:
+        service = _require_service()
+        result = await service.risk_adjusted_analysis(
+            user_id, portfolio_name, ticker, risk_level
+        )
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_compare_tickers(
+    tickers: list[str] | None = None,
+    days: int | None = None,
+    user_id: str = "default",
+    portfolio_name: str = "My Portfolio",
+) -> dict[str, Any]:
+    """Side-by-side comparison of `tickers`, or of `portfolio_name`'s
+    holdings when `tickers` is omitted (requires >= 2 holdings)."""
+    try:
+        service = _require_service()
+        result = await service.compare_tickers(user_id, portfolio_name, tickers, days)
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_correlation_analysis(
+    tickers: list[str] | None = None,
+    days: int | None = None,
+    user_id: str = "default",
+    portfolio_name: str = "My Portfolio",
+) -> dict[str, Any]:
+    """Correlation matrix and diversification metrics for `tickers`, or for
+    `portfolio_name`'s holdings when `tickers` is omitted (requires >= 2
+    holdings)."""
+    try:
+        service = _require_service()
+        result = await service.correlation_analysis(
+            user_id, portfolio_name, tickers, days
+        )
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_get_risk_dashboard(
+    user_id: str = "default",
+    portfolio_name: str = "My Portfolio",
+) -> dict[str, Any]:
+    """Full risk dashboard for `portfolio_name`: total value, sector
+    concentration, parametric VaR (95/99), and total unrealized P&L."""
+    try:
+        service = _require_service()
+        result = await service.get_risk_dashboard(user_id, portfolio_name)
+        if result.position_count == 0:
+            return {
+                "status": "empty",
+                "message": f"No positions found in portfolio '{portfolio_name}'",
+                "portfolio_name": portfolio_name,
+            }
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        payload["portfolio_name"] = portfolio_name
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_check_position_risk(
+    ticker: str,
+    shares: float,
+    entry_price: float,
+    user_id: str = "default",
+    portfolio_name: str = "My Portfolio",
+) -> dict[str, Any]:
+    """Pre-trade risk check: current vs. projected portfolio risk if
+    `shares` of `ticker` were added at `entry_price`."""
+    try:
+        service = _require_service()
+        result = await service.check_position_risk(
+            user_id, portfolio_name, ticker, shares, entry_price
+        )
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        payload["portfolio_name"] = portfolio_name
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_get_regime_adjusted_sizing(
+    account_size: float,
+    entry_price: float,
+    stop_loss: float,
+    risk_pct: float = 2.0,
+) -> dict[str, Any]:
+    """Position size scaled by the current SPY-detected market regime
+    (bull = full risk, choppy/transitional = 75%, bear = 50%)."""
+    try:
+        service = _require_service()
+        result = await service.get_regime_adjusted_sizing(
+            account_size, entry_price, stop_loss, risk_pct
+        )
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_get_risk_alerts(
+    user_id: str = "default",
+    portfolio_name: str = "My Portfolio",
+) -> dict[str, Any]:
+    """Current risk alerts for `portfolio_name`: sector concentration,
+    oversized positions, and portfolio drawdown threshold breaches."""
+    try:
+        service = _require_service()
+        result = await service.get_risk_alerts(user_id, portfolio_name)
+        if result.position_count == 0:
+            return {
+                "status": "empty",
+                "message": f"No positions found in portfolio '{portfolio_name}'",
+                "portfolio_name": portfolio_name,
+                "alerts": [],
+            }
+        return {
+            "status": "success",
+            "portfolio_name": portfolio_name,
+            "alert_count": result.alert_count,
+            "alerts": [alert.model_dump(mode="json") for alert in result.alerts],
+        }
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_watchlist_create(
+    name: str, description: str | None = None
+) -> dict[str, Any]:
+    """Create a new named watchlist for tracking ticker symbols. The name
+    must be unique."""
+    try:
+        service = _require_service()
+        result = await service.create_watchlist(name, description)
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_watchlist_add(
+    watchlist_id: int, symbol: str, notes: str | None = None
+) -> dict[str, Any]:
+    """Add a ticker symbol to an existing watchlist. Repeat calls for the
+    same symbol add another entry rather than replacing it."""
+    try:
+        service = _require_service()
+        result = await service.add_watchlist_item(watchlist_id, symbol, notes)
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_watchlist_remove(watchlist_id: int, symbol: str) -> dict[str, Any]:
+    """Remove a ticker symbol from a watchlist."""
+    try:
+        service = _require_service()
+        result = await service.remove_watchlist_item(watchlist_id, symbol)
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def portfolio_watchlist_brief(watchlist_id: int) -> dict[str, Any]:
+    """Intelligence brief for every symbol on a watchlist: notes, days on
+    watchlist, and the current price via market_data."""
+    try:
+        service = _require_service()
+        result = await service.watchlist_brief(watchlist_id)
+        payload = result.model_dump(mode="json")
+        payload["status"] = "success"
+        return payload
+    except Exception as exc:
+        return {"status": "error", "error": str(exc)}
+
+
+async def _my_holdings_resource() -> str:
+    """`portfolio://my-holdings`: the default portfolio's live-priced
+    snapshot, for AI context rather than direct user invocation."""
+    try:
+        service = _require_service()
+        snapshot = await service.get_portfolio(
+            service.settings.default_user_id, service.settings.default_portfolio_name
+        )
+        payload = snapshot.model_dump(mode="json")
+        payload["status"] = "success"
+        payload["uri"] = "portfolio://my-holdings"
+        payload["description"] = "Your current stock portfolio with live prices and P&L"
+        payload["mimeType"] = "application/json"
+        return json.dumps(payload)
+    except Exception as exc:
+        return json.dumps(
+            {
+                "status": "error",
+                "error": str(exc),
+                "uri": "portfolio://my-holdings",
+                "description": "Failed to retrieve portfolio holdings",
+            }
+        )
+
+
+_READ_ONLY_TOOLS = (
+    portfolio_get_my_portfolio,
+    portfolio_risk_adjusted_analysis,
+    portfolio_compare_tickers,
+    portfolio_correlation_analysis,
+    portfolio_get_risk_dashboard,
+    portfolio_check_position_risk,
+    portfolio_get_regime_adjusted_sizing,
+    portfolio_get_risk_alerts,
+    portfolio_watchlist_brief,
+    portfolio_journal_list_trades,
+    portfolio_journal_review,
+    portfolio_get_strategy_performance,
+)
+
+
+def register(mcp: FastMCP) -> None:
+    """Register all twenty portfolio tools plus the `portfolio://my-holdings`
+    resource on `mcp`, with honest annotations."""
+    for fn in _READ_ONLY_TOOLS:
+        mcp.tool(name=fn.__name__, annotations=_READ_ONLY_ANNOTATIONS)(fn)
+    mcp.tool(name=portfolio_add_position.__name__, annotations=_ADD_ANNOTATIONS)(
+        portfolio_add_position
+    )
+    mcp.tool(name=portfolio_remove_position.__name__, annotations=_REMOVE_ANNOTATIONS)(
+        portfolio_remove_position
+    )
+    mcp.tool(name=portfolio_clear_portfolio.__name__, annotations=_CLEAR_ANNOTATIONS)(
+        portfolio_clear_portfolio
+    )
+    mcp.tool(name=portfolio_watchlist_create.__name__, annotations=_ADD_ANNOTATIONS)(
+        portfolio_watchlist_create
+    )
+    mcp.tool(name=portfolio_watchlist_add.__name__, annotations=_ADD_ANNOTATIONS)(
+        portfolio_watchlist_add
+    )
+    mcp.tool(
+        name=portfolio_watchlist_remove.__name__,
+        annotations=_WATCHLIST_REMOVE_ANNOTATIONS,
+    )(portfolio_watchlist_remove)
+    mcp.tool(name=portfolio_journal_add_trade.__name__, annotations=_ADD_ANNOTATIONS)(
+        portfolio_journal_add_trade
+    )
+    mcp.tool(name=portfolio_journal_close_trade.__name__, annotations=_ADD_ANNOTATIONS)(
+        portfolio_journal_close_trade
+    )
+    mcp.resource("portfolio://my-holdings")(_my_holdings_resource)

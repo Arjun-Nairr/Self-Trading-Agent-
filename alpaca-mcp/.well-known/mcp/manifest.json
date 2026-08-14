@@ -1,0 +1,78 @@
+{
+  "_comment": "GitHub MCP Registry Manifest",
+  "_location": "/.well-known/mcp/manifest.json",
+  "version": "2.2.1",
+  "schema_version": "0.2.0",
+  "manifest_version": "0.3",
+  "name": "alpaca-mcp-server",
+  "display_name": "Alpaca MCP Server",
+  "description": "Alpaca Trading API integration for Model Context Protocol. V2 generates 60+ tools from Alpaca's OpenAPI specs using FastMCP, with toolset filtering and hand-crafted order overrides.",
+  "author": "Alpaca",
+  "license": "MIT",
+  "homepage": "https://alpaca.markets/",
+  "repository": "https://github.com/alpacahq/alpaca-mcp-server",
+  "documentation": "https://github.com/alpacahq/alpaca-mcp-server#readme",
+  "categories": ["finance", "trading", "data", "api"],
+  "tags": ["alpaca", "stocks", "options", "crypto", "portfolio", "market-data"],
+  "privacy_policies": ["https://s3.amazonaws.com/files.alpaca.markets/disclosures/PrivacyPolicy.pdf"],
+
+  "installation": {
+    "uvx": "alpaca-mcp-server",
+    "pypi": "alpaca-mcp-server",
+    "github": "git+https://github.com/alpacahq/alpaca-mcp-server.git"
+  },
+
+  "configuration": {
+    "required_env_vars": [
+      {
+        "name": "ALPACA_API_KEY",
+        "description": "Alpaca API key for trading account access",
+        "sensitive": true
+      },
+      {
+        "name": "ALPACA_SECRET_KEY",
+        "description": "Alpaca secret key for trading account access",
+        "sensitive": true
+      }
+    ],
+    "optional_env_vars": [
+      {
+        "name": "ALPACA_TOOLSETS",
+        "description": "Comma-separated list of toolsets to enable (e.g. account,trading,stock-data). All enabled by default.",
+        "default": ""
+      }
+    ]
+  },
+
+  "toolsets": {
+    "account": ["get_account_info", "get_account_config", "update_account_config", "get_portfolio_history", "get_account_activities", "get_account_activities_by_type"],
+    "trading": ["get_orders", "get_order_by_id", "get_order_by_client_id", "replace_order_by_id", "cancel_order_by_id", "cancel_all_orders", "get_all_positions", "get_open_position", "close_position", "close_all_positions", "exercise_options_position", "do_not_exercise_options_position", "place_stock_order", "place_crypto_order", "place_option_order"],
+    "watchlists": ["get_watchlists", "create_watchlist", "get_watchlist_by_id", "update_watchlist_by_id", "delete_watchlist_by_id", "add_asset_to_watchlist_by_id", "remove_asset_from_watchlist_by_id"],
+    "assets": ["get_all_assets", "get_asset", "get_option_contracts", "get_option_contract", "get_calendar", "get_clock", "get_corporate_action_announcements", "get_corporate_action_announcement"],
+    "stock-data": ["get_stock_bars", "get_stock_quotes", "get_stock_trades", "get_stock_latest_bar", "get_stock_latest_quote", "get_stock_latest_trade", "get_stock_snapshot", "get_most_active_stocks", "get_market_movers"],
+    "crypto-data": ["get_crypto_bars", "get_crypto_quotes", "get_crypto_trades", "get_crypto_latest_bar", "get_crypto_latest_quote", "get_crypto_latest_trade", "get_crypto_snapshot", "get_crypto_latest_orderbook"],
+    "options-data": ["get_option_bars", "get_option_trades", "get_option_latest_trade", "get_option_latest_quote", "get_option_snapshot", "get_option_chain", "get_option_exchange_codes"],
+    "corporate-actions": ["get_corporate_actions"]
+  },
+
+  "capabilities": {
+    "real_time_data": true,
+    "historical_data": true,
+    "order_management": true,
+    "portfolio_management": true,
+    "options_trading": true,
+    "crypto_trading": true,
+    "market_data": true,
+    "paper_trading": true,
+    "live_trading": true,
+    "watchlist_management": true,
+    "corporate_actions": true,
+    "market_calendar": true,
+    "toolset_filtering": true
+  },
+
+  "requirements": {
+    "python": ">=3.10",
+    "alpaca_account": "Required - Free paper trading or paid live account"
+  }
+}
