@@ -102,15 +102,16 @@ services:
     networks:
       - net-execution
 
-  # alpaca-mcp — Alpaca's OFFICIAL MCP server (alpacahq/alpaca-mcp-server),
-  # vendored + patched (upstream Dockerfile COPYs a .github/core/ dir that
-  # doesn't exist in a plain clone, and ships no non-root user — both
-  # fixed here). Paper trading by default (ALPACA_PAPER_TRADE=true).
-  # ALPACA_TOOLSETS restricts to trading+account+stock-data — no
-  # crypto/options (plan is long-only equities) and no news/corporate-
-  # actions toolsets (we already have google-news-rss for sentiment;
-  # two overlapping sentiment sources would just confuse which one
-  # Hermes' skills are supposed to trust).
+  # alpaca-mcp — OUR OWN tool (place_order, get_positions, get_order_status)
+  # over Alpaca's Paper Trading API. Rebuilt after the official
+  # alpacahq/alpaca-mcp-server turned out to bundle stock/crypto/options
+  # order placement into one tool with no config-level way to restrict to
+  # stocks only (confirmed via their code AND via Alpaca's own dashboard —
+  # the account-level options-trading-level setting doesn't touch crypto
+  # either). This tool structurally can't place a crypto/options order:
+  # that code was never written, not "disabled." Always paper (hardcoded
+  # base URL, no live-mode flag to misconfigure). See
+  # project_hermes_trading_agent memory for the full decision history.
   alpaca-mcp:
     build:
       context: ./alpaca-mcp
@@ -118,9 +119,6 @@ services:
     restart: unless-stopped
     networks:
       - net-execution
-    environment:
-      - ALPACA_PAPER_TRADE=true
-      - ALPACA_TOOLSETS=trading,account,stock-data
     env_file:
       - .env
 
