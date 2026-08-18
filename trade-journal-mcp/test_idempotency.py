@@ -19,6 +19,9 @@ async def main():
     decision = await _record_decision(
         ticker="TEST.NS", action="BUY", intended_quantity=1,
         intended_notional=100.0, order_type="MARKET",
+        confidence=3, primary_signal="technical", technical_basis="rsi",
+        expected_reward_risk=2.5,
+        invalidation_condition="idempotency test -- not a real trade",
     )
     decision_id = decision["decision_id"]
     print(f"created pending decision {decision_id}")

@@ -1,5 +1,6 @@
 """MCP tool registrations for technical. Top layer: imports service and below."""
 
+from datetime import date
 from typing import Any
 
 from fastmcp import FastMCP
@@ -29,15 +30,24 @@ def _require_service() -> TechnicalService:
 
 
 async def technical_get_rsi_analysis(
-    ticker: str, period: int | None = None, days: int | None = None
+    ticker: str,
+    period: int | None = None,
+    days: int | None = None,
+    as_of: str | None = None,
 ) -> dict[str, Any]:
     """RSI reading and signal label for `ticker`.
 
     `period`/`days` left `None` fall back to `TechnicalSettings` defaults.
+    `as_of` (YYYY-MM-DD) left `None` means "today" (live, unchanged
+    behavior) -- pass a past date for point-in-time backtest fetches;
+    nothing timestamped after it can be returned.
     """
     try:
         service = _require_service()
-        result = await service.get_rsi(ticker, days=days, period=period)
+        result = await service.get_rsi(
+            ticker, days=days, period=period,
+            as_of=date.fromisoformat(as_of) if as_of else None,
+        )
         payload = result.model_dump()
         payload["ticker"] = ticker.upper()
         payload["status"] = "success"
@@ -52,10 +62,13 @@ async def technical_get_macd_analysis(
     slow_period: int | None = None,
     signal_period: int | None = None,
     days: int | None = None,
+    as_of: str | None = None,
 ) -> dict[str, Any]:
     """MACD reading, signal label, and crossover state for `ticker`.
 
     Any period left `None` falls back to its `TechnicalSettings` default.
+    `as_of` (YYYY-MM-DD) left `None` means "today"; pass a past date for
+    point-in-time backtest fetches.
     """
     try:
         service = _require_service()
@@ -65,6 +78,7 @@ async def technical_get_macd_analysis(
             fast_period=fast_period,
             slow_period=slow_period,
             signal_period=signal_period,
+            as_of=date.fromisoformat(as_of) if as_of else None,
         )
         payload = result.model_dump()
         payload["ticker"] = ticker.upper()
@@ -75,15 +89,19 @@ async def technical_get_macd_analysis(
 
 
 async def technical_get_support_resistance(
-    ticker: str, days: int | None = None
+    ticker: str, days: int | None = None, as_of: str | None = None
 ) -> dict[str, Any]:
     """Support/resistance levels for `ticker` (simple lookback-window algorithm).
 
     `days` left `None` falls back to `TechnicalSettings.default_days`.
+    `as_of` (YYYY-MM-DD) left `None` means "today"; pass a past date for
+    point-in-time backtest fetches.
     """
     try:
         service = _require_service()
-        result = await service.get_support_resistance(ticker, days=days)
+        result = await service.get_support_resistance(
+            ticker, days=days, as_of=date.fromisoformat(as_of) if as_of else None
+        )
         payload = result.model_dump()
         payload["ticker"] = ticker.upper()
         payload["status"] = "success"
@@ -93,15 +111,19 @@ async def technical_get_support_resistance(
 
 
 async def technical_get_full_technical_analysis(
-    ticker: str, days: int | None = None
+    ticker: str, days: int | None = None, as_of: str | None = None
 ) -> dict[str, Any]:
     """Full technical analysis for `ticker`: trend, outlook, and every indicator.
 
     `days` left `None` falls back to `TechnicalSettings.default_days`.
+    `as_of` (YYYY-MM-DD) left `None` means "today"; pass a past date for
+    point-in-time backtest fetches.
     """
     try:
         service = _require_service()
-        result = await service.get_full_analysis(ticker, days=days)
+        result = await service.get_full_analysis(
+            ticker, days=days, as_of=date.fromisoformat(as_of) if as_of else None
+        )
         payload = result.model_dump()
         payload["status"] = "success"
         return payload

@@ -242,6 +242,60 @@ async def test_large_days_override_extends_the_window():
 
 
 # ---------------------------------------------------------------------------
+# as_of: point-in-time fetches for backtesting (no-future-data gate)
+# ---------------------------------------------------------------------------
+
+
+async def test_as_of_none_still_fetches_up_to_today():
+    """Unchanged default behavior -- the live path never passes as_of."""
+    market_data = StubMarketData(_bullish_frame())
+    service = TechnicalService(market_data)
+
+    await service.get_rsi("AAPL")
+
+    _, _, end = market_data.calls[0]
+    assert end == date.today()
+
+
+async def test_as_of_past_date_bounds_the_fetch_end_not_today():
+    """The actual no-future-data guarantee: a backtest cycle simulating a
+    date in the past must never have its fetch window reach real 'today',
+    or tomorrow's real price could leak into a decision about a past date."""
+    market_data = StubMarketData(_bullish_frame())
+    service = TechnicalService(market_data)
+    simulated_now = date(2023, 6, 15)
+
+    await service.get_rsi("AAPL", as_of=simulated_now)
+
+    _, _, end = market_data.calls[0]
+    assert end == simulated_now
+    assert end != date.today()
+
+
+async def test_as_of_propagates_from_every_exposed_method():
+    """Every method the backtest harness actually calls threads as_of
+    through -- not just get_rsi. Each of these routes through the same
+    _prepared_frame, so one shared assertion per method is enough to catch
+    a method that was missed when wiring this through."""
+    simulated_now = date(2022, 1, 10)
+
+    market_data = StubMarketData(_bullish_frame())
+    service = TechnicalService(market_data)
+    await service.get_macd("AAPL", as_of=simulated_now)
+    assert market_data.calls[-1][2] == simulated_now
+
+    market_data = StubMarketData(_bullish_frame())
+    service = TechnicalService(market_data)
+    await service.get_support_resistance("AAPL", as_of=simulated_now)
+    assert market_data.calls[-1][2] == simulated_now
+
+    market_data = StubMarketData(_bullish_frame())
+    service = TechnicalService(market_data)
+    await service.get_full_analysis("AAPL", as_of=simulated_now)
+    assert market_data.calls[-1][2] == simulated_now
+
+
+# ---------------------------------------------------------------------------
 # period overrides
 # ---------------------------------------------------------------------------
 

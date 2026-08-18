@@ -5,3 +5,18 @@
 __pycache__/
 *.pyc
 .venv/
+
+# Runtime state, not source -- these get written by running the harness,
+# never commit them
+quota_pacer_state.json
+backtest_state.json
+
+# Auto-installed third-party skill plugin (Leonxlnx/taste-skill), unrelated
+# to this project -- not our source, don't want it in this repo's history
+.agents/
+.claude/
+skills-lock.json
+
+# Old diagram source, already published separately as a Claude Artifact --
+# scratch work, not project source
+scratchpad/

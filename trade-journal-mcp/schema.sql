@@ -20,15 +20,47 @@ CREATE TABLE IF NOT EXISTS trades (
     fill_price          NUMERIC(14, 2),
     fill_quantity       INTEGER,
     rejection_reason    TEXT,
-    -- Which execution tool actually produced this fill — 'simulated' while
-    -- Upstox Sandbox signup is blocked (OTP delivery issue), 'upstox_sandbox'
-    -- once swapped in. Read this before trusting any pattern reflection
-    -- draws from trade history: a lesson learned under 'simulated' (e.g.
-    -- "LIMIT orders always fill instantly") may be an artifact of the sim's
-    -- simplified fill logic, not a real trading pattern.
+    -- Which execution tool actually produced this fill. 'alpaca' = real
+    -- paper-trading API. 'simulated' = execution-sim-mcp used ad hoc for
+    -- manual dev testing (pre-dates Alpaca; kept for local testing without
+    -- burning real API calls). 'backtest' = execution-sim-mcp's historical-
+    -- fill mode, driving real backtest volume. Distinguishing 'simulated'
+    -- from 'backtest' matters: without it, a handful of leftover manual
+    -- dev-test rows would be indistinguishable from the thousands of real
+    -- backtest decisions once that runs, corrupting any query over "what
+    -- did the backtest actually produce." Read this field before trusting
+    -- any pattern reflection draws from trade history: a lesson learned
+    -- under 'simulated' or 'backtest' (e.g. "LIMIT orders always fill
+    -- instantly") may be an artifact of the sim's simplified fill logic,
+    -- not a real trading pattern.
     execution_mode      TEXT NOT NULL DEFAULT 'simulated'
-                             CHECK (execution_mode IN ('simulated', 'alpaca')),
+                             CHECK (execution_mode IN ('simulated', 'alpaca', 'backtest')),
     strategy_notes      TEXT,
+    -- Structured "report card" fields, added on top of strategy_notes so
+    -- eval questions like "did high-confidence trades actually win more?"
+    -- are a single query instead of reading every trade's prose by hand.
+    -- Nullable at the DB level (existing rows predate these columns, and
+    -- an ALTER TABLE ADD COLUMN ... NOT NULL would fail against them) --
+    -- "required" is enforced in server.py's record_decision instead, so
+    -- every NEW decision must supply them without needing a data backfill.
+    confidence           SMALLINT CHECK (confidence BETWEEN 1 AND 5),
+    -- What actually drove the decision. 'other' is a legitimate, trackable
+    -- answer -- never force a bad fit into technical/sentiment/both; see
+    -- server.py's validation for the requirement that 'other' must come
+    -- with an explanation in strategy_notes.
+    primary_signal        TEXT CHECK (primary_signal IN ('technical', 'sentiment', 'both', 'other')),
+    -- Which specific maverick-mcp signal, when primary_signal touches
+    -- technical -- ties eval directly to a real tool output, not vague
+    -- prose. Same 'other' escape hatch as primary_signal.
+    technical_basis       TEXT CHECK (technical_basis IN ('rsi', 'macd', 'support_resistance', 'trend', 'multiple', 'other')),
+    -- The reward:risk ratio actually calculated for this trade -- lets
+    -- RULES.md §6b's 2:1 minimum be verified after the fact with a query,
+    -- not by re-deriving it from entry/stop/target by hand.
+    expected_reward_risk  NUMERIC(6, 2) CHECK (expected_reward_risk > 0),
+    -- One sentence: what would prove this trade wrong. RULES.md §6d --
+    -- lets a later reflection check whether the predicted failure mode
+    -- matched the trade's actual exit reason.
+    invalidation_condition TEXT,
     -- §6c: source-of-truth timestamps for whatever data justified this
     -- decision (technical/sentiment feed timestamps), not just created_at.
     data_timestamps     JSONB,
@@ -47,12 +79,46 @@ CREATE TABLE IF NOT EXISTS insight_log (
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+-- agent_activity — step-by-step narration of what Hermes is doing right
+-- now (fetching data, reasoning, checking risk, placing an order, etc.),
+-- separate from trades (outcomes) and insight_log (weekly reflection
+-- prose). This is what a live "what is Hermes up to" dashboard view reads
+-- from. event_type is free text, not a locked CHECK enum — the real
+-- vocabulary of steps doesn't exist yet (depends on how SOUL.md is
+-- designed to narrate itself), so this stays flexible rather than
+-- guessing a fixed list now. decision_id is nullable and only set when
+-- an event is tied to a specific trade decision (most early-cycle events,
+-- like "fetched quote," aren't tied to one yet).
+CREATE TABLE IF NOT EXISTS agent_activity (
+    id            BIGSERIAL PRIMARY KEY,
+    decision_id   UUID REFERENCES trades(decision_id),
+    event_type    TEXT NOT NULL,
+    description   TEXT NOT NULL,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
 CREATE INDEX IF NOT EXISTS idx_insight_log_cycle_type ON insight_log(cycle_type);
+CREATE INDEX IF NOT EXISTS idx_agent_activity_created_at ON agent_activity(created_at);
 
 -- §7: dashboard reads via Neon's Data API using the anonymous role,
 -- SELECT only — no write grant, ever, from the browser side. This tool
 -- (trade-journal-mcp) writes using the full-credential NEON_DATABASE_URL
 -- from .env instead, never the anonymous role.
-GRANT SELECT ON trades, insight_log TO anonymous;
+-- SELECT on the tables isn't enough by itself — Postgres also needs
+-- schema-level USAGE granted separately, or the anonymous role can't
+-- even see into the schema to run the SELECT it was granted.
+GRANT USAGE ON SCHEMA public TO anonymous;
+GRANT SELECT ON trades, insight_log, agent_activity TO anonymous;
+
+-- Neon's Data API refuses anonymous access to any table without RLS
+-- enabled, as a safety-by-default measure — GRANT alone isn't enough.
+-- USING (true) means "no row filtering, expose every row" since we
+-- want the whole journal visible, not a per-user filtered view.
+ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
+ALTER TABLE insight_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE agent_activity ENABLE ROW LEVEL SECURITY;
+CREATE POLICY anonymous_read_trades ON trades FOR SELECT TO anonymous USING (true);
+CREATE POLICY anonymous_read_insight_log ON insight_log FOR SELECT TO anonymous USING (true);
+CREATE POLICY anonymous_read_agent_activity ON agent_activity FOR SELECT TO anonymous USING (true);

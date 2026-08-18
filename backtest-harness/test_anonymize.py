@@ -1,0 +1,208 @@
+"""Proof the no-trained-memory gate actually strips what it claims to.
+
+Every case here is adversarial in the way a real payload is: names nested
+inside longer names, mixed date formats, identifiers hiding in fields nobody
+thinks about (`symbols`, URLs, metadata). Run: python test_anonymize.py
+"""
+from datetime import date
+
+from anonymize import LeakDetected, RunMasking
+
+NAMES = {
+    "AAPL": ["Apple Inc.", "Apple"],
+    "MSFT": ["Microsoft Corporation", "Microsoft"],
+}
+RUN_START = date(2023, 1, 3)
+
+
+def _masker(seed: int = 7) -> RunMasking:
+    return RunMasking(NAMES, run_start=RUN_START, seed=seed)
+
+
+def test_alias_identity():
+    m = _masker()
+    # Stable within a run, and round-trips back to the real ticker so the
+    # harness can execute the decision against the real instrument.
+    assert m.alias("AAPL") == m.alias("AAPL")
+    assert m.real(m.alias("AAPL")) == "AAPL"
+    assert m.alias("AAPL") != m.alias("MSFT")
+    # Aliases carry no information about the real ticker.
+    assert "AAPL" not in m.alias("AAPL")
+
+    # Different runs must not reuse the same mapping, or the mapping itself
+    # becomes learnable across runs.
+    seeds = {RunMasking(NAMES, RUN_START, seed=s).alias("AAPL") for s in range(12)}
+    assert len(seeds) > 1, "alias assignment is not run-dependent"
+
+
+def test_day_index_replaces_calendar_date():
+    m = _masker()
+    assert m.day_index(date(2023, 1, 3)) == "Day 1"
+    assert m.day_index(date(2023, 1, 13)) == "Day 11"
+
+
+def test_mask_text_strips_tickers_and_names():
+    m = _masker()
+    alias = m.alias("AAPL")
+
+    assert m.mask_text("AAPL rallied") == f"{alias} rallied"
+    assert m.mask_text("Apple rallied") == f"{alias} rallied"
+    # Case-insensitive: real headlines are not consistently cased.
+    assert m.mask_text("apple rallied") == f"{alias} rallied"
+
+    # The nesting trap: "Apple" lives inside "Apple Inc.". Longest-first
+    # replacement must consume the whole name, not leave a dangling "Inc."
+    masked = m.mask_text("Apple Inc. beat estimates")
+    assert masked == f"{alias} beat estimates", masked
+    assert "Inc." not in masked
+
+
+def test_mask_text_redacts_every_date_shape():
+    m = _masker()
+    for raw in (
+        "reported on 2023-06-15",
+        "reported on 6/15/2023",
+        "reported on June 15, 2023",
+        "reported on Jun. 15 2023",
+    ):
+        masked = m.mask_text(raw)
+        assert "2023" not in masked, (raw, masked)
+        assert "REDACTED" in masked, (raw, masked)
+
+    # Fiscal/quarter references are retrieval cues too.
+    assert "2023" not in m.mask_text("Q2 2023 guidance")
+    # A bare year with no surrounding date still identifies the period.
+    assert "2023" not in m.mask_text("the best year since 2023")
+
+
+def test_mask_news_strips_identity_but_keeps_signal():
+    m = _masker()
+    alias = m.alias("AAPL")
+    articles = [
+        {
+            "headline": "Apple (AAPL) beats Q2 2023 estimates",
+            "summary": "Apple Inc. reported on 2023-06-15 that revenue rose.",
+            "created_at": "2023-06-13T14:30:00Z",
+            "symbols": ["AAPL"],
+            "source_url": "https://benzinga.com/news/23/06/apple-earnings-beat",
+        }
+    ]
+
+    masked = m.mask_news(articles, as_of=date(2023, 6, 15))[0]
+
+    # Identity gone from every field, including the ones easy to forget.
+    assert "Apple" not in str(masked) and "AAPL" not in str(masked)
+    assert masked["symbols"] == [alias]
+    # The URL embeds both company slug and date -- must not survive at all.
+    assert "source_url" not in masked
+
+    # Signal kept: recency is real information Hermes should weigh, so the
+    # absolute date becomes relative age rather than being dropped.
+    assert masked["age_days"] == 2
+    assert "beats" in masked["headline"]
+    assert "revenue rose" in masked["summary"]
+
+    m.assert_clean(masked)
+
+
+def test_mask_technicals_keeps_every_number_untouched():
+    """The research warning made concrete: masking identity must not touch
+    prices/indicators, or position sizing and support/resistance reasoning
+    lose the data they depend on."""
+    m = _masker()
+    payload = {
+        "ticker": "AAPL",
+        "status": "success",
+        "current_price": 187.42,
+        "rsi": 28.6,
+        "levels": {"support": [180.15, 176.4], "resistance": [192.8]},
+        "analysis_metadata": {"bars_analyzed": 247, "as_of": "2023-06-15"},
+    }
+
+    masked = m.mask_technicals(payload, as_of=date(2023, 6, 15))
+
+    assert masked["ticker"] == m.alias("AAPL")
+    assert masked["analysis_metadata"]["as_of"] == "Day 164"
+    # Every number survives exactly.
+    assert masked["current_price"] == 187.42
+    assert masked["rsi"] == 28.6
+    assert masked["levels"] == {"support": [180.15, 176.4], "resistance": [192.8]}
+    assert masked["analysis_metadata"]["bars_analyzed"] == 247
+    # Input not mutated in place -- the harness still needs the real payload
+    # to record the true ticker in the trade journal afterwards.
+    assert payload["ticker"] == "AAPL"
+
+    m.assert_clean(masked)
+
+
+def test_assert_clean_catches_real_leaks():
+    m = _masker()
+
+    # A field that skipped the masker entirely -- the realistic failure mode
+    # when a new tool gets wired in.
+    try:
+        m.assert_clean({"headline": "ALPHA rose", "note": "per Apple's filing"})
+        raise AssertionError("leaked company name was not detected")
+    except LeakDetected:
+        pass
+
+    try:
+        m.assert_clean({"headline": "AAPL rose"})
+        raise AssertionError("leaked ticker was not detected")
+    except LeakDetected:
+        pass
+
+    try:
+        m.assert_clean({"note": "strongest since 2023"})
+        raise AssertionError("leaked year was not detected")
+    except LeakDetected:
+        pass
+
+
+def test_brand_and_counterparty_names_are_maskable_via_config():
+    """Empirical finding from real Benzinga headlines: for well-known names,
+    brands and deal counterparties leak identity harder than the company
+    name itself -- "Xbox's Matt Booty" and "Microsoft, Activision Ask U.S.
+    Judge..." both identify the company AND pin the period, while the word
+    "Microsoft" is the easy part.
+
+    The fix is config, not code: the masker already accepts arbitrary
+    variant lists, so brands/subsidiaries/counterparties belong in `names`.
+    This test locks that in -- and, by needing to be extended by hand for
+    every new brand, documents exactly why this gate is necessary-but-not-
+    sufficient and needs the detection layer behind it.
+    """
+    m = RunMasking(
+        {"MSFT": ["Microsoft Corporation", "Microsoft", "Xbox", "Activision"]},
+        run_start=RUN_START,
+        seed=3,
+    )
+    alias = m.alias("MSFT")
+
+    masked = m.mask_text("Xbox's Matt Booty assures Microsoft's brand turned the corner")
+    assert "Xbox" not in masked and "Microsoft" not in masked, masked
+    assert masked.count(alias) == 2, masked
+
+    masked = m.mask_text("Microsoft, Activision ask U.S. judge to expedite FTC challenge")
+    assert "Activision" not in masked, masked
+    m.assert_clean(masked)
+
+
+def test_assert_clean_does_not_false_alarm_on_prices():
+    """Regression: a share price near $2023 must not be mistaken for a
+    leaked calendar year and halt a legitimate cycle."""
+    m = _masker()
+    m.assert_clean({"ticker": "ALPHA", "current_price": 2023.40, "volume": 1995})
+
+
+def main():
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_"):
+            fn()
+            print(f"  ok  {name}")
+    print("PASS: no-trained-memory gate strips identity, keeps signal, "
+          "and fails loudly on leaks")
+
+
+if __name__ == "__main__":
+    main()

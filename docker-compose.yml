@@ -31,6 +31,17 @@ services:
       - net-execution
     volumes:
       - ${USERPROFILE}/.hermes-trading-agent:/opt/data
+      # SOUL.md (identity), AGENTS.md (procedure), RULES.md (the risk layer)
+      # live in this repo so they're version-controlled, and are mounted
+      # READ-ONLY so no reflection cycle can quietly rewrite its own risk
+      # limits or identity — RULES.md's own header specifies exactly this.
+      # SOUL.md must sit at HERMES_HOME root; AGENTS.md/RULES.md must sit in
+      # the working dir Hermes runs cycles from (/opt/data/workspace), which
+      # is where the context tier picks up project files. Verified by real
+      # load-test, not assumed.
+      - ./SOUL.md:/opt/data/SOUL.md:ro
+      - ./AGENTS.md:/opt/data/workspace/AGENTS.md:ro
+      - ./RULES.md:/opt/data/workspace/RULES.md:ro
     environment:
       - HERMES_UID=10000
       - HERMES_GID=10000
@@ -121,6 +132,12 @@ services:
       - net-execution
     env_file:
       - .env
+    volumes:
+      # Mounted, not COPYed: one risk_checker and one watchlist for the
+      # whole project. A per-container copy would be a second source of
+      # truth for the rules — exactly the drift this project keeps fixing.
+      - ./risk-checker/risk_checker.py:/app/risk_checker.py:ro
+      - ./watchlist/watchlist.json:/app/watchlist.json:ro
 
 networks:
   net-maverick:

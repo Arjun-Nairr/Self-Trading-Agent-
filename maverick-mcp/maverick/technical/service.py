@@ -170,11 +170,23 @@ class TechnicalService:
             ) from exc
 
     async def _prepared_frame(
-        self, ticker: str, days: int | None, settings: TechnicalSettings
+        self,
+        ticker: str,
+        days: int | None,
+        settings: TechnicalSettings,
+        as_of: date | None = None,
     ) -> pd.DataFrame:
         """Fetch a calendar-padded history window and merge every indicator
-        column onto it (see `_prepare_frame`)."""
-        end = date.today()
+        column onto it (see `_prepare_frame`).
+
+        `as_of` left `None` means "today" -- the original, unchanged live
+        behavior. Passing a past date makes this a point-in-time fetch (for
+        backtesting): `get_price_history` already resolves its `end` bound
+        to real trading days and only ever reads/fetches within
+        [start, end], so nothing timestamped after `as_of` can reach the
+        returned frame -- no separate future-data filtering needed here.
+        """
+        end = as_of or date.today()
         requested = days if days is not None else settings.default_days
         calendar_days = max(requested, _MIN_HISTORY_CALENDAR_DAYS)
         start = end - timedelta(days=calendar_days)
@@ -184,14 +196,18 @@ class TechnicalService:
     # -- single-indicator getters ------------------------------------------
 
     async def get_rsi(
-        self, ticker: str, days: int | None = None, period: int | None = None
+        self,
+        ticker: str,
+        days: int | None = None,
+        period: int | None = None,
+        as_of: date | None = None,
     ) -> RSIAnalysis:
         settings = self._settings
         if period is not None:
             settings = settings.model_copy(update={"rsi_period": period})
 
         async def _impl() -> RSIAnalysis:
-            df = await self._prepared_frame(ticker, days, settings)
+            df = await self._prepared_frame(ticker, days, settings, as_of)
             _require(df, ticker, ("Close", "rsi"), "RSI")
             return analyze_rsi(df, settings)
 
@@ -204,6 +220,7 @@ class TechnicalService:
         fast_period: int | None = None,
         slow_period: int | None = None,
         signal_period: int | None = None,
+        as_of: date | None = None,
     ) -> MACDAnalysis:
         overrides: dict[str, int] = {}
         if fast_period is not None:
@@ -217,7 +234,7 @@ class TechnicalService:
         )
 
         async def _impl() -> MACDAnalysis:
-            df = await self._prepared_frame(ticker, days, settings)
+            df = await self._prepared_frame(ticker, days, settings, as_of)
             _require(df, ticker, ("Close", "macd", "macd_signal", "macd_hist"), "MACD")
             return analyze_macd(df, settings)
 
@@ -288,12 +305,12 @@ class TechnicalService:
         return await self._run(_impl())
 
     async def get_support_resistance(
-        self, ticker: str, days: int | None = None
+        self, ticker: str, days: int | None = None, as_of: date | None = None
     ) -> LevelsResult:
         settings = self._settings
 
         async def _impl() -> LevelsResult:
-            df = await self._prepared_frame(ticker, days, settings)
+            df = await self._prepared_frame(ticker, days, settings, as_of)
             _require(df, ticker, ("Close", "High", "Low"), "support/resistance levels")
             return support_resistance(df, settings)
 
@@ -312,12 +329,12 @@ class TechnicalService:
     # -- composite ------------------------------------------------------------
 
     async def get_full_analysis(
-        self, ticker: str, days: int | None = None
+        self, ticker: str, days: int | None = None, as_of: date | None = None
     ) -> FullTechnicalAnalysis:
         settings = self._settings
 
         async def _impl() -> FullTechnicalAnalysis:
-            df = await self._prepared_frame(ticker, days, settings)
+            df = await self._prepared_frame(ticker, days, settings, as_of)
             _require(df, ticker, ("Close", "sma_long"), "full technical analysis")
 
             trend = analyze_trend(df, settings)
