@@ -137,6 +137,11 @@ class Portfolio:
     )
     closed_pnl: list[float] = field(default_factory=list)
     stopped_out_today: list[str] = field(default_factory=list)
+    # Persisted, not a local loop variable -- the harness is invoked as a
+    # separate process per run (--days N each time, resumed from state), so
+    # a plain in-memory counter would reset every invocation and "every 5
+    # cycles" would never mean anything real across runs.
+    cycles_since_reflection: int = 0
 
     def equity(self, prices: dict[str, dict]) -> float:
         held = sum(
@@ -172,6 +177,7 @@ class Portfolio:
             "holdings": {t: vars(h) for t, h in self.holdings.items()},
             "equity_curve": self.equity_curve,
             "closed_pnl": self.closed_pnl,
+            "cycles_since_reflection": self.cycles_since_reflection,
         }
 
     @classmethod
@@ -181,6 +187,8 @@ class Portfolio:
             holdings={t: Holding(**h) for t, h in d["holdings"].items()},
             equity_curve=d["equity_curve"],
             closed_pnl=d["closed_pnl"],
+            # .get(): old state files predate this field.
+            cycles_since_reflection=d.get("cycles_since_reflection", 0),
         )
 
 
@@ -315,14 +323,205 @@ asyncio.run(main())
     return json_from(run_in("trade-journal", script))["decision_id"]
 
 
+def record_exit(real_ticker: str, quantity: int, exit_price: float, reason: str) -> str:
+    """Journal a mechanical exit (stop/target/time-stop) as a real SELL row.
+
+    Found missing by actually checking the dashboard against real data, not
+    assumed: mechanical exits updated the harness's own portfolio and wrote
+    an activity narration line, but never touched the `trades` table at
+    all. That's not just a dashboard bug -- it means the journal, the
+    project's actual source of truth, had no record of how a position
+    resolved. `record_trade` doesn't fit here (it's shaped around a
+    Hermes-authored entry decision with real confidence/reasoning); this is
+    its mechanical-exit counterpart, tagged 'other' honestly rather than
+    inventing a fake technical thesis for a stop firing.
+    """
+    script = f'''
+import asyncio, json
+from server import _record_decision, _record_execution_result
+
+async def main():
+    d = await _record_decision(
+        ticker={real_ticker!r}, action="SELL",
+        intended_quantity={int(quantity)},
+        intended_notional={float(quantity) * float(exit_price)},
+        order_type="MARKET",
+        confidence=5, primary_signal="other", technical_basis=None,
+        expected_reward_risk=1.0,
+        invalidation_condition="n/a -- mechanical exit, not a discretionary decision",
+        strategy_notes={f"Mechanical exit: {reason}"!r},
+    )
+    await _record_execution_result(
+        d["decision_id"], status="filled",
+        fill_price={float(exit_price)!r}, fill_quantity={int(quantity)},
+        execution_mode="backtest",
+    )
+    print(json.dumps({{"decision_id": str(d["decision_id"])}}))
+
+asyncio.run(main())
+'''
+    return json_from(run_in("trade-journal", script))["decision_id"]
+
+
+def log_activity(events: list[tuple[str, str, str | None]]) -> None:
+    """Narrate a cycle's real steps on Hermes' behalf.
+
+    Backtest cycles never call log_activity themselves -- Hermes doesn't
+    touch its own tools in backtest mode at all (see the module docstring:
+    calling the data tools directly would bypass both safety gates). That
+    means without this, agent_activity -- the table built specifically for
+    "what is Hermes doing right now" -- would sit permanently empty for
+    every training cycle, and the dashboard's whole point-of-the-exercise
+    fold would just be blank. The harness knows every real step already;
+    this narrates them the same way Hermes would live, in one batched call
+    per cycle rather than one container exec per event.
+    """
+    if not events:
+        return
+    rows = ", ".join(
+        f"({event_type!r}, {description[:900]!r}, {decision_id!r})"
+        for event_type, description, decision_id in events
+    )
+    script = f'''
+import asyncio
+from server import _log_activity
+
+async def main():
+    for event_type, description, decision_id in [{rows}]:
+        await _log_activity(event_type, description, decision_id, mode="backtest")
+
+asyncio.run(main())
+'''
+    run_in("trade-journal", script)
+
+
+def record_snapshot(day_label: str, equity: float, cash: float,
+                    exposure_pct: float, drawdown_pct: float,
+                    open_positions: int) -> None:
+    """Write once per cycle, after marking positions to market. This is the
+    only source of equity-over-time data the dashboard has -- the harness
+    otherwise only ever tracks its portfolio in the local state file, which
+    a browser reading Neon has no way to see."""
+    script = f'''
+import asyncio
+from server import _record_portfolio_snapshot
+
+async def main():
+    await _record_portfolio_snapshot(
+        mode="backtest", equity={equity!r}, cash={cash!r},
+        exposure_pct={exposure_pct!r}, drawdown_pct={drawdown_pct!r},
+        day_label={day_label!r}, open_positions={open_positions},
+    )
+
+asyncio.run(main())
+'''
+    run_in("trade-journal", script)
+
+
+def fetch_recent_insights(limit: int = 2) -> list[str]:
+    """The feed-back half of reflection: past insight text, injected into
+    EVERY prompt (not just reflection days) so learning actually changes
+    later behaviour. Writing to insight_log without this would just be
+    journaling into a void -- the whole point of "self-learning" is that
+    cycle N+5 reasons differently because of what cycle N produced."""
+    script = f'''
+import asyncio, json
+from server import _get_insight_history
+
+async def main():
+    rows = await _get_insight_history(cycle_type="weekly_reflection", limit={limit})
+    print(json.dumps([r["insight_text"] for r in rows], default=str))
+
+asyncio.run(main())
+'''
+    return json_from_list(run_in("trade-journal", script))
+
+
+def record_insight(text: str) -> None:
+    script = f'''
+import asyncio
+from server import _log_insight
+
+async def main():
+    await _log_insight("weekly_reflection", {text!r})
+
+asyncio.run(main())
+'''
+    run_in("trade-journal", script)
+
+
+def fetch_recent_closed_trades(masking: "RunMasking", limit: int = 8) -> list[dict]:
+    """Masked review material for a reflection cycle -- real tickers never
+    leave this function. Pairs BUY/SELL by ticker (RULES.md §9.1 guarantees
+    one open lot per ticker, so simple sequential pairing is exact, not an
+    approximation -- same logic as the dashboard's pairTrades, in Python
+    here since this runs harness-side, not in a browser).
+    """
+    script = f'''
+import asyncio, json
+from server import _get_trade_history
+
+async def main():
+    rows = await _get_trade_history(limit=200)
+    rows = [r for r in rows if r.get("execution_mode") == "backtest"]
+    print(json.dumps(rows, default=str))
+
+asyncio.run(main())
+'''
+    rows = json_from_list(run_in("trade-journal", script))
+    rows.sort(key=lambda r: r["created_at"])  # oldest first, for correct pairing
+
+    by_ticker: dict[str, list[dict]] = {}
+    for r in rows:
+        by_ticker.setdefault(r["ticker"], []).append(r)
+
+    closed = []
+    for ticker, trades in by_ticker.items():
+        entry = None
+        for t in trades:
+            if t["status"] != "filled":
+                continue
+            if t["action"] == "BUY":
+                entry = t
+            elif t["action"] == "SELL" and entry:
+                pnl = (float(t["fill_price"]) - float(entry["fill_price"])) * float(entry["fill_quantity"])
+                closed.append({
+                    "alias": masking.alias(ticker),
+                    "invalidation_condition": entry.get("invalidation_condition", ""),
+                    "confidence": entry.get("confidence"),
+                    "exit_reason": (t.get("strategy_notes") or "").replace("Mechanical exit: ", ""),
+                    "pnl": round(pnl, 2),
+                    "won": pnl >= 0,
+                })
+                entry = None
+    return closed[-limit:]
+
+
+def json_from_list(text: str) -> list:
+    start, end = text.find("["), text.rfind("]")
+    if start == -1 or end == -1:
+        raise ValueError(f"no JSON array found in:\n{text[:500]}")
+    return json.loads(text[start : end + 1])
+
+
 # --------------------------------------------------------------------------
 # prompt + Hermes
 # --------------------------------------------------------------------------
 
 def build_prompt(day_label: str, account: dict, positions: list[dict],
-                 candidates: list[dict]) -> str:
+                 candidates: list[dict], recent_insights: list[str],
+                 reflection_trades: list[dict] | None = None) -> str:
     lines = [
         f"BACKTEST CYCLE — {day_label}", "",
+    ]
+
+    if recent_insights:
+        lines.append("YOUR RECENT REFLECTIONS (weigh these, don't just repeat them)")
+        for insight in recent_insights:
+            lines.append(f"  - {insight}")
+        lines.append("")
+
+    lines += [
         "ACCOUNT",
         f"  equity ${account['equity']:,.2f} | cash ${account['cash']:,.2f} "
         f"| exposure {account['exposure_pct']:.1f}%",
@@ -357,15 +556,45 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
             lines.append(f"      news ({a['age_days']}d ago): {a['headline'][:110]}")
     lines.append("")
 
-    lines.append(
-        "Decide. Reply with ONLY a JSON object, no prose around it:\n"
+    schema = (
         '{"decisions": [{"alias": "...", "action": "BUY"|"SELL", "quantity": N,\n'
         '  "entry_price": N, "stop_price": N, "target_price": N,\n'
         '  "confidence": 1-5, "primary_signal": "technical"|"sentiment"|"both"|"other",\n'
         '  "technical_basis": "rsi"|"macd"|"support_resistance"|"trend"|"multiple"|"other",\n'
         '  "expected_reward_risk": N, "invalidation_condition": "...",\n'
         '  "reasoning": "..."}],\n'
-        ' "no_action_reason": "..."}\n'
+        ' "no_action_reason": "..."'
+    )
+
+    if reflection_trades is not None:
+        lines.append("REFLECTION DUE — review your last few closed trades")
+        if reflection_trades:
+            for r in reflection_trades:
+                outcome = "WIN" if r["won"] else "LOSS"
+                lines.append(
+                    f"  {r['alias']}: {outcome} ${r['pnl']:+,.2f} | conf was "
+                    f"{r['confidence']}/5 | exit: {r['exit_reason']} | "
+                    f"your invalidation condition was: \"{r['invalidation_condition']}\""
+                )
+        else:
+            lines.append("  (no closed trades yet — reflect on process so far instead)")
+        lines.append(
+            "  Per AGENTS.md: did your invalidation conditions actually predict "
+            "how trades failed? Did higher confidence correlate with winning? "
+            "Reflect on PROCESS, not just profit. You may refine judgment; you "
+            "may NEVER conclude a risk limit should be loosened — see AGENTS.md's "
+            "reflection boundary."
+        )
+        lines.append("")
+        schema = schema.replace(
+            ' "no_action_reason": "..."',
+            ' "no_action_reason": "...",\n'
+            ' "reflection": "1-3 sentences, process not profit"'
+        )
+
+    lines.append(
+        "Decide. Reply with ONLY a JSON object, no prose around it:\n"
+        f"{schema}}}\n"
         "Taking no trade is a good outcome when nothing qualifies — return an "
         "empty decisions list and say why."
     )
@@ -417,6 +646,10 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             masking: RunMasking, watchlist: list[dict], limits_ctx: dict) -> dict:
     tickers = [t["symbol"] for t in watchlist]
     summary = {"day": str(day), "exits": [], "decisions": [], "blocked": []}
+    day_label = masking.day_index(day)
+    activity: list[tuple[str, str, str | None]] = [
+        ("cycle_start", f"{day_label} ({day}) — reconciling and fetching data", None)
+    ]
 
     bars = fetch_bars(tickers, day)
     if not bars:
@@ -444,13 +677,22 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                 proceeds - holding.quantity * holding.entry_price
             )
             del portfolio.holdings[ticker]
-            summary["exits"].append(
+            line = (
                 f"{ticker} {reason} @ ${exit_price:.2f} "
                 f"(P&L ${portfolio.closed_pnl[-1]:+,.2f})"
             )
+            summary["exits"].append(line)
+            exit_decision_id = record_exit(ticker, holding.quantity, exit_price, reason)
+            activity.append(("exit", line, exit_decision_id))
 
     equity = portfolio.equity(bars)
     portfolio.equity_curve.append(equity)
+    record_snapshot(
+        day_label=masking.day_index(day), equity=equity, cash=portfolio.cash,
+        exposure_pct=portfolio.invested(bars) / equity * 100 if equity else 0.0,
+        drawdown_pct=portfolio.drawdown_pct(),
+        open_positions=len(portfolio.holdings),
+    )
 
     # -- gather + mask ----------------------------------------------------
     technicals = fetch_technicals(
@@ -488,10 +730,41 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     masking.assert_clean(candidates)
     masking.assert_clean(positions_view)
 
+    activity.append((
+        "reasoning",
+        f"Evaluating {len(candidates)} candidates: "
+        f"{', '.join(c['alias'] for c in candidates) or 'none available'}",
+        None,
+    ))
+
+    # -- reflection: feed-back half is unconditional, trigger half is not --
+    # Recent insights go into EVERY prompt (this is what makes past
+    # reflection actually change future behaviour, not just sit in a log).
+    # Reflection material (masked closed-trade review) is only fetched
+    # every 5th cycle -- see cycles_since_reflection's docstring on why this
+    # is a persisted counter, not a local one.
+    recent_insights = fetch_recent_insights()
+    is_reflection_day = portfolio.cycles_since_reflection >= 4
+    reflection_trades = (
+        fetch_recent_closed_trades(masking) if is_reflection_day else None
+    )
+
     prompt = build_prompt(masking.day_index(day), account_view,
-                          positions_view, candidates)
+                          positions_view, candidates, recent_insights,
+                          reflection_trades)
     response = ask_hermes(prompt)
     summary["no_action_reason"] = response.get("no_action_reason", "")
+    if summary["no_action_reason"]:
+        activity.append(("reasoning", summary["no_action_reason"][:900], None))
+
+    if is_reflection_day:
+        reflection_text = response.get("reflection", "").strip()
+        if reflection_text:
+            record_insight(reflection_text)
+            activity.append(("weekly_reflection", reflection_text[:900], None))
+        portfolio.cycles_since_reflection = 0
+    else:
+        portfolio.cycles_since_reflection += 1
 
     # -- act on decisions -------------------------------------------------
     for decision in response.get("decisions", []):
@@ -530,8 +803,11 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
 
         verdict = check_trade(trade, ctx)
         if not verdict.allowed:
-            summary["blocked"].append(f"{real_ticker}: {'; '.join(verdict.violations)}")
+            line = f"{real_ticker}: {'; '.join(verdict.violations)}"
+            summary["blocked"].append(line)
+            activity.append(("risk_check", f"BLOCKED — {line}", None))
             continue
+        activity.append(("risk_check", f"{real_ticker}: passed RULES.md checks", None))
 
         bar = bars.get(real_ticker)
         if not bar:
@@ -541,7 +817,9 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         fill = simulate_fill(decision["alias"], trade.action, trade.quantity,
                              trade.entry_price, bar)
         if fill["status"] != "filled":
-            summary["blocked"].append(f"{real_ticker}: sim {fill['rejection_reason']}")
+            line = f"{real_ticker}: sim {fill['rejection_reason']}"
+            summary["blocked"].append(line)
+            activity.append(("order_rejected", line, None))
             continue
 
         cost = fill["fill_price"] * fill["fill_quantity"]
@@ -552,12 +830,15 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             target_price=float(trade.target_price), entry_day=day_index,
         )
         decision_id = record_trade(decision, real_ticker, fill)
-        summary["decisions"].append(
+        line = (
             f"BUY {real_ticker} ({decision['alias']}) {fill['fill_quantity']} "
             f"@ ${fill['fill_price']:.2f} conf={decision.get('confidence')} "
             f"[{decision_id[:8]}]"
         )
+        summary["decisions"].append(line)
+        activity.append(("order_placed", line, decision_id))
 
+    log_activity(activity)
     return summary
 
 

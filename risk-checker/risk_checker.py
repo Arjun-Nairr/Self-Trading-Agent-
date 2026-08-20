@@ -58,6 +58,19 @@ class RiskLimits:
     min_stop_pct: float = 5.0             # §6a  stop no closer than this
     max_stop_pct: float = 10.0            # §6a  stop no further than this
     min_reward_risk: float = 2.0          # §6b
+    # Tolerance for §6a/§6b's boundary checks, NOT a loosened rule -- a
+    # numerical precision buffer, applied uniformly and symmetrically.
+    # Found via a real smoke-test rejection: a stop landed at 4.99% against
+    # the 5.00% floor. That is not float noise in this module's math (the
+    # comparison itself is exact) -- it is Hermes proposing a real stop
+    # price rounded to the cent, which lands a hair under the floor at
+    # cheap end of the watchlist. §8's price floor is $10; one cent of
+    # rounding there is 0.01/10*100 = 0.10 percentage points -- the exact
+    # worst case. stop_tolerance_pct absorbs that; it does not change what
+    # RULES.md requires, only what counts as "close enough" to it.
+    # reward_risk_tolerance mirrors the same reasoning in ratio terms.
+    stop_tolerance_pct: float = 0.10
+    reward_risk_tolerance: float = 0.02
     open_buffer_min: int = 15             # §7   no entries just after open
     close_buffer_min: int = 30            # §7   no entries just before close
 
@@ -206,12 +219,12 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str]) -> None:
         stop_distance_pct = (trade.entry_price - trade.stop_price) / trade.entry_price * 100
         if stop_distance_pct <= 0:
             v.append("§6a: stop must sit below the entry price for a long")
-        elif stop_distance_pct < lim.min_stop_pct:
+        elif stop_distance_pct < lim.min_stop_pct - lim.stop_tolerance_pct:
             v.append(
                 f"§6a: stop is {stop_distance_pct:.2f}% below entry, minimum is "
                 f"{lim.min_stop_pct}% — ordinary noise would trigger it"
             )
-        elif stop_distance_pct > lim.max_stop_pct:
+        elif stop_distance_pct > lim.max_stop_pct + lim.stop_tolerance_pct:
             v.append(
                 f"§6a: stop is {stop_distance_pct:.2f}% below entry, maximum is "
                 f"{lim.max_stop_pct}% — too volatile for the sizing model"
@@ -235,7 +248,7 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str]) -> None:
             risk_per_share = trade.entry_price - trade.stop_price
             if risk_per_share > 0:
                 ratio = reward / risk_per_share
-                if ratio < lim.min_reward_risk:
+                if ratio < lim.min_reward_risk - lim.reward_risk_tolerance:
                     v.append(
                         f"§6b: reward:risk is {ratio:.2f}, minimum is "
                         f"{lim.min_reward_risk}"

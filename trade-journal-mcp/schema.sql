@@ -94,13 +94,46 @@ CREATE TABLE IF NOT EXISTS agent_activity (
     decision_id   UUID REFERENCES trades(decision_id),
     event_type    TEXT NOT NULL,
     description   TEXT NOT NULL,
+    -- Same contamination risk already fixed once on trades.execution_mode,
+    -- applied here before it becomes a real bug rather than after: most
+    -- activity rows (reasoning, risk_check) carry no decision_id at all, so
+    -- there is no other way to separate backtest narration from live
+    -- narration once live cron exists and both start writing here.
+    mode          TEXT CHECK (mode IN ('backtest', 'live')),
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- portfolio_snapshots — equity/exposure at the end of one cycle. Written
+-- once per cycle by whatever is running it (the backtest harness now,
+-- live cron later). Exists specifically because the harness only ever
+-- tracked its portfolio in a LOCAL file (backtest_state.json) -- a
+-- dashboard is a static page reading Neon, so it structurally cannot show
+-- an equity curve or current position value from data that only ever
+-- lived on one machine's disk. This table is what makes that possible,
+-- and the SAME table (filtered by `mode`) is what lets the dashboard
+-- switch between training and live views -- there was never a real
+-- TEST/PROD Neon split, everything lives in one database tagged by mode,
+-- matching how `execution_mode` already works on `trades`.
+CREATE TABLE IF NOT EXISTS portfolio_snapshots (
+    id              BIGSERIAL PRIMARY KEY,
+    mode            TEXT NOT NULL CHECK (mode IN ('backtest', 'live')),
+    equity          NUMERIC(14, 2) NOT NULL,
+    cash            NUMERIC(14, 2) NOT NULL,
+    exposure_pct    NUMERIC(6, 2),
+    drawdown_pct    NUMERIC(6, 2),
+    -- Backtest: the masked "Day N" label (matches what Hermes itself saw,
+    -- so a snapshot can be cross-referenced against its own reasoning).
+    -- Live: null -- created_at alone is the real timeline there.
+    day_label       TEXT,
+    open_positions  INTEGER NOT NULL DEFAULT 0,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 CREATE INDEX IF NOT EXISTS idx_trades_status ON trades(status);
 CREATE INDEX IF NOT EXISTS idx_trades_ticker ON trades(ticker);
 CREATE INDEX IF NOT EXISTS idx_insight_log_cycle_type ON insight_log(cycle_type);
 CREATE INDEX IF NOT EXISTS idx_agent_activity_created_at ON agent_activity(created_at);
+CREATE INDEX IF NOT EXISTS idx_portfolio_snapshots_mode_created ON portfolio_snapshots(mode, created_at);
 
 -- §7: dashboard reads via Neon's Data API using the anonymous role,
 -- SELECT only — no write grant, ever, from the browser side. This tool
@@ -110,7 +143,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_activity_created_at ON agent_activity(creat
 -- schema-level USAGE granted separately, or the anonymous role can't
 -- even see into the schema to run the SELECT it was granted.
 GRANT USAGE ON SCHEMA public TO anonymous;
-GRANT SELECT ON trades, insight_log, agent_activity TO anonymous;
+GRANT SELECT ON trades, insight_log, agent_activity, portfolio_snapshots TO anonymous;
 
 -- Neon's Data API refuses anonymous access to any table without RLS
 -- enabled, as a safety-by-default measure — GRANT alone isn't enough.
@@ -119,6 +152,8 @@ GRANT SELECT ON trades, insight_log, agent_activity TO anonymous;
 ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
 ALTER TABLE insight_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_activity ENABLE ROW LEVEL SECURITY;
+ALTER TABLE portfolio_snapshots ENABLE ROW LEVEL SECURITY;
 CREATE POLICY anonymous_read_trades ON trades FOR SELECT TO anonymous USING (true);
 CREATE POLICY anonymous_read_insight_log ON insight_log FOR SELECT TO anonymous USING (true);
 CREATE POLICY anonymous_read_agent_activity ON agent_activity FOR SELECT TO anonymous USING (true);
+CREATE POLICY anonymous_read_portfolio_snapshots ON portfolio_snapshots FOR SELECT TO anonymous USING (true);

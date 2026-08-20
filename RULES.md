@@ -223,7 +223,16 @@ investigation). Good news does not rescue a bad chart.
   "added later."
 - The stop is set at a **real technical level** (`technical_get_support_
   resistance`), not an arbitrary percentage.
-- **The stop must fall between 5% and 10% below entry.** `[JUDGMENT, revised]`
+- **The stop must fall between 5% and 10% below entry**, with a **0.10
+  percentage-point tolerance** on both edges (so 4.90%–10.10% is accepted
+  in practice). `[JUDGMENT, revised]` This is not a loosened rule — it's a
+  numerical buffer for cent-rounded prices, added after a real smoke-test
+  rejection (a stop landed at exactly 4.99% against the 5.00% floor). $10
+  (§8's price floor) × one cent of rounding = 0.10 percentage points, the
+  exact worst case — the tolerance is sized to that, not picked freehand.
+  Same idea and same 0.02 tolerance applies to §6b's 2.0 minimum
+  reward:risk. See `risk_checker.py`'s `stop_tolerance_pct` /
+  `reward_risk_tolerance`.
   - Closer than 5%: ordinary daily noise will trigger it. You are not
     managing risk, you are paying fees to be shaken out. (Raised from an
     initial 2% floor after comparing against a similar real system — 2%

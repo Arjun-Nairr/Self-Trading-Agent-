@@ -143,6 +143,30 @@ async def _record_decision(
     return dict(row)
 
 
+async def _record_portfolio_snapshot(
+    mode: str,
+    equity: float,
+    cash: float,
+    exposure_pct: float | None = None,
+    drawdown_pct: float | None = None,
+    day_label: str | None = None,
+    open_positions: int = 0,
+) -> dict[str, Any]:
+    if mode not in ("backtest", "live"):
+        raise ValueError(f"mode must be 'backtest' or 'live', got {mode!r}")
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO portfolio_snapshots (mode, equity, cash, exposure_pct,
+                                          drawdown_pct, day_label, open_positions)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING *
+        """,
+        mode, equity, cash, exposure_pct, drawdown_pct, day_label, open_positions,
+    )
+    return dict(row)
+
+
 async def _record_execution_result(
     decision_id: str,
     status: str,
@@ -216,12 +240,14 @@ async def _get_insight_history(cycle_type: str | None = None, limit: int = 20) -
 
 
 async def _log_activity(
-    event_type: str, description: str, decision_id: str | None = None
+    event_type: str, description: str, decision_id: str | None = None,
+    mode: str | None = None,
 ) -> dict[str, Any]:
     pool = await get_pool()
     row = await pool.fetchrow(
-        "INSERT INTO agent_activity (decision_id, event_type, description) VALUES ($1, $2, $3) RETURNING *",
-        decision_id, event_type, description,
+        "INSERT INTO agent_activity (decision_id, event_type, description, mode) "
+        "VALUES ($1, $2, $3, $4) RETURNING *",
+        decision_id, event_type, description, mode,
     )
     return dict(row)
 
@@ -338,8 +364,12 @@ async def log_activity(
     "order_placed") — pass decision_id once one exists for this trade, omit
     it for steps that happen before a decision is made (e.g. pulling a
     quote). This is what powers a live "what is Hermes doing right now"
-    view — call it at every meaningful step, not just at the end."""
-    return _jsonable(await _log_activity(event_type, description, decision_id))
+    view — call it at every meaningful step, not just at the end.
+
+    You only ever call this tool from a live cycle (per AGENTS.md, backtest
+    cycles never call their own tools) — mode is tagged 'live' automatically,
+    always correctly, without you needing to pass anything."""
+    return _jsonable(await _log_activity(event_type, description, decision_id, mode="live"))
 
 
 @mcp.tool()
@@ -349,6 +379,23 @@ async def get_recent_activity(
     """List recent activity-log entries, optionally filtered to one
     decision_id's full step-by-step trail."""
     return _jsonable(await _get_recent_activity(decision_id, limit))
+
+
+@mcp.tool()
+async def record_portfolio_snapshot(
+    mode: str, equity: float, cash: float, exposure_pct: float | None = None,
+    drawdown_pct: float | None = None, day_label: str | None = None,
+    open_positions: int = 0,
+) -> dict[str, Any]:
+    """Record equity/exposure at the end of one cycle. mode: 'backtest' or
+    'live'. Call this once per cycle, after marking positions to market —
+    it's the only source of equity-over-time data the dashboard has, since
+    portfolio state otherwise only ever lived in the harness's local state
+    file. day_label: the masked "Day N" string for backtest cycles (so a
+    snapshot cross-references what Hermes itself saw); omit for live."""
+    return _jsonable(await _record_portfolio_snapshot(
+        mode, equity, cash, exposure_pct, drawdown_pct, day_label, open_positions,
+    ))
 
 
 if __name__ == "__main__":

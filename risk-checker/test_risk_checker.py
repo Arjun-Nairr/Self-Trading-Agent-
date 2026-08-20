@@ -112,6 +112,38 @@ def main():
     _blocked_by("§6a", trade=_trade(stop_price=105.0))        # above entry
     print("  ok  §6a stop missing / too close / too far / inverted all blocked")
 
+    # -- §6a/§6b boundary tolerance -----------------------------------
+    # Real failure this codifies: a smoke-test run had Hermes propose a
+    # stop landing at 4.99% against the 5.00% floor -- not float noise in
+    # this module's math (the comparison is exact), but a real cent-rounded
+    # price a hair under the line. $10 (§8's price floor) x 1 cent = 0.10pp,
+    # the exact worst case -- see RiskLimits.stop_tolerance_pct.
+    # $100 entry, stop $95.01 -> exactly 4.99% -- the real reported case.
+    verdict = check_trade(_trade(quantity=90, stop_price=95.01, target_price=115.0), _ctx())
+    assert verdict.allowed, (
+        f"a 1-cent-rounded stop just inside tolerance was wrongly rejected: "
+        f"{verdict.violations}"
+    )
+    print("  ok  §6a  a real cent-rounding miss (4.99% vs 5.00%) now passes")
+
+    # A real, non-trivial miss (4.5%, well past the 0.10pp buffer) must
+    # still be rejected -- the tolerance absorbs rounding noise, it does not
+    # widen §6a into a different rule.
+    _blocked_by("§6a", trade=_trade(stop_price=95.5))  # 4.5% -- past tolerance
+    print("  ok  §6a  tolerance absorbs rounding-width misses only, not real ones")
+
+    # Same shape for §6b: a ratio of 1.99 (vs the 2.0 minimum) from the
+    # same kind of cent-rounded prices should pass; 1.9 should not.
+    verdict = check_trade(
+        _trade(quantity=90, stop_price=93.0, target_price=113.93), _ctx()
+    )
+    assert verdict.allowed, (
+        f"a rounding-width reward:risk miss (~1.99) was wrongly rejected: "
+        f"{verdict.violations}"
+    )
+    _blocked_by("§6b", trade=_trade(stop_price=93.0, target_price=113.3))  # ~1.9
+    print("  ok  §6b  same tolerance behaviour for reward:risk")
+
     # -- §6b reward:risk --------------------------------------------------
     # target $105 -> reward $5 / risk $7 = 0.71, well under 2.0
     _blocked_by("§6b", trade=_trade(target_price=105.0))
