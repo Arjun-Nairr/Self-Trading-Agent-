@@ -418,32 +418,40 @@ asyncio.run(main())
     run_in("trade-journal", script)
 
 
-def fetch_recent_insights(limit: int = 2) -> list[str]:
+def fetch_recent_insights(limit: int = 2) -> list[dict]:
     """The feed-back half of reflection: past insight text, injected into
     EVERY prompt (not just reflection days) so learning actually changes
     later behaviour. Writing to insight_log without this would just be
     journaling into a void -- the whole point of "self-learning" is that
-    cycle N+5 reasons differently because of what cycle N produced."""
+    cycle N+5 reasons differently because of what cycle N produced.
+
+    Returns dicts, not bare strings, so the caller can show sample_size
+    alongside the text -- an insight drawn from 2 trades reads with the
+    same authority as one drawn from 40 unless its weight is visible.
+    """
     script = f'''
 import asyncio, json
 from server import _get_insight_history
 
 async def main():
     rows = await _get_insight_history(cycle_type="weekly_reflection", limit={limit})
-    print(json.dumps([r["insight_text"] for r in rows], default=str))
+    print(json.dumps(
+        [{{"text": r["insight_text"], "sample_size": r["sample_size"]}} for r in rows],
+        default=str,
+    ))
 
 asyncio.run(main())
 '''
     return json_from_list(run_in("trade-journal", script))
 
 
-def record_insight(text: str) -> None:
+def record_insight(text: str, sample_size: int) -> None:
     script = f'''
 import asyncio
 from server import _log_insight
 
 async def main():
-    await _log_insight("weekly_reflection", {text!r})
+    await _log_insight("weekly_reflection", {text!r}, sample_size={sample_size})
 
 asyncio.run(main())
 '''
@@ -516,9 +524,14 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     ]
 
     if recent_insights:
-        lines.append("YOUR RECENT REFLECTIONS (weigh these, don't just repeat them)")
+        lines.append(
+            "YOUR RECENT REFLECTIONS (weigh these, don't just repeat them -- "
+            "one drawn from very few trades is a hunch, not a rule)"
+        )
         for insight in recent_insights:
-            lines.append(f"  - {insight}")
+            n = insight.get("sample_size")
+            weight = f" (from {n} closed trade{'s' if n != 1 else ''})" if n is not None else ""
+            lines.append(f"  - {insight['text']}{weight}")
         lines.append("")
 
     lines += [
@@ -583,7 +596,11 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
             "how trades failed? Did higher confidence correlate with winning? "
             "Reflect on PROCESS, not just profit. You may refine judgment; you "
             "may NEVER conclude a risk limit should be loosened — see AGENTS.md's "
-            "reflection boundary."
+            "reflection boundary. Write about the PATTERN, never the alias name "
+            "(e.g. 'tight stops on high-RSI entries underperform', not 'NOVEMBER "
+            "keeps failing') -- alias assignments change between runs, so a "
+            "name-specific claim silently becomes false and gets fed into a "
+            "future prompt as if it were still true."
         )
         lines.append("")
         schema = schema.replace(
@@ -760,7 +777,10 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     if is_reflection_day:
         reflection_text = response.get("reflection", "").strip()
         if reflection_text:
-            record_insight(reflection_text)
+            # reflection_trades IS the closed-trade set this reflection was
+            # actually drawn from -- its length is the real sample size,
+            # not a guess.
+            record_insight(reflection_text, sample_size=len(reflection_trades or []))
             activity.append(("weekly_reflection", reflection_text[:900], None))
         portfolio.cycles_since_reflection = 0
     else:

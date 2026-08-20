@@ -218,11 +218,14 @@ async def _get_trade_history(
     return [dict(r) for r in rows]
 
 
-async def _log_insight(cycle_type: str, insight_text: str) -> dict[str, Any]:
+async def _log_insight(
+    cycle_type: str, insight_text: str, sample_size: int | None = None
+) -> dict[str, Any]:
     pool = await get_pool()
     row = await pool.fetchrow(
-        "INSERT INTO insight_log (cycle_type, insight_text) VALUES ($1, $2) RETURNING *",
-        cycle_type, insight_text,
+        "INSERT INTO insight_log (cycle_type, insight_text, sample_size) "
+        "VALUES ($1, $2, $3) RETURNING *",
+        cycle_type, insight_text, sample_size,
     )
     return dict(row)
 

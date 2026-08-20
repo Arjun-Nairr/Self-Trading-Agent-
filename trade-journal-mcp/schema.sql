@@ -76,6 +76,14 @@ CREATE TABLE IF NOT EXISTS insight_log (
     id            BIGSERIAL PRIMARY KEY,
     cycle_type    TEXT NOT NULL CHECK (cycle_type IN ('decision', 'weekly_reflection')),
     insight_text  TEXT NOT NULL,
+    -- How many CLOSED trades existed when this was written. Insights are
+    -- fed back into every later prompt, and without this a conclusion
+    -- drawn from 2 trades reads with exactly the same authority as one
+    -- drawn from 40 -- which is precisely the "learn superstition from
+    -- randomness" failure SOUL.md warns against, crystallised into text
+    -- and then repeated forever. Shown alongside the insight so its weight
+    -- is visible rather than assumed. Nullable: pre-dates this column.
+    sample_size   INTEGER,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
