@@ -36,10 +36,14 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 
-# ponytail: not measured, just the one known-safe reference point carried
-# over from the live-trading plan. Treat as a starting guess, tune after
-# watching real usage -- see the module docstring.
-DEFAULT_WEEKLY_BUDGET = 32
+# ponytail: still a guess, not a measured ceiling -- but a less blind one
+# than 32. Raised after burning 32 real cycles in one sitting (2026-08-21)
+# and confirming directly in the ChatGPT app that weekly usage hadn't
+# moved -- real evidence the true limit is well above 32, just not proof
+# of exactly where. Sized as a step up worth actually testing against,
+# not a new arbitrary ceiling; watch real usage again at this level and
+# adjust -- same process as before, better starting point.
+DEFAULT_WEEKLY_BUDGET = 175
 
 _DEFAULT_STATE_PATH = Path(__file__).parent / "quota_pacer_state.json"
 

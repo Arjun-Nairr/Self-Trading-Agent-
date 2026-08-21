@@ -31,6 +31,7 @@ import json
 import re
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -692,18 +693,34 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
 
 def _call_hermes(prompt: str) -> str:
     escaped = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+    # --usage-file: real per-call token accounting (input/output/cache/
+    # reasoning tokens, api_calls) written to a JSON report inside the
+    # container. Found via `hermes --help`, not guessed -- the alternative
+    # was estimating token counts, which nobody asked the model to report
+    # and nothing upstream can verify.
+    usage_path = f"/tmp/hermes_usage_{uuid.uuid4().hex}.json"
     result = subprocess.run(
         ["docker", "compose", "exec", "-T", "--workdir", "/opt/data/workspace",
-         "gateway", "hermes", "-z", escaped, "-t", ""],
+         "gateway", "hermes", "-z", escaped, "-t", "", "--usage-file", usage_path],
         capture_output=True, text=True, cwd=REPO, timeout=600,
         encoding="utf-8", errors="replace",
     )
     if result.returncode != 0:
         raise RuntimeError(f"hermes failed:\n{result.stderr[-1500:]}")
-    return result.stdout
+
+    usage_result = subprocess.run(
+        ["docker", "compose", "exec", "-T", "gateway", "cat", usage_path],
+        capture_output=True, text=True, cwd=REPO, timeout=30, encoding="utf-8",
+    )
+    subprocess.run(
+        ["docker", "compose", "exec", "-T", "gateway", "rm", "-f", usage_path],
+        capture_output=True, cwd=REPO, timeout=30,
+    )
+    usage = json.loads(usage_result.stdout) if usage_result.returncode == 0 else {}
+    return result.stdout, usage
 
 
-def ask_hermes(prompt: str) -> dict:
+def ask_hermes(prompt: str, usage_totals: dict) -> dict:
     """One retry on malformed JSON — a real failure mode, seen on the very
     first live cycle (an unescaped quote inside the reasoning text broke the
     whole object and cost the cycle).
@@ -713,8 +730,21 @@ def ask_hermes(prompt: str) -> dict:
     the retry costs the same slot and usually succeeds. Capped at one — if
     it cannot produce valid JSON twice, the cycle deserves to fail loudly
     rather than silently drop a decision.
+
+    usage_totals accumulates across both the original call and a retry (a
+    retry is a second real API call and a second real cost -- both must
+    count, not just the one that happened to parse).
     """
-    raw = _call_hermes(prompt)
+    def _accumulate(usage: dict) -> None:
+        for key in ("input_tokens", "output_tokens", "cache_read_tokens",
+                    "reasoning_tokens", "total_tokens", "api_calls"):
+            usage_totals[key] = usage_totals.get(key, 0) + usage.get(key, 0)
+        usage_totals["estimated_cost_usd"] = (
+            usage_totals.get("estimated_cost_usd", 0.0) + usage.get("estimated_cost_usd", 0.0)
+        )
+
+    raw, usage = _call_hermes(prompt)
+    _accumulate(usage)
     try:
         return json_from(raw)
     except (ValueError, json.JSONDecodeError) as exc:
@@ -724,7 +754,9 @@ def ask_hermes(prompt: str) -> dict:
             "field to one short line with no quote characters, apostrophes, "
             "or line breaks inside it."
         )
-        return json_from(_call_hermes(retry))
+        raw2, usage2 = _call_hermes(retry)
+        _accumulate(usage2)
+        return json_from(raw2)
 
 
 # --------------------------------------------------------------------------
@@ -734,7 +766,7 @@ def ask_hermes(prompt: str) -> dict:
 def run_day(day: date, day_index: int, portfolio: Portfolio,
             masking: RunMasking, watchlist: list[dict], limits_ctx: dict) -> dict:
     tickers = [t["symbol"] for t in watchlist]
-    summary = {"day": str(day), "exits": [], "decisions": [], "blocked": []}
+    summary = {"day": str(day), "exits": [], "decisions": [], "blocked": [], "usage": {}}
     day_label = masking.day_index(day)
     activity: list[tuple[str, str, str | None]] = [
         ("cycle_start", f"{day_label} ({day}) — reconciling and fetching data", None)
@@ -852,7 +884,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     prompt = build_prompt(masking.day_index(day), account_view,
                           positions_view, candidates, recent_insights,
                           reflection_trades)
-    response = ask_hermes(prompt)
+    response = ask_hermes(prompt, summary["usage"])
     summary["no_action_reason"] = response.get("no_action_reason", "")
     if summary["no_action_reason"]:
         activity.append(("reasoning", summary["no_action_reason"][:900], None))
@@ -1009,6 +1041,7 @@ def main() -> None:
 
     end = date.fromisoformat(args.end)
     completed = 0
+    run_usage = {"total_tokens": 0, "api_calls": 0, "estimated_cost_usd": 0.0}
     while completed < args.days and cursor <= end:
         if not pacer.can_run_cycle():
             print(
@@ -1047,6 +1080,14 @@ def main() -> None:
         if not summary["decisions"] and not summary["blocked"]:
             print(f"  no trade — {summary['no_action_reason'][:160]}")
 
+        u = summary["usage"]
+        if u:
+            for k in ("total_tokens", "api_calls", "estimated_cost_usd"):
+                run_usage[k] += u.get(k, 0)
+            print(f"  usage   {u.get('total_tokens', 0):,} tokens "
+                  f"({u.get('api_calls', 0)} call{'s' if u.get('api_calls') != 1 else ''}, "
+                  f"{u.get('reasoning_tokens', 0)} reasoning)")
+
         STATE_PATH.write_text(json.dumps(
             {"portfolio": portfolio.to_dict(), "cursor": str(cursor + timedelta(days=1))},
             indent=1,
@@ -1059,6 +1100,15 @@ def main() -> None:
           f"{pacer.used_this_week()}/{pacer.budget}")
     print(f"equity ${final:,.2f} ({(final / STARTING_EQUITY - 1) * 100:+.2f}%) "
           f"| open {len(portfolio.holdings)} | closed {len(portfolio.closed_pnl)}")
+    if completed:
+        avg = run_usage["total_tokens"] / completed
+        cost = (
+            "included in subscription" if run_usage["estimated_cost_usd"] == 0
+            else f"${run_usage['estimated_cost_usd']:.4f}"
+        )
+        print(f"tokens this run: {run_usage['total_tokens']:,} total "
+              f"({avg:,.0f} avg/cycle) | api calls: {run_usage['api_calls']} "
+              f"| cost: {cost}")
 
 
 if __name__ == "__main__":
