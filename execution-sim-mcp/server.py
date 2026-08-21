@@ -65,6 +65,14 @@ def _simulate_fill(
     if order_type.upper() == "MARKET":
         slippage = reference_price * (SLIPPAGE_BPS / 10_000)
         fill_price = reference_price + slippage if action.upper() == "BUY" else reference_price - slippage
+        if day_low is not None and day_high is not None:
+            # Backtest mode: reference_price is Hermes' own stated
+            # entry_price, not fetched here (see module docstring) -- a
+            # stale or simply wrong figure previously filled at a price
+            # that never traded that day. Clamping into the day's real
+            # range is the same fix LIMIT orders already had; MARKET orders
+            # had no such check at all.
+            fill_price = min(max(fill_price, day_low), day_high)
         return "filled", round(fill_price, 2), None
 
     if order_type.upper() == "LIMIT":

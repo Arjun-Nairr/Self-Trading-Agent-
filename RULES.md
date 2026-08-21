@@ -256,13 +256,23 @@ more often than right and still be profitable** (win 40% of the time and
 you still make money). It converts "be right" into "be paid enough when
 right," which is a far more achievable target for an unproven agent.
 
-### 6c. Time stop — 10 trading days `[JUDGMENT]`
+### 6c. Time stop — 15 trading days `[JUDGMENT, revised]`
 
-If a position has hit neither its stop nor its target after 10 trading
-days (~2 weeks), close it. A thesis that hasn't played out in two weeks is
-usually a thesis that was wrong, and the capital has an opportunity cost.
-The specific number is tied to our swing-trading horizon, not derived —
-worth checking.
+If a position has hit neither its stop nor its target after 15 trading
+days (~3 weeks), close it. A thesis that hasn't played out is usually a
+thesis that was wrong, and the capital has an opportunity cost.
+
+Raised from an initial 10-day figure after checking it against §6a/§6b:
+a 5% stop floor + 2:1 minimum reward:risk requires a 10%+ move, and for a
+~30% annualized-vol mid-cap the typical 10-trading-day excursion
+(σ√10 ≈ 6%) rarely reaches that far — the clock was running out before
+most setups had a realistic chance to hit target, independent of setup
+quality. 15 days gives the same target real room without touching the
+stop-placement math §2b's gap-protection derivation depends on. Also
+fixed a real implementation bug alongside this: the harness had been
+counting *calendar* days (weekends included), so "10 trading days" was
+silently running as ~7 — see `backtest-harness/run_backtest.py`'s
+`trading_days_elapsed`.
 
 ### 6d. Thesis invalidation — exit regardless of price
 
@@ -406,7 +416,7 @@ The `[JUDGMENT]` numbers, ranked by how much a second opinion would help:
 
 1. **Weekly circuit breaker (−6%)** — weakest grounding of any number here.
 2. **Total exposure cap (60%)** and **max positions (8)**.
-3. **Time stop (10 trading days)**.
+3. **Time stop (15 trading days, revised from 10 — see §6c)**.
 4. **Market-hours buffers (15 min / 30 min)**.
 
 Well-grounded already, lower value in re-checking: total drawdown (10%),

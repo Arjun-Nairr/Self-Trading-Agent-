@@ -195,6 +195,45 @@ def test_assert_clean_does_not_false_alarm_on_prices():
     m.assert_clean({"ticker": "ALPHA", "current_price": 2023.40, "volume": 1995})
 
 
+def test_real_watchlist_headline_forms_are_masked():
+    """Regression for a real leak found by running actual watchlist names
+    through actual headline text: the old one-shot suffix strip
+    (split(",")[0].split(" Inc")[0]) never produced the bare brand form at
+    all, so 7 of 10 names -- exactly the form real headlines use -- sailed
+    through unmasked while assert_clean blessed them. Locks in
+    run_backtest._name_variants's iterative strip + brand-override fix."""
+    import sys
+    sys.path.insert(0, str(__import__("pathlib").Path(__file__).parent))
+    import run_backtest as rb
+
+    watchlist = [
+        {"symbol": "OLN", "name": "Olin Corporation"},
+        {"symbol": "WMG", "name": "Warner Music Group Corp."},
+        {"symbol": "SFM", "name": "Sprouts Farmers Market, Inc."},
+        {"symbol": "DINO", "name": "HF Sinclair Corporation"},
+        {"symbol": "RYAN", "name": "Ryan Specialty Holdings, Inc."},
+        {"symbol": "BRKR", "name": "Bruker Corporation"},
+        {"symbol": "BRX", "name": "Brixmor Property Group Inc."},
+        {"symbol": "ALGM", "name": "Allegro MicroSystems, Inc."},
+    ]
+    headlines = {
+        "OLN": "Olin Announces Q2 Results, Beats Estimates",
+        "WMG": "Warner Music Group Signs New Streaming Deal",
+        "SFM": "Sprouts Same-Store Sales Up 4%",
+        "DINO": "HF Sinclair Completes Refinery Turnaround",
+        "RYAN": "Ryan Specialty Acquires Rival Brokerage",
+        "BRKR": "Bruker Shares Fall After Guidance Cut",
+        "BRX": "Brixmor Raises Dividend",
+        "ALGM": "Allegro Wins Auto Chip Contract",
+    }
+    names = {t["symbol"]: rb._name_variants(t["name"], t["symbol"]) for t in watchlist}
+    m = RunMasking(names, run_start=RUN_START, seed=42)
+    for symbol, headline in headlines.items():
+        masked = m.mask_text(headline)
+        m.assert_clean(masked)  # raises LeakDetected if anything real survived
+        assert symbol not in masked, (symbol, masked)
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

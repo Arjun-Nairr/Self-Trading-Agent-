@@ -28,6 +28,7 @@ Usage:
 """
 import argparse
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -45,6 +46,58 @@ from risk_checker import (                                          # noqa: E402
 REPO = Path(__file__).resolve().parent.parent
 STATE_PATH = Path(__file__).resolve().parent / "backtest_state.json"
 STARTING_EQUITY = 100_000.0
+# RULES.md §6c, revised from 10 -> 15 trading days. The original 10-day
+# figure, paired with the 5% stop floor (§6a) and the 2:1 target minimum
+# (§6b), asks for a 10%+ move inside a window whose typical 10-day
+# excursion (for ~30% annualized-vol mid-caps, sigma*sqrt(10)) is roughly
+# 6% -- the target was rarely reachable before the clock ran out regardless
+# of setup quality. 15 days gives the same target real room to play out
+# without touching the stop-placement math §2b's gap-protection derivation
+# depends on. [JUDGMENT, revised] -- flagged in RULES.md §10 for a real
+# second opinion once tuning-window results exist, same as every other
+# number there.
+TIME_STOP_TRADING_DAYS = 15
+
+# -- name-variant derivation for the masking gate --------------------------
+# The masker only strips terms it's told about (see anonymize.py's own
+# docstring: "config, not code"). A single split(",")[0] pass leaves a
+# trailing suffix on any name with two ("Warner Music Group Corp." ->
+# stripping "Corp." once leaves "Warner Music Group", not the bare brand).
+# Found via a real leak test: 7 of 10 watchlist names sailed through actual
+# headline text unmasked ("Bruker Shares Fall...", "Olin Announces...")
+# because the old one-shot strip never produced the bare brand at all.
+_CORP_SUFFIXES = re.compile(
+    r",?\s*(?:Corporation|Corp\.?|Holdings?|Group|Company|Co\.?|plc|Ltd\.?|Inc\.?|LLC)\s*$",
+    re.IGNORECASE,
+)
+
+# Names where even the fully-stripped legal name doesn't reach the form
+# headlines actually use ("Sprouts Farmers Market" -> "Sprouts", not further
+# reducible by suffix-stripping since "Farmers Market" isn't a corporate
+# suffix). Hand-verified against real headline phrasing, same as
+# anonymize.py's own brand/counterparty test -- this is exactly the "config,
+# not code" extension point that module's docstring describes.
+_BRAND_OVERRIDES = {
+    "SFM": ["Sprouts"],
+    "BRX": ["Brixmor"],
+    "ALGM": ["Allegro"],
+}
+
+
+def _name_variants(name: str, symbol: str) -> list[str]:
+    """Full legal name -> every maskable form, longest first isn't required
+    here (RunMasking itself sorts by length) -- just needs to include every
+    form real headlines use."""
+    variants = {name}
+    current = name
+    while True:
+        stripped = _CORP_SUFFIXES.sub("", current).strip()
+        if stripped == current or not stripped:
+            break
+        variants.add(stripped)
+        current = stripped
+    variants.update(_BRAND_OVERRIDES.get(symbol, []))
+    return sorted(variants)
 
 # maverick runs under uv; the other containers run plain python.
 RUNNERS = {
@@ -118,7 +171,9 @@ class Holding:
     entry_price: float
     stop_price: float
     target_price: float
-    entry_day: int
+    entry_day: int           # calendar day_index -- display only ("days_held")
+    entry_trading_day: int   # Portfolio.trading_days_elapsed at entry -- what
+                              # RULES.md §6c's time stop actually counts against
 
 
 @dataclass
@@ -142,6 +197,12 @@ class Portfolio:
     # a plain in-memory counter would reset every invocation and "every 5
     # cycles" would never mean anything real across runs.
     cycles_since_reflection: int = 0
+    # Count of EXECUTED cycles, not calendar days -- day_index counts
+    # weekends and no-data days too, so "10 trading days" was silently
+    # running as ~7. This is what RULES.md §6c's time stop actually
+    # increments against; entry_day (calendar) stays only for the
+    # dashboard-facing "days_held" display.
+    trading_days_elapsed: int = 0
 
     def equity(self, prices: dict[str, dict]) -> float:
         held = sum(
@@ -178,17 +239,26 @@ class Portfolio:
             "equity_curve": self.equity_curve,
             "closed_pnl": self.closed_pnl,
             "cycles_since_reflection": self.cycles_since_reflection,
+            "trading_days_elapsed": self.trading_days_elapsed,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "Portfolio":
         return cls(
             cash=d["cash"],
-            holdings={t: Holding(**h) for t, h in d["holdings"].items()},
+            holdings={
+                # .get() on entry_trading_day: old state files predate this
+                # field. Falls back to the calendar entry_day, an
+                # approximation, only for a holding that was already open
+                # before this fix shipped.
+                t: Holding(**{**h, "entry_trading_day": h.get("entry_trading_day", h["entry_day"])})
+                for t, h in d["holdings"].items()
+            },
             equity_curve=d["equity_curve"],
             closed_pnl=d["closed_pnl"],
-            # .get(): old state files predate this field.
+            # .get(): old state files predate these fields.
             cycles_since_reflection=d.get("cycles_since_reflection", 0),
+            trading_days_elapsed=d.get("trading_days_elapsed", 0),
         )
 
 
@@ -275,7 +345,9 @@ asyncio.run(main())
 def simulate_fill(ticker_alias: str, action: str, quantity: int,
                   reference_price: float, bar: dict) -> dict:
     """Real execution-sim tool, in historical mode — the day's true range
-    decides whether a limit would have crossed."""
+    decides whether a limit would have crossed, and now also clamps MARKET
+    fills into the same range (a bad/stale reference_price used to be able
+    to fill at a price that never traded that day)."""
     script = f'''
 import json
 from server import place_order
@@ -672,6 +744,10 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     if not bars:
         summary["skipped"] = "no market data (holiday/weekend)"
         return summary
+    # This IS a trading day (real bars exist) -- count it before anything
+    # below reads it, so a position opened today is at trading-day-offset 0,
+    # not -1.
+    portfolio.trading_days_elapsed += 1
 
     # -- mechanical exits first: a resting stop fires without judgment ----
     portfolio.stopped_out_today = []
@@ -681,12 +757,19 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             continue
         exit_price = reason = None
         if bar["low"] <= holding.stop_price:
-            exit_price, reason = holding.stop_price, "stop hit"
+            # RULES.md §2b's whole concentration-cap derivation rests on
+            # "a stop can be jumped -- the day opens below it and fills
+            # near the open, not near the stop." Always filling at the
+            # exact stop price made that scenario structurally impossible
+            # in every backtest cycle, silently flattering results. A real
+            # resting stop fills at the worse of the two.
+            exit_price = min(bar["open"], holding.stop_price)
+            reason = "stop hit"
             portfolio.stopped_out_today.append(ticker)
         elif bar["high"] >= holding.target_price:
             exit_price, reason = holding.target_price, "target hit"
-        elif day_index - holding.entry_day >= 10:
-            exit_price, reason = bar["close"], "time stop (10 days)"
+        elif portfolio.trading_days_elapsed - holding.entry_trading_day >= TIME_STOP_TRADING_DAYS:
+            exit_price, reason = bar["close"], f"time stop ({TIME_STOP_TRADING_DAYS} trading days)"
         if exit_price:
             proceeds = holding.quantity * exit_price
             portfolio.cash += proceeds
@@ -842,21 +925,51 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             activity.append(("order_rejected", line, None))
             continue
 
-        cost = fill["fill_price"] * fill["fill_quantity"]
-        portfolio.cash -= cost
-        portfolio.holdings[real_ticker] = Holding(
-            ticker=real_ticker, quantity=fill["fill_quantity"],
-            entry_price=fill["fill_price"], stop_price=float(trade.stop_price),
-            target_price=float(trade.target_price), entry_day=day_index,
-        )
-        decision_id = record_trade(decision, real_ticker, fill)
-        line = (
-            f"BUY {real_ticker} ({decision['alias']}) {fill['fill_quantity']} "
-            f"@ ${fill['fill_price']:.2f} conf={decision.get('confidence')} "
-            f"[{decision_id[:8]}]"
-        )
-        summary["decisions"].append(line)
-        activity.append(("order_placed", line, decision_id))
+        if trade.action == "SELL":
+            # Discretionary (thesis-invalidation) exit -- the one exit type
+            # that's Hermes' judgment call, not a mechanical stop/target/
+            # time-stop (those go through record_exit in the loop above).
+            # This branch never fired until now, since no backtest cycle had
+            # produced a SELL decision -- found by tracing the code, not by
+            # a failure: the block below it unconditionally treated every
+            # fill as a BUY (subtracted cash, overwrote the holding with a
+            # new lot, mislabeled the log line), which would have corrupted
+            # the portfolio the first time Hermes actually called an exit.
+            holding = portfolio.holdings[real_ticker]
+            proceeds = fill["fill_price"] * fill["fill_quantity"]
+            portfolio.cash += proceeds
+            portfolio.closed_pnl.append(
+                proceeds - fill["fill_quantity"] * holding.entry_price
+            )
+            if fill["fill_quantity"] >= holding.quantity:
+                del portfolio.holdings[real_ticker]
+            else:
+                holding.quantity -= fill["fill_quantity"]
+            decision_id = record_trade(decision, real_ticker, fill)
+            line = (
+                f"SELL {real_ticker} ({decision['alias']}) {fill['fill_quantity']} "
+                f"@ ${fill['fill_price']:.2f} (P&L ${portfolio.closed_pnl[-1]:+,.2f}) "
+                f"[{decision_id[:8]}]"
+            )
+            summary["decisions"].append(line)
+            activity.append(("exit", line, decision_id))
+        else:
+            cost = fill["fill_price"] * fill["fill_quantity"]
+            portfolio.cash -= cost
+            portfolio.holdings[real_ticker] = Holding(
+                ticker=real_ticker, quantity=fill["fill_quantity"],
+                entry_price=fill["fill_price"], stop_price=float(trade.stop_price),
+                target_price=float(trade.target_price), entry_day=day_index,
+                entry_trading_day=portfolio.trading_days_elapsed,
+            )
+            decision_id = record_trade(decision, real_ticker, fill)
+            line = (
+                f"BUY {real_ticker} ({decision['alias']}) {fill['fill_quantity']} "
+                f"@ ${fill['fill_price']:.2f} conf={decision.get('confidence')} "
+                f"[{decision_id[:8]}]"
+            )
+            summary["decisions"].append(line)
+            activity.append(("order_placed", line, decision_id))
 
     log_activity(activity)
     return summary
@@ -882,10 +995,7 @@ def main() -> None:
     )["tickers"]
     start = date.fromisoformat(args.start)
 
-    names = {
-        t["symbol"]: [t["name"], t["name"].split(",")[0].split(" Inc")[0].strip()]
-        for t in watchlist
-    }
+    names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
     masking = RunMasking(names, run_start=start, seed=args.seed)
     pacer = QuotaPacer()
 
