@@ -25,16 +25,26 @@ can also enforce §4a (losing streaks) and §9.4 (same-day re-entry).
 
 PHASE 0 REPAIR (2026-08-21) -- NO SAME-DAY LOOKAHEAD: a discretionary BUY or
 SELL Hermes decides on day T's completed data is QUEUED (see QueuedOrder),
-never filled that same day. It resolves against day T+1's REAL open on the
-very next cycle, re-validated by the SAME risk checker against the actual
-opening price -- never against what Hermes originally guessed. See
-resolve_queued_order and the "STEP B" block in run_day. Also from that
-repair: run_day operates on a deep-copied working portfolio and only the
-caller adopts it on success (never publish a partially mutated portfolio);
-a failed cycle halts the run rather than silently skipping the day (see
-_run_cycle_or_halt); and every journal write now carries a deterministic
-decision_id (see make_decision_id) so retrying a failed day cannot
-duplicate an already-journaled trade.
+never filled that same day. Also from that repair: run_day operates on a
+deep-copied working portfolio and only the caller adopts it on success
+(never publish a partially mutated portfolio); a failed cycle halts the run
+rather than silently skipping the day (see _run_cycle_or_halt); and every
+journal write carries a deterministic decision_id (see make_decision_id) so
+retrying a failed day cannot duplicate an already-journaled trade.
+
+2026-08-25 FOLLOW-UP -- REAL INTRADAY CHRONOLOGY: the day-T+1 fill above
+used to happen at the OPEN and mark existing positions at the prior day's
+CLOSE -- violating RULES.md §7's 15-minute entry floor and still leaking a
+day's-worth of lookahead into the risk check. Real 15-minute regular-
+session bars (Alpaca market data -- see fetch_intraday_bars, full-window
+coverage verified for the whole watchlist in HANDOFF.md) replace that with
+an actual chronological walk: opening-gap stops/targets, then time-stops,
+then a queued SELL (exempt from the entry floor) all resolve at the 09:30
+open; a queued BUY resolves no earlier than 09:45, re-validated against
+marks known ONLY as of 09:45 (never today's close); the rest of the
+session is then walked bar-by-bar for every open position. See
+simulate_trading_day for the actual pure algorithm -- run_day only
+replays its plan with real I/O.
 
 Usage:
     python run_backtest.py --start 2026-02-17 --end 2026-08-14 --days 3
@@ -48,7 +58,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclasses_replace
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable
@@ -331,29 +341,28 @@ class Portfolio:
 @dataclass
 class QueuedOrderOutcome:
     accepted: bool
-    reason: str = ""                        # rejection reason, if not accepted
-    same_day_exit_price: float | None = None
-    same_day_exit_reason: str | None = None  # "stop hit" | "target hit"
+    reason: str = ""  # rejection reason, if not accepted
 
 
 def resolve_queued_order(order: QueuedOrder, bar: dict, ctx: Context) -> QueuedOrderOutcome:
-    """Decide whether a queued order fills at `bar["open"]` (the scheduled
-    day's real opening price) -- NEVER at `order.entry_price`, which is
-    Hermes' stale, pre-gap guess and is not even read here.
+    """Decide whether a queued order fills at `bar["open"]` -- NEVER at
+    `order.entry_price`, which is Hermes' stale, pre-gap guess and is not
+    even read here.
 
-    Re-runs the SAME risk checker used at decision time, but now against
-    the REAL open. Rejects outright on any breach (stop distance, reward:
-    risk, exposure, cash, sizing) -- never silently resizes a gapped
-    order to make it fit, which would substitute the checker's judgment
-    for Hermes' and hide how large the gap actually was.
+    Re-runs the SAME risk checker used at decision time, now against the
+    REAL price at the order's actual execution instant (a queued SELL's
+    09:30 open, or a queued BUY's 09:45 open -- see simulate_trading_day).
+    Rejects outright on any breach (stop distance, reward:risk, exposure,
+    cash, sizing, market-hours) -- never silently resizes a gapped order
+    to make it fit, which would substitute the checker's judgment for
+    Hermes' and hide how large the gap actually was.
 
-    For a BUY that's accepted: the position was just opened at the very
-    start of this trading day, so the REST of that same day's real range
-    can still resolve its stop or target before the day is over. OHLC
-    alone cannot say whether price touched the stop or the target FIRST
-    when both fall inside [low, high] -- resolved conservatively (assume
-    the stop, never the target), matching the mechanical-exit priority
-    ordering used elsewhere in this file (stop checked before target).
+    2026-08-25 follow-up: this used to ALSO decide same-day post-entry
+    stop/target eligibility from one aggregate daily bar. That's now
+    handled correctly (and more precisely) by walking the REAL remaining
+    15-minute bars one at a time -- see evaluate_bar_stop_target and
+    simulate_trading_day's final walk stage -- so this function's job
+    shrank to exactly the risk-check re-validation.
     """
     open_price = bar["open"]
     trade = ProposedTrade(
@@ -363,19 +372,308 @@ def resolve_queued_order(order: QueuedOrder, bar: dict, ctx: Context) -> QueuedO
     verdict = check_trade(trade, ctx)
     if not verdict.allowed:
         return QueuedOrderOutcome(accepted=False, reason="; ".join(verdict.violations))
-
-    if order.action == "BUY":
-        if bar["low"] <= order.stop_price:
-            return QueuedOrderOutcome(
-                accepted=True,
-                same_day_exit_price=min(bar["open"], order.stop_price),
-                same_day_exit_reason="stop hit",
-            )
-        if bar["high"] >= order.target_price:
-            return QueuedOrderOutcome(
-                accepted=True, same_day_exit_price=order.target_price, same_day_exit_reason="target hit",
-            )
     return QueuedOrderOutcome(accepted=True)
+
+
+# --------------------------------------------------------------------------
+# intraday chronological simulation -- pure, no I/O (2026-08-25 follow-up)
+#
+# Completes the no-lookahead repair: a single daily OHLC bar let a BUY fill
+# at the open (violating RULES.md §7's 15-minute floor), marked existing
+# positions at the day's CLOSE inside the entry risk check, and processed
+# the WHOLE day's stop/target movement before a queued SELL could fill
+# (letting an afternoon stop retroactively supersede a morning exit). Real
+# 15-minute regular-session bars (Alpaca market data, full-window coverage
+# verified for the whole watchlist -- see HANDOFF.md) fix all three by
+# actually walking the session in chronological order.
+# --------------------------------------------------------------------------
+
+def evaluate_opening_gap(stop_price: float, target_price: float, open_price: float) -> tuple[str, float] | None:
+    """Did the session's 09:30 open already blow through a resting stop or
+    target, before any further intraday movement is considered? Stop
+    checked first -- protecting capital outranks a target, matching the
+    existing mechanical-exit priority elsewhere in this file. A stop gap
+    fills at the worse of open/stop (RULES.md §2b's whole concentration-
+    cap derivation rests on exactly this: "the day opens below it and
+    fills near the open, not near the stop"). A target gap-up fills at the
+    worse-for-the-strategy of open/target for the same reason, applied
+    symmetrically -- never assume the best case in either direction.
+    Returns ("stop"|"target", exit_price) or None."""
+    if open_price <= stop_price:
+        return "stop", min(open_price, stop_price)
+    if open_price >= target_price:
+        return "target", max(open_price, target_price)
+    return None
+
+
+def evaluate_bar_stop_target(stop_price: float, target_price: float, bar: dict) -> tuple[str, float] | None:
+    """Did THIS ONE bar's real intraday range (low/high) touch a resting
+    stop or target? Stop checked first -- when a single bar's low/high
+    range technically crosses BOTH (possible, if rare, at 15-minute
+    granularity), OHLC alone cannot say which came first inside that bar;
+    resolved conservatively (assume the stop, never the target). This is a
+    real, accepted limitation of bar-level (not tick-level) simulation --
+    documented in HANDOFF.md, not silently assumed away. Returns
+    ("stop"|"target", exit_price) or None."""
+    if bar["low"] <= stop_price:
+        return "stop", min(bar["open"], stop_price)
+    if bar["high"] >= target_price:
+        return "target", target_price
+    return None
+
+
+def require_intraday_coverage(
+    needed: list[str], intraday: dict[str, list[dict]],
+    required_times: tuple[str, ...] = ("09:30", "09:45"),
+) -> None:
+    """Fail CLOSED on missing intraday data. Every ticker in `needed`
+    (currently held, or with a pending order) must have real bars for
+    today, including both the 09:30 and 09:45 boundaries execution timing
+    depends on. Raises RuntimeError -- propagates up through run_day and
+    is caught by _run_cycle_or_halt, halting the run exactly like any
+    other cycle failure (date not advanced, state not written). Never
+    fabricates a price and never silently skips -- a real data gap on an
+    otherwise-open trading day is a stop-and-report condition, not a
+    holiday (holidays are detected separately, before this is even
+    called -- see run_day)."""
+    for ticker in needed:
+        bars = intraday.get(ticker)
+        if not bars:
+            raise RuntimeError(
+                f"{ticker}: no intraday bars returned for this trading day -- "
+                "required (held position or pending order) but missing. "
+                "Fails closed: no fabricated price, no silent skip."
+            )
+        times = {b["time"] for b in bars}
+        missing = [t for t in required_times if t not in times]
+        if missing:
+            raise RuntimeError(
+                f"{ticker}: missing required intraday bar(s) {missing} -- "
+                "fails closed rather than guessing a price."
+            )
+
+
+def _bar_at(intraday: dict[str, list[dict]], ticker: str, hhmm: str) -> dict:
+    """The exact bar starting at ET wall-clock `hhmm` for `ticker`. Raises
+    if missing -- callers rely on require_intraday_coverage having already
+    checked the boundary bars, but a mid-day bar (used by the walk stage)
+    gets the same fail-closed treatment if it's ever absent."""
+    for b in intraday[ticker]:
+        if b["time"] == hhmm:
+            return b
+    raise RuntimeError(f"{ticker}: no {hhmm} ET bar available -- fails closed")
+
+
+@dataclass
+class DayResult:
+    """Everything simulate_trading_day decided, in chronological order --
+    plain dicts per event (not a typed hierarchy per event kind) on
+    purpose: this is a decision/ordering record for run_day to replay
+    with REAL I/O, not a generalized event-sourcing engine. Each event has
+    at minimum {"stage", "ticker", "kind"}; "kind" is "exit" (mechanical,
+    no slippage -- run_day applies `exit_price` directly), "fill"
+    (discretionary -- run_day re-derives the real, slippage-adjusted price
+    via the actual execution-sim call against `bar`), "rejected", or
+    "superseded" (informational only, no state change).
+
+    Internal bookkeeping (which tickers are still held, for sequencing
+    purposes) uses UNSLIPPED bar-open reference prices throughout -- see
+    simulate_trading_day's docstring for why that's a small, bounded,
+    documented approximation rather than a correctness gap.
+    """
+    events: list[dict]
+
+
+def simulate_trading_day(
+    holdings: dict[str, "Holding"], pending_orders: list[QueuedOrder],
+    intraday: dict[str, list[dict]], day_index: int, trading_days_elapsed: int,
+    limits_ctx: dict, watchlist: list[str], closed_pnl: list[float], starting_cash: float,
+    daily_pl_pct: float | None, weekly_pl_pct: float | None, drawdown_from_peak_pct: float | None,
+) -> DayResult:
+    """The full chronological session, pure. Order matters and is exactly
+    what fixes the three problems this follow-up repair targets:
+
+      1. 09:30 open -- gap-through stops/targets first (protects capital,
+         and a stop/target that already fired here correctly supersedes a
+         same-ticker queued SELL considered next), then time-stops
+         (decided on information already known before today -- elapsed
+         trading days -- so there's nothing to wait for), then queued
+         discretionary SELLs (exempt from §7's entry-timing floor --
+         exits are always allowed -- filled at the open if the position
+         is still open after the two prior checks).
+      2. 09:30-09:45 -- the FIRST bar's real range, for positions still
+         open after the opening instant.
+      3. 09:45 -- queued BUY entries, the ONLY entry execution point,
+         re-validated by the risk checker using ONLY marks known by 09:45
+         (the 09:30 bar's close for anything still open, never today's
+         close or a later bar) and the REAL clock (minutes_since_open=15,
+         not a placeholder).
+      4. 09:45-through-close -- every remaining bar, in order, for every
+         currently open position (carried-over AND anything that just
+         entered at 09:45 -- its own entry bar counts, since entry
+         happened at that bar's start; earlier bars that day do not,
+         since the position didn't exist yet).
+
+    Approximation, stated plainly: this function's OWN internal cash
+    tracking (used only to decide the 09:45 risk-check equity figure) uses
+    UNSLIPPED bar-open reference prices for every leg, including a same-
+    day SELL that precedes a BUY. Real execution-sim slippage (5bps) is
+    applied by run_day only to the ACTUAL recorded fill/cash movement, not
+    fed back into this function's own sequencing math. Bounded to a few
+    dollars on a same-day SELL-then-BUY sequence -- documented in
+    HANDOFF.md, not silently assumed away.
+    """
+    # Running cash balance, starting from the REAL portfolio cash --
+    # updated with UNSLIPPED reference prices for every leg during this
+    # function's own internal sequencing (see the approximation note
+    # above); the actual, slippage-adjusted cash movement is applied by
+    # run_day when it replays each event with real execution-sim fills.
+    running_cash = starting_cash
+    remaining: dict[str, "Holding"] = dict(holdings)
+    stopped_out_today: list[str] = []
+    events: list[dict] = []
+
+    def equity_mark(prices: dict[str, float], cash_now: float) -> float:
+        return cash_now + sum(
+            h.quantity * prices.get(t, h.entry_price) for t, h in remaining.items()
+        )
+
+    # -- 09:30: opening gaps, then time-stops -----------------------------
+    for ticker, holding in list(remaining.items()):
+        open_bar = _bar_at(intraday, ticker, "09:30")
+        gap = evaluate_opening_gap(holding.stop_price, holding.target_price, open_bar["open"])
+        if gap:
+            kind, exit_price = gap
+            reason = f"{kind} hit (opening gap)"
+            if kind == "stop":
+                stopped_out_today.append(ticker)
+            running_cash += holding.quantity * exit_price
+            del remaining[ticker]
+            events.append({"stage": "opening_gap", "ticker": ticker, "kind": "exit",
+                           "reason": reason, "exit_price": exit_price, "quantity": holding.quantity,
+                           "entry_price": holding.entry_price, "bar_time": "09:30"})
+            continue
+        if trading_days_elapsed - holding.entry_trading_day >= TIME_STOP_TRADING_DAYS:
+            exit_price = open_bar["open"]
+            running_cash += holding.quantity * exit_price
+            del remaining[ticker]
+            events.append({"stage": "time_stop", "ticker": ticker, "kind": "exit",
+                           "reason": f"time stop ({TIME_STOP_TRADING_DAYS} trading days)",
+                           "exit_price": exit_price, "quantity": holding.quantity,
+                           "entry_price": holding.entry_price, "bar_time": "09:30"})
+
+    # -- 09:30: queued discretionary SELLs (exempt from the entry floor) --
+    for order in [o for o in pending_orders if o.action == "SELL"]:
+        if order.ticker not in remaining:
+            events.append({"stage": "queued_sell", "ticker": order.ticker, "kind": "superseded",
+                           "reason": "position already closed at the open", "order": order})
+            continue
+        holding = remaining[order.ticker]
+        open_bar = _bar_at(intraday, order.ticker, "09:30")
+        ctx = Context(
+            account=AccountState(
+                equity=equity_mark({order.ticker: open_bar["open"]}, running_cash), cash=running_cash,
+                daily_pl_pct=daily_pl_pct, weekly_pl_pct=weekly_pl_pct,
+                drawdown_from_peak_pct=drawdown_from_peak_pct,
+            ),
+            clock=MarketClock(is_open=True, minutes_since_open=0, minutes_until_close=390),
+            positions=[Position(ticker=order.ticker, quantity=holding.quantity,
+                                market_value=holding.quantity * open_bar["open"])],
+            watchlist=watchlist, recent_losses=[p < 0 for p in reversed(closed_pnl)],
+            stopped_out_today=stopped_out_today, **limits_ctx,
+        )
+        outcome = resolve_queued_order(order, open_bar, ctx)
+        if not outcome.accepted:
+            events.append({"stage": "queued_sell", "ticker": order.ticker, "kind": "rejected",
+                           "reason": outcome.reason, "order": order})
+            continue
+        running_cash += holding.quantity * open_bar["open"]  # unslipped reference only
+        if order.quantity >= holding.quantity:
+            del remaining[order.ticker]
+        else:
+            remaining[order.ticker] = dataclasses_replace(holding, quantity=holding.quantity - order.quantity)
+        events.append({"stage": "queued_sell", "ticker": order.ticker, "kind": "fill",
+                       "order": order, "bar": open_bar, "bar_time": "09:30"})
+
+    # -- 09:30-09:45: the first bar's real range for still-open positions -
+    for ticker, holding in list(remaining.items()):
+        first_bar = _bar_at(intraday, ticker, "09:30")
+        touch = evaluate_bar_stop_target(holding.stop_price, holding.target_price, first_bar)
+        if touch:
+            kind, exit_price = touch
+            if kind == "stop":
+                stopped_out_today.append(ticker)
+            running_cash += holding.quantity * exit_price
+            del remaining[ticker]
+            events.append({"stage": "intraday_930_945", "ticker": ticker, "kind": "exit",
+                           "reason": f"{kind} hit", "exit_price": exit_price, "quantity": holding.quantity,
+                           "entry_price": holding.entry_price, "bar_time": "09:30"})
+
+    # -- 09:45: queued BUY entries -- the only entry execution point ------
+    for order in [o for o in pending_orders if o.action == "BUY"]:
+        if order.ticker in remaining:
+            events.append({"stage": "buy_945", "ticker": order.ticker, "kind": "superseded",
+                           "reason": "already holding", "order": order})
+            continue
+        bar_945 = _bar_at(intraday, order.ticker, "09:45")
+        # Marks known by 09:45: the 09:30 bar's close (fully elapsed by
+        # now) for anything still open -- never today's daily close, never
+        # a bar later than this one.
+        marks = {t: _bar_at(intraday, t, "09:30")["close"] for t in remaining}
+        equity_at_945 = equity_mark(marks, running_cash)
+        ctx = Context(
+            account=AccountState(
+                equity=equity_at_945, cash=running_cash,
+                daily_pl_pct=daily_pl_pct, weekly_pl_pct=weekly_pl_pct,
+                drawdown_from_peak_pct=drawdown_from_peak_pct,
+            ),
+            # REAL values for the fixed 09:45 execution point -- 15 minutes
+            # elapsed (RULES.md §7's "< 15" floor is satisfied exactly at
+            # this boundary, not assumed), 375 minutes to the 16:00 close.
+            clock=MarketClock(is_open=True, minutes_since_open=15, minutes_until_close=375),
+            positions=[
+                Position(ticker=t, quantity=h.quantity, market_value=h.quantity * marks.get(t, h.entry_price))
+                for t, h in remaining.items()
+            ],
+            watchlist=watchlist, recent_losses=[p < 0 for p in reversed(closed_pnl)],
+            stopped_out_today=stopped_out_today, **limits_ctx,
+        )
+        outcome = resolve_queued_order(order, bar_945, ctx)
+        if not outcome.accepted:
+            events.append({"stage": "buy_945", "ticker": order.ticker, "kind": "rejected",
+                           "reason": outcome.reason, "order": order})
+            continue
+        running_cash -= order.quantity * bar_945["open"]  # unslipped reference only
+        remaining[order.ticker] = Holding(
+            ticker=order.ticker, quantity=order.quantity, entry_price=bar_945["open"],
+            stop_price=order.stop_price, target_price=order.target_price,
+            entry_day=day_index, entry_trading_day=trading_days_elapsed,
+        )
+        events.append({"stage": "buy_945", "ticker": order.ticker, "kind": "fill",
+                       "order": order, "bar": bar_945, "bar_time": "09:45"})
+
+    # -- 09:45 through the close: every remaining bar, chronologically, ---
+    # for every currently open position. Bars strictly before "09:45" are
+    # never considered here -- either already handled above (carried-over
+    # positions), or the ticker didn't hold a position yet (a fresh 09:45
+    # entry) -- "entry-day stops/targets only consider bars after entry."
+    for ticker in list(remaining):
+        for bar in intraday[ticker]:
+            if bar["time"] < "09:45" or ticker not in remaining:
+                continue
+            holding = remaining[ticker]
+            touch = evaluate_bar_stop_target(holding.stop_price, holding.target_price, bar)
+            if touch:
+                kind, exit_price = touch
+                if kind == "stop":
+                    stopped_out_today.append(ticker)
+                running_cash += holding.quantity * exit_price
+                del remaining[ticker]
+                events.append({"stage": "intraday_walk", "ticker": ticker, "kind": "exit",
+                               "reason": f"{kind} hit", "exit_price": exit_price, "quantity": holding.quantity,
+                               "entry_price": holding.entry_price, "bar_time": bar["time"]})
+
+    return DayResult(events=events)
 
 
 # Fixed, arbitrary constant -- only needs to be stable across runs of THIS
@@ -425,8 +723,15 @@ def _atomic_write_json(path: Path, data: dict) -> None:
 # --------------------------------------------------------------------------
 
 def fetch_bars(tickers: list[str], day: date) -> dict[str, dict]:
-    """That day's real OHLC — used to mark the portfolio and to decide
-    whether a resting stop/limit would have been hit."""
+    """That day's real daily OHLC — used ONLY for the cheap holiday/
+    no-trading-day check and informational display (positions_view's
+    current_price, shown to Hermes) since the 2026-08-25 intraday
+    chronology follow-up. Mechanical exits, queued-order execution, and
+    every risk-check mark now come from fetch_intraday_bars instead --
+    see simulate_trading_day. Kept for exactly those two remaining uses
+    (and test_execution_path.py's own direct coverage of this maverick/
+    yfinance path) rather than removed, to keep this change's diff scoped
+    to what actually needed fixing."""
     script = f'''
 import json, yfinance as yf
 out = {{}}
@@ -439,6 +744,30 @@ for t in {tickers!r}:
 print(json.dumps({{"bars": out}}))
 '''
     return json_from(run_in("maverick-mcp", script))["bars"]
+
+
+def fetch_intraday_bars(tickers: list[str], day: date) -> dict[str, list[dict]]:
+    """Real 15-minute regular-session bars for each ticker on `day`, from
+    Alpaca's market-data API (full-window coverage verified for the whole
+    watchlist -- see HANDOFF.md). This is what makes RULES.md §7's 9:45 ET
+    entry floor and chronological intraday stop/target resolution real
+    instead of approximated from one daily bar -- see
+    simulate_trading_day. Only called for tickers actually needed
+    (currently held, or with a pending order) -- not the whole watchlist
+    every cycle."""
+    script = f'''
+import asyncio, json
+from server import get_intraday_bars
+
+async def main():
+    out = {{}}
+    for t in {tickers!r}:
+        out[t] = await get_intraday_bars(t, "{day}")
+    print(json.dumps({{"bars": out}}))
+
+asyncio.run(main())
+'''
+    return json_from(run_in("alpaca-mcp", script))["bars"]
 
 
 def fetch_technicals(tickers: list[str], day: date) -> dict[str, dict]:
@@ -940,6 +1269,29 @@ def ask_hermes(prompt: str, usage_totals: dict, on_invoked: "Callable[[], None] 
         return json_from(raw2)
 
 
+def _execute_exit(working: "Portfolio", ticker: str, quantity: int, entry_price: float,
+                  exit_price: float, reason: str, kind: str, run_key: str, day_index: int,
+                  summary: dict, activity: list) -> None:
+    """Real bookkeeping + journal write for a FULL-quantity mechanical exit
+    (opening gap, time-stop, or an intraday-walk stop/target touch) --
+    replays one "exit" event from simulate_trading_day's plan against
+    `working` with a real decision_id and a real record_exit call. No
+    execution-sim/slippage here -- mechanical exits never went through
+    that path, before or after this repair; only discretionary orders do.
+    """
+    proceeds = quantity * exit_price
+    working.cash += proceeds
+    working.closed_pnl.append(proceeds - quantity * entry_price)
+    del working.holdings[ticker]
+    line = f"{ticker} {reason} @ ${exit_price:.2f} (P&L ${working.closed_pnl[-1]:+,.2f})"
+    summary["exits"].append(line)
+    exit_id = record_exit(
+        ticker, quantity, exit_price, reason,
+        decision_id=make_decision_id(run_key, day_index, ticker, "SELL", kind),
+    )
+    activity.append(("exit", line, exit_id))
+
+
 # --------------------------------------------------------------------------
 # the cycle
 # --------------------------------------------------------------------------
@@ -949,21 +1301,26 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             pacer: QuotaPacer, run_key: str) -> tuple[Portfolio, dict]:
     """Run one simulated trading day. Returns (new_portfolio, summary).
 
-    PHASE 0 REPAIR -- two structural changes from before:
+    PHASE 0 REPAIR + 2026-08-25 INTRADAY-CHRONOLOGY FOLLOW-UP:
 
     1. NO SAME-DAY LOOKAHEAD. Hermes still reasons on TODAY's completed
        data, but any BUY/SELL it decides is QUEUED, never executed today.
-       Step B below resolves YESTERDAY's queued orders against TODAY's
-       real open before anything else happens. See QueuedOrder /
-       resolve_queued_order.
+       See QueuedOrder.
 
-    2. WORKING COPY. Every mutation in this function happens on `working`,
+    2. REAL INTRADAY EXECUTION TIMING. A queued BUY fills no earlier than
+       09:45 ET (RULES.md §7's entry floor), a queued SELL is exempt and
+       can fill at the 09:30 open, and the whole session is walked in real
+       chronological order using Alpaca's 15-minute regular-session bars
+       (fetch_intraday_bars) -- not approximated from one daily bar. See
+       simulate_trading_day for the actual staged algorithm; this function
+       only replays its plan with real I/O (journal writes, slippage-
+       aware fills).
+
+    3. WORKING COPY. Every mutation in this function happens on `working`,
        a deep copy of the portfolio passed in -- the caller's `portfolio`
-       object is never touched. Only on full success (every journal write
-       below completes) does the caller adopt `working` as the new
-       portfolio. If anything raises partway through, `working` is simply
-       discarded and the caller's object is exactly as it was -- "never
-       publish partially mutated portfolio state."
+       object is never touched. Only on full success does the caller
+       adopt `working` as the new portfolio -- "never publish partially
+       mutated portfolio state."
     """
     working = copy.deepcopy(portfolio)
     tickers = [t["symbol"] for t in watchlist]
@@ -973,6 +1330,9 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         ("cycle_start", f"{day_label} ({day}) — reconciling and fetching data", None)
     ]
 
+    # Daily bars: ONLY the cheap holiday/no-trading-day check now (and
+    # positions_view's informational current_price further below) -- see
+    # fetch_bars's docstring.
     bars = fetch_bars(tickers, day)
     if not bars:
         summary["skipped"] = "no market data (holiday/weekend)"
@@ -982,177 +1342,106 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # not -1.
     working.trading_days_elapsed += 1
 
-    # -- STEP A: mechanical exits first -- a resting stop fires without ---
-    # judgment, on TODAY's bar, for positions opened on a PRIOR day. This is
-    # not lookahead: a real stop resting at a broker triggers off whatever
-    # the market does after it was placed, which is exactly what this
-    # simulates. Must run BEFORE step B so a queued discretionary SELL on a
-    # ticker that gapped through its own stop this morning is correctly
-    # seen as already-closed, not double-handled.
-    working.stopped_out_today = []
-    for ticker, holding in list(working.holdings.items()):
-        bar = bars.get(ticker)
-        if not bar:
-            continue
-        exit_price = reason = None
-        if bar["low"] <= holding.stop_price:
-            # RULES.md §2b's whole concentration-cap derivation rests on
-            # "a stop can be jumped -- the day opens below it and fills
-            # near the open, not near the stop." Always filling at the
-            # exact stop price made that scenario structurally impossible
-            # in every backtest cycle, silently flattering results. A real
-            # resting stop fills at the worse of the two.
-            exit_price = min(bar["open"], holding.stop_price)
-            reason = "stop hit"
-            working.stopped_out_today.append(ticker)
-        elif bar["high"] >= holding.target_price:
-            exit_price, reason = holding.target_price, "target hit"
-        elif working.trading_days_elapsed - holding.entry_trading_day >= TIME_STOP_TRADING_DAYS:
-            exit_price, reason = bar["close"], f"time stop ({TIME_STOP_TRADING_DAYS} trading days)"
-        if exit_price:
-            proceeds = holding.quantity * exit_price
-            working.cash += proceeds
-            working.closed_pnl.append(
-                proceeds - holding.quantity * holding.entry_price
-            )
-            del working.holdings[ticker]
-            line = (
-                f"{ticker} {reason} @ ${exit_price:.2f} "
-                f"(P&L ${working.closed_pnl[-1]:+,.2f})"
-            )
-            summary["exits"].append(line)
-            exit_id = record_exit(
-                ticker, holding.quantity, exit_price, reason,
-                decision_id=make_decision_id(run_key, day_index, ticker, "SELL", "mechanical_exit"),
-            )
-            activity.append(("exit", line, exit_id))
+    # -- chronological intraday execution ----------------------------------
+    # Only fetch (and require) real intraday data for tickers that actually
+    # need execution-timing this cycle -- currently held, or with a
+    # decision queued yesterday. A quiet day with neither needs none of
+    # this at all.
+    needed = sorted(set(working.holdings) | {o.ticker for o in working.pending_orders})
+    intraday: dict[str, list[dict]] = fetch_intraday_bars(needed, day) if needed else {}
+    require_intraday_coverage(needed, intraday)  # fails closed -- see its docstring
 
-    # -- STEP B: resolve YESTERDAY's queued discretionary decisions against --
-    # TODAY's real open. This is the actual no-lookahead guarantee: the
-    # order was decided on completed data from the PRIOR day, and only now,
-    # against a price that didn't exist when Hermes reasoned, does it fill.
-    for order in working.pending_orders:
-        bar = bars.get(order.ticker)
-        if bar is None:
-            line = f"{order.ticker}: no bar data at scheduled fill -- queued order dropped"
-            summary["blocked"].append(line)
-            activity.append(("order_rejected", line, None))
-            continue
-
-        if order.action == "SELL" and order.ticker not in working.holdings:
-            # Superseded, not a violation -- the position this SELL targeted
-            # was already closed (mechanical exit above, or an earlier fill
-            # this same loop). Journaling it as a "blocked short" would be
-            # actively misleading.
-            line = f"{order.ticker}: queued SELL superseded -- position already closed"
-            activity.append(("order_queued", line, None))
-            continue
-        if order.action == "BUY" and order.ticker in working.holdings:
-            line = f"{order.ticker}: queued BUY superseded -- already holding"
-            activity.append(("order_queued", line, None))
-            continue
-
-        ctx = Context(
-            account=AccountState(
-                equity=working.equity(bars), cash=working.cash,
-                daily_pl_pct=working.pct_since(1), weekly_pl_pct=working.pct_since(5),
-                drawdown_from_peak_pct=working.drawdown_pct(),
-            ),
-            clock=MarketClock(is_open=True, minutes_since_open=120, minutes_until_close=120),
-            positions=[
-                Position(ticker=t, quantity=h.quantity,
-                         market_value=h.quantity * bars.get(t, {}).get("close", h.entry_price))
-                for t, h in working.holdings.items()
-            ],
-            watchlist=tickers,
-            recent_losses=[p < 0 for p in reversed(working.closed_pnl)],
-            stopped_out_today=working.stopped_out_today,
-            **limits_ctx,
+    if needed:
+        # Computed once, before any of today's processing -- equity_curve
+        # isn't touched again until the very end of run_day, so these are
+        # the same "as of end of yesterday" figures the whole session
+        # should see, never drifting mid-day.
+        plan = simulate_trading_day(
+            holdings=working.holdings, pending_orders=working.pending_orders,
+            intraday=intraday, day_index=day_index,
+            trading_days_elapsed=working.trading_days_elapsed,
+            limits_ctx=limits_ctx, watchlist=tickers, closed_pnl=working.closed_pnl,
+            starting_cash=working.cash,
+            daily_pl_pct=working.pct_since(1), weekly_pl_pct=working.pct_since(5),
+            drawdown_from_peak_pct=working.drawdown_pct(),
         )
-        outcome = resolve_queued_order(order, bar, ctx)
-        if not outcome.accepted:
-            line = f"{order.ticker}: gap-invalidated at open -- {outcome.reason}"
-            summary["blocked"].append(line)
-            activity.append(("order_rejected", line, None))
-            continue
-
-        fill = simulate_fill(order.alias, order.action, order.quantity, bar["open"], bar)
-        if fill["status"] != "filled":
-            line = f"{order.ticker}: sim {fill['rejection_reason']}"
-            summary["blocked"].append(line)
-            activity.append(("order_rejected", line, None))
-            continue
-
-        if order.action == "BUY":
-            cost = fill["fill_price"] * fill["fill_quantity"]
-            working.cash -= cost
-            working.holdings[order.ticker] = Holding(
-                ticker=order.ticker, quantity=fill["fill_quantity"], entry_price=fill["fill_price"],
-                stop_price=order.stop_price, target_price=order.target_price,
-                entry_day=day_index, entry_trading_day=working.trading_days_elapsed,
-            )
-            fill_id = make_decision_id(run_key, day_index, order.ticker, "BUY", "queued_fill")
-            decision_id = record_trade(order.decision, order.ticker, fill, decision_id=fill_id)
-            line = (
-                f"BUY {order.ticker} ({order.alias}) {fill['fill_quantity']} @ ${fill['fill_price']:.2f} "
-                f"(queued day {order.queued_day_index + 1}, filled at open) [{decision_id[:8]}]"
-            )
-            summary["decisions"].append(line)
-            activity.append(("order_placed", line, decision_id))
-
-            if outcome.same_day_exit_reason:
-                # Entry happened at the very start of today -- the REST of
-                # today's real range can still resolve the fresh stop/target
-                # before the day ends. See resolve_queued_order's docstring
-                # for the conservative (stop-over-target) OHLC-ambiguity
-                # resolution already baked into `outcome`.
-                exit_price = outcome.same_day_exit_price
-                proceeds = fill["fill_quantity"] * exit_price
-                working.cash += proceeds
-                working.closed_pnl.append(proceeds - fill["fill_quantity"] * fill["fill_price"])
-                del working.holdings[order.ticker]
-                if outcome.same_day_exit_reason == "stop hit":
-                    working.stopped_out_today.append(order.ticker)
-                exit_id = make_decision_id(run_key, day_index, order.ticker, "SELL", "same_day_exit")
-                exit_decision_id = record_exit(
-                    order.ticker, fill["fill_quantity"], exit_price,
-                    f"same-day {outcome.same_day_exit_reason} after open fill", decision_id=exit_id,
+        working.stopped_out_today = []
+        for event in plan.events:
+            ticker, kind = event["ticker"], event["kind"]
+            if kind == "exit":
+                if event["reason"].startswith("stop"):
+                    working.stopped_out_today.append(ticker)
+                _execute_exit(
+                    working, ticker, event["quantity"], event["entry_price"], event["exit_price"],
+                    event["reason"], event["stage"], run_key, day_index, summary, activity,
                 )
-                line2 = (
-                    f"{order.ticker} {outcome.same_day_exit_reason} @ ${exit_price:.2f} same day as "
-                    f"entry (P&L ${working.closed_pnl[-1]:+,.2f})"
-                )
-                summary["exits"].append(line2)
-                activity.append(("exit", line2, exit_decision_id))
-        else:  # SELL
-            holding = working.holdings[order.ticker]
-            proceeds = fill["fill_price"] * fill["fill_quantity"]
-            working.cash += proceeds
-            working.closed_pnl.append(proceeds - fill["fill_quantity"] * holding.entry_price)
-            if fill["fill_quantity"] >= holding.quantity:
-                del working.holdings[order.ticker]
-            else:
-                holding.quantity -= fill["fill_quantity"]
-            fill_id = make_decision_id(run_key, day_index, order.ticker, "SELL", "queued_fill")
-            decision_id = record_trade(order.decision, order.ticker, fill, decision_id=fill_id)
-            line = (
-                f"SELL {order.ticker} ({order.alias}) {fill['fill_quantity']} @ ${fill['fill_price']:.2f} "
-                f"(queued day {order.queued_day_index + 1}, filled at open, P&L "
-                f"${working.closed_pnl[-1]:+,.2f}) [{decision_id[:8]}]"
-            )
-            summary["decisions"].append(line)
-            activity.append(("exit", line, decision_id))
+            elif kind == "superseded":
+                line = f"{ticker}: queued {event['order'].action} superseded -- {event['reason']}"
+                activity.append(("order_queued", line, None))
+            elif kind == "rejected":
+                order = event["order"]
+                line = f"{ticker}: queued {order.action} rejected -- {event['reason']}"
+                summary["blocked"].append(line)
+                activity.append(("order_rejected", line, None))
+            elif kind == "fill":
+                order, bar = event["order"], event["bar"]
+                fill = simulate_fill(order.alias, order.action, order.quantity, bar["open"], bar)
+                if fill["status"] != "filled":
+                    line = f"{ticker}: sim {fill['rejection_reason']}"
+                    summary["blocked"].append(line)
+                    activity.append(("order_rejected", line, None))
+                    continue
+                fill_id = make_decision_id(run_key, day_index, ticker, order.action, "queued_fill")
+                decision_id = record_trade(order.decision, ticker, fill, decision_id=fill_id)
+                if order.action == "BUY":
+                    cost = fill["fill_price"] * fill["fill_quantity"]
+                    working.cash -= cost
+                    working.holdings[ticker] = Holding(
+                        ticker=ticker, quantity=fill["fill_quantity"], entry_price=fill["fill_price"],
+                        stop_price=order.stop_price, target_price=order.target_price,
+                        entry_day=day_index, entry_trading_day=working.trading_days_elapsed,
+                    )
+                    line = (
+                        f"BUY {ticker} ({order.alias}) {fill['fill_quantity']} @ ${fill['fill_price']:.2f} "
+                        f"at 09:45 ET (queued day {order.queued_day_index + 1}) [{decision_id[:8]}]"
+                    )
+                    summary["decisions"].append(line)
+                    activity.append(("order_placed", line, decision_id))
+                else:  # SELL
+                    holding = working.holdings[ticker]
+                    proceeds = fill["fill_price"] * fill["fill_quantity"]
+                    working.cash += proceeds
+                    working.closed_pnl.append(proceeds - fill["fill_quantity"] * holding.entry_price)
+                    if fill["fill_quantity"] >= holding.quantity:
+                        del working.holdings[ticker]
+                    else:
+                        holding.quantity -= fill["fill_quantity"]
+                    line = (
+                        f"SELL {ticker} ({order.alias}) {fill['fill_quantity']} @ ${fill['fill_price']:.2f} "
+                        f"at the 09:30 open (queued day {order.queued_day_index + 1}, P&L "
+                        f"${working.closed_pnl[-1]:+,.2f}) [{decision_id[:8]}]"
+                    )
+                    summary["decisions"].append(line)
+                    activity.append(("exit", line, decision_id))
 
     # Every order queued yesterday has now been resolved one way or
-    # another (filled, rejected, dropped, or superseded) -- never carried
-    # forward indefinitely.
+    # another (filled, rejected, or superseded) -- never carried forward
+    # indefinitely.
     working.pending_orders = []
 
-    equity = working.equity(bars)
+    # End of day: mark to the REAL market close (each held ticker's last
+    # regular-session bar). Legitimate now that the day's chronological
+    # processing above is actually complete -- "prior completed daily
+    # close," not lookahead, from the perspective of the ONLY thing that
+    # will ever read it (tomorrow's cycle).
+    closing_prices = {
+        t: {"close": intraday[t][-1]["close"]} for t in working.holdings if t in intraday
+    }
+    equity = working.equity(closing_prices)
     working.equity_curve.append(equity)
     record_snapshot(
         day_label=masking.day_index(day), equity=equity, cash=working.cash,
-        exposure_pct=working.invested(bars) / equity * 100 if equity else 0.0,
+        exposure_pct=working.invested(closing_prices) / equity * 100 if equity else 0.0,
         drawdown_pct=working.drawdown_pct(),
         open_positions=len(working.holdings),
     )

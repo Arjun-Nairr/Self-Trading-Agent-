@@ -6,9 +6,7 @@ on this project.** It exists because the working split from here on is:
 Code handles execution** — reading/editing the actual code, running the
 harness, touching Neon, committing. Don't propose direct code edits as if
 you'll apply them yourself; propose the *decision*, and it gets relayed back
-to Claude Code to implement and verify. If you want to see current file
-contents to reason about something precisely, ask Arjun to paste them in —
-you don't have live repo access.
+to Claude Code to implement and verify.
 
 ---
 
@@ -23,8 +21,7 @@ identity-masked so the model can't just recall what really happened) and
 phase — no live trading yet.
 
 Full plain-language architecture + every rule's reasoning:
-**[The Hermes Ledger](https://claude.ai/code/artifact/57a0d9c6-8a25-4fa7-933c-de5327c6f9cb)**
-— read that first if you want real depth before opining on anything below.
+**[The Hermes Ledger](https://claude.ai/code/artifact/57a0d9c6-8a25-4fa7-933c-de5327c6f9cb)**.
 This file is the condensed, decision-focused version.
 
 ---
@@ -264,6 +261,165 @@ Explicitly out of scope for this repair, still open:
 
 ---
 
+## Intraday chronology follow-up (2026-08-25)
+
+Completes the no-lookahead repair. The day-T+1 execution from the earlier
+Phase 0 pass still had three real problems: a queued BUY filled at the
+**market open**, violating RULES.md §7's 15-minute entry floor outright; the
+BUY's risk check marked existing positions at the **prior day's close**
+(a full day of lookahead into the check itself, not just the fill); and
+the whole day's stop/target movement was processed **before** a queued
+SELL, so an afternoon stop could retroactively supersede a morning exit
+that should already have happened. **No real backtest cycle was run or
+advanced to do this work** — cursor is still Day 8, quota still 34/175.
+
+### Data source verification (done before writing any code)
+
+Real 15-minute regular-session bars from **Alpaca's market-data API**
+(`https://data.alpaca.markets/v2/stocks/bars`) — the account's existing
+credentials, no new provider, no new dependency (`zoneinfo` is stdlib,
+used to convert UTC bar timestamps to real ET wall-clock time, correctly
+handling the March DST transition inside the backtest window).
+
+Checked directly against the live API for **every one of the 10 watchlist
+tickers, across the full backtest window** (2026-02-17 → 2026-08-14)
+before building anything on top of it:
+
+| Check | Result |
+|---|---|
+| Trading days with bar data | **125/125**, every ticker |
+| Days with an exact 09:30 ET bar (the open) | **125/125**, every ticker |
+| Days with an exact 09:45 ET bar (the entry floor) | **125/125**, every ticker |
+| Days with an exact 15:45 ET bar (last regular-session bar) | **125/125**, every ticker |
+
+Full coverage confirmed — no fallback to daily OHLC was needed, no price
+was ever fabricated.
+
+### Corrected intraday timeline
+
+For every trading day, in real chronological order:
+
+1. **09:30 (open):** opening-gap stops/targets resolve first (using only
+   that instant's open price — no bar range yet), then time-stops (decided
+   on information already known before the session — elapsed trading days
+   — so there's nothing to wait for), then any queued discretionary SELL
+   (exempt from §7's entry floor — exits are always allowed — fills at the
+   open **only if the position is still open** after the two prior checks).
+2. **09:30–09:45:** the first bar's real low/high range, for positions
+   still open after the opening instant.
+3. **09:45 (the only entry point):** queued BUY orders fill here, never
+   earlier. Re-validated by the risk checker using **only** marks known by
+   09:45 — the 09:30 bar's close for anything still open, never today's
+   close or any later bar — and the **real** clock context
+   (`minutes_since_open=15`, `minutes_until_close=375`; never a
+   placeholder like the old fixed `120`/`120`).
+4. **09:45 through the close:** every remaining 15-minute bar, walked in
+   order, for every open position — both carried-over holdings and
+   anything that just entered at 09:45 (its own entry bar counts, since
+   entry happened at that bar's start; earlier bars that day do not,
+   since the position didn't exist yet).
+
+**Ambiguity rule, stated once and applied everywhere:** when a single
+bar's low/high range technically crosses both the stop and the target
+(possible, if rare, at 15-minute granularity), OHLC alone cannot say
+which came first — resolved conservatively, **always the stop, never the
+target**. A real, accepted limitation of bar-level (not tick-level)
+simulation, not silently assumed away.
+
+Implementation: `simulate_trading_day` (pure, no I/O) decides the entire
+sequence above and returns it as an ordered list of plain-dict events;
+`run_day` replays that plan with real I/O (journal writes, slippage-aware
+fills via the same `execution-sim` path as before — mechanical exits
+still never go through slippage, matching the pre-existing distinction
+between mechanical and discretionary fills). `evaluate_opening_gap` and
+`evaluate_bar_stop_target` are the small pure primitives it's built from;
+`require_intraday_coverage` is the fail-closed gate.
+
+### A real bug caught before it shipped
+
+While wiring the risk-checker context for the new 09:30/09:45 checks, the
+daily/weekly P&L and drawdown figures were initially hardcoded to `None`
+(no `equity_curve` access inside the new pure function). `risk_checker.py`
+correctly treats `None` there as **fail-closed** — every single BUY in the
+first test run was silently rejected with "P&L could not be determined."
+Caught immediately by the new tests, not shipped: `simulate_trading_day`
+now takes the real `daily_pl_pct`/`weekly_pl_pct`/`drawdown_from_peak_pct`
+(computed once from `working.equity_curve`, which doesn't change until
+the very end of the day, so these are stable "as of end of yesterday"
+figures for the whole session) as explicit parameters instead of
+guessing. A second, related bug caught the same way: the function never
+received the portfolio's actual starting cash, so its internal running
+balance began at $0 instead of the real figure — fixed by threading
+`starting_cash` through explicitly.
+
+### Tests run and results
+
+**New pure tests (no Docker/Neon), `test_execution_semantics.py`, 20
+total, all passing** — including every required scenario: a BUY cannot
+fill before 09:45; a queued SELL fills at the open when nothing closed it
+first; a later stop cannot supersede an already-completed opening SELL;
+an opening-gap stop correctly supersedes a queued SELL; the 09:45 BUY
+risk check is provably unaffected by an extreme later close (two separate
+scenarios); stops/targets resolve at the *first* touching bar, never a
+later one; entry-day resolution only considers bars at or after the
+entry bar; missing intraday data (a ticker entirely absent, or missing
+just the 09:45 boundary) fails closed with `RuntimeError`. Two existing
+Phase 0 tests were updated (`resolve_queued_order`'s same-day-exit fields
+moved to the new bar-walk, since a single aggregate daily bar was itself
+a mild form of intraday lookahead) — everything else from Phase 0 passes
+unchanged.
+
+**Real end-to-end smoke test against live Alpaca data** (not part of the
+permanent suite, run manually): `fetch_intraday_bars` → real 15-min OLN
+bars → fed into `simulate_trading_day` with a hand-built position and a
+hand-built queued BUY. The BUY was correctly **rejected** by the real
+risk checker (stop distance 19.5%, outside RULES.md §6a's 5–10% band) —
+confirms the full pipeline (Alpaca → `alpaca-mcp` → `run_backtest.py` →
+`risk_checker.py`) is wired correctly end to end against real market
+data, not just hand-built fixtures.
+
+**Integration suites, all still green:** `test_execution_path.py`
+(unaffected by this change), `test_risk_checker.py`,
+`test_anonymize.py`, `test_quota_pacer.py` (all unchanged, unaffected).
+
+One deployment step repeated from Phase 0: **`alpaca-mcp` also bakes code
+into its image** (`build:`, not a live mount) — rebuilt and re-verified
+against the live container before any of the above ran.
+
+### Remaining limitations of this follow-up
+
+- **Approximation, stated plainly:** `simulate_trading_day`'s own internal
+  cash bookkeeping (used only to decide the 09:45 risk-check equity
+  figure) uses **unslipped** bar-open reference prices for every leg,
+  including a same-day SELL that precedes a BUY. Real execution-sim
+  slippage (5bps) is applied by `run_day` only to the actual recorded
+  fill/cash movement, never fed back into the planning function's own
+  sequencing math. Bounded to at most a few dollars on a same-day
+  SELL-then-BUY sequence — small enough that it would essentially never
+  flip a real risk-check verdict, but a real, documented approximation
+  rather than exact to the cent.
+- **Two different data vendors now coexist for two different purposes:**
+  `fetch_bars` (yfinance, via `maverick-mcp`) still supplies the
+  holiday/no-trading-day check and `positions_view`'s informational
+  display; `fetch_intraday_bars` (Alpaca) supplies every execution-timing
+  decision. Minor cross-vendor close-price discrepancies between the two
+  are possible in principle (different feeds can print slightly different
+  official closes) — never a correctness problem for execution (Alpaca is
+  the sole source there), but worth knowing if a displayed price and an
+  executed price look slightly different on the same day.
+- A queued order whose scheduled ticker has genuinely no intraday data
+  now **halts the cycle** (fails closed) rather than being silently
+  dropped, which is stricter than Phase 0's original behavior — a
+  deliberate change per this follow-up's explicit requirement, not an
+  oversight.
+- Cross-ticker event ordering in the activity log is per-ticker, not
+  strictly wall-clock-interleaved across multiple tickers on the same
+  day (each ticker's own bars are still processed in correct chronological
+  order, which is what actually matters for a single position's
+  stop/target resolution) — cosmetic only.
+
+---
+
 ## Open questions worth a second opinion — this is where you're useful
 
 1. **Risk per trade: 1% (current) vs. 5% (a comparable real system Arjun
@@ -298,9 +454,8 @@ Explicitly out of scope for this repair, still open:
   isn't a rule you or Hermes can talk your way around.
 - **Don't propose architecture changes lightly.** A few of the current
   design choices look over-engineered from a fresh read (isolated Docker
-  networks per tool, masking, point-in-time gating) — they aren't. Read
-  the Ledger's reasoning before suggesting a simplification; most of these
-  came from a real failure mode that was already hit once.
+  networks per tool, masking, point-in-time gating) — they aren't. Most of
+  these came from a real failure mode that was already hit once.
 - **This project's own quant assumptions have known gaps**, already
   identified and not yet resolved: the watchlist was screened using data
   from inside the exact window being backtested (survivorship bias, P&L

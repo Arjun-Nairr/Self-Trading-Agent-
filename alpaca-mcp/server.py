@@ -29,8 +29,9 @@ a retry actually reaching Alpaca twice.
 import asyncio
 import json
 import os
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dt_time, timedelta, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastmcp import FastMCP
@@ -53,6 +54,15 @@ DATA_URL = "https://data.alpaca.markets"
 TERMINAL_STATUSES = {"filled", "partially_filled", "canceled", "rejected", "expired"}
 POLL_ATTEMPTS = 6
 POLL_DELAY_SECONDS = 1.5
+
+# The backtest harness's intraday no-lookahead execution timing (RULES.md
+# §7's 9:45 ET entry floor) needs real ET wall-clock boundaries, not raw
+# UTC -- New York's UTC offset changes with DST across the backtest
+# window (Feb -> Aug 2026 crosses the March DST transition). zoneinfo
+# (stdlib) handles this correctly; no new dependency.
+_ET = ZoneInfo("America/New_York")
+_REGULAR_SESSION_START = dt_time(9, 30)
+_REGULAR_SESSION_END = dt_time(16, 0)
 
 
 def _headers() -> dict[str, str]:
@@ -464,6 +474,61 @@ async def get_historical_news(
         }
         for a in articles
     ]
+
+
+@mcp.tool()
+async def get_intraday_bars(ticker: str, day: str) -> list[dict[str, Any]]:
+    """
+    Real historical 15-minute REGULAR-SESSION bars for `ticker` on `day`
+    (YYYY-MM-DD), from Alpaca's market-data API -- what the backtest
+    harness's intraday no-lookahead execution timing (RULES.md §7's 9:45
+    ET entry floor, and chronological stop/target resolution) needs. A
+    single daily OHLC bar cannot represent real sub-day price movement or
+    identify a specific ET timestamp; this can. Full-window coverage for
+    the whole watchlist was verified before this was built for backtest
+    use (see HANDOFF.md) -- this is not an unverified new data path.
+
+    Uses this account's EXISTING market-data credentials (same
+    ALPACA_API_KEY/SECRET as place_order/get_account) -- no new provider,
+    no new dependency (zoneinfo is stdlib).
+
+    Returns bars sorted chronologically, REGULAR session only (09:30-16:00
+    ET -- pre/post-market bars dropped), each as
+    {"time": "HH:MM" (ET wall-clock, e.g. "09:45"), "open", "high",
+    "low", "close"}. `time` is a plain ET label, not a UTC timestamp --
+    callers should never need to re-derive timezone/DST themselves.
+    """
+    async with httpx.AsyncClient() as client:
+        all_bars: list[dict[str, Any]] = []
+        params = {
+            "symbols": ticker.upper(), "timeframe": "15Min",
+            "start": f"{day}T00:00:00Z", "end": f"{day}T23:59:59Z",
+            "limit": 10000, "adjustment": "raw",
+        }
+        while True:
+            resp = await client.get(f"{DATA_URL}/v2/stocks/bars", params=params,
+                                    headers=_headers(), timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            all_bars.extend(data.get("bars", {}).get(ticker.upper(), []))
+            token = data.get("next_page_token")
+            if not token:
+                break
+            params["page_token"] = token
+
+    out = []
+    for b in all_bars:
+        ts = datetime.fromisoformat(b["t"].replace("Z", "+00:00")).astimezone(_ET)
+        if ts.date().isoformat() != day:
+            continue  # a UTC-day query can spill one bar into an adjacent ET date
+        if not (_REGULAR_SESSION_START <= ts.time() < _REGULAR_SESSION_END):
+            continue  # extended-hours bars dropped -- regular session only
+        out.append({
+            "time": ts.strftime("%H:%M"), "open": b["o"], "high": b["h"],
+            "low": b["l"], "close": b["c"],
+        })
+    out.sort(key=lambda b: b["time"])
+    return out
 
 
 if __name__ == "__main__":
