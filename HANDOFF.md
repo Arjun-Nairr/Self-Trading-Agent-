@@ -418,6 +418,24 @@ against the live container before any of the above ran.
   order, which is what actually matters for a single position's
   stop/target resolution) — cosmetic only.
 
+### Bug fix: partial-SELL cash credit (2026-08-25)
+
+`simulate_trading_day`'s queued-SELL stage credited `running_cash` using
+the position's **full** `holding.quantity` even when the order only sold
+part of it (`order.quantity < holding.quantity`) — inflating the 09:45
+cash/equity figure a subsequent BUY got risk-checked against, and could
+have caused a real concentration-cap or cash-floor violation to be missed.
+Fixed to credit exactly the executed quantity
+(`min(order.quantity, holding.quantity)`); the remaining-quantity
+bookkeeping was already correct and untouched. New regression test
+(`test_partial_sell_credits_only_the_sold_shares`) proves all three
+required properties in one scenario — only the sold shares are credited,
+the correct remainder (80 of 100) is what a later same-day exit reports,
+and a boundary-cased BUY is correctly rejected (§2b) using the true,
+non-inflated equity where it would have been wrongly accepted under the
+old bug. Verified the test actually catches the bug by temporarily
+reintroducing it and confirming the test fails, then restoring the fix.
+
 ---
 
 ## Open questions worth a second opinion — this is where you're useful

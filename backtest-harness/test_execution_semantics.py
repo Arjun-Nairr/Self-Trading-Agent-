@@ -486,6 +486,82 @@ def test_missing_required_intraday_data_fails_closed():
     print("  ok  full coverage passes without raising")
 
 
+def test_partial_sell_credits_only_the_sold_shares():
+    """Bug fix (2026-08-25): a partial queued SELL (order.quantity <
+    holding.quantity) was crediting running_cash for the WHOLE position's
+    value, not just the shares actually sold -- inflating the 09:45 cash/
+    equity context a subsequent BUY gets risk-checked against.
+
+    Proves all three required properties in one scenario:
+      1. Only the sold shares' proceeds are credited (via a later-in-the-
+         day exit on the REMAINING shares, whose recorded quantity proves
+         how much was actually left held).
+      2. The remaining quantity is correct (same mechanism).
+      3. A later 09:45 BUY is evaluated against the correct, non-inflated
+         cash/equity -- constructed as a real boundary case: it's rejected
+         (over the §2b concentration cap) using the CORRECT equity figure;
+         if the old bug were still present, the inflated equity would
+         raise the cap enough to wrongly accept it.
+    """
+    # 100 OLN shares held @ $50, stop $45 (10% -- within band), target $65.
+    oln_holding = {"OLN": Holding(ticker="OLN", quantity=100, entry_price=50.0,
+                                  stop_price=45.0, target_price=65.0,
+                                  entry_day=1, entry_trading_day=1)}
+    # Sell only 20 of the 100 at the 09:30 open ($50) -- a real partial.
+    sell = _sell_order(ticker="OLN", quantity=20)
+    # A later bar (11:00) drives OLN's low to $44, below the $45 stop --
+    # this must fire against whatever is ACTUALLY still held.
+    oln_bars = _flat_session(price=50.0, overrides={
+        "11:00": {"open": 50.0, "high": 50.0, "low": 44.0, "close": 44.0},
+    })
+    # DINO BUY sized to land BETWEEN the correct cap ($500 = 10% of the
+    # correct $5,000 equity) and the buggy cap ($900 = 10% of the buggy
+    # $9,000 equity that the old code would have produced): $600 notional.
+    # Stop/target chosen so §2a (risk budget) and §6a/§6b pass cleanly --
+    # §2b concentration is the one, isolated thing this scenario tests.
+    buy = _buy_order(ticker="DINO", alias="DELTA", quantity=10,
+                     stop_price=55.0, target_price=70.0)
+    dino_bars = _flat_session(price=60.0)
+
+    plan = simulate_trading_day(
+        holdings=oln_holding, pending_orders=[sell, buy],
+        intraday={"OLN": oln_bars, "DINO": dino_bars}, day_index=8,
+        trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN", "DINO"], closed_pnl=[],
+        starting_cash=0.0, daily_pl_pct=0.0, weekly_pl_pct=0.0, drawdown_from_peak_pct=0.0,
+    )
+
+    sell_fill = [e for e in plan.events if e["stage"] == "queued_sell" and e["kind"] == "fill"]
+    assert len(sell_fill) == 1, plan.events
+    print("  ok  the partial SELL fills (not rejected/superseded)")
+
+    # Property 1 + 2: the later 11:00 stop on OLN must report exactly the
+    # REMAINING 80 shares (100 - 20) -- if the fix's cash credit were
+    # wrong but the quantity math happened to be right, this would still
+    # pass; it's here to pin down the OTHER half (remaining quantity) the
+    # task also requires proven, using the same scenario.
+    later_exit = [e for e in plan.events if e["stage"] == "intraday_walk" and e["ticker"] == "OLN"]
+    assert len(later_exit) == 1, plan.events
+    assert later_exit[0]["quantity"] == 80, (
+        f"expected 80 shares remaining held (100 - 20 sold), got {later_exit[0]['quantity']}"
+    )
+    print("  ok  exactly 80 shares (100 - 20 sold) remain held and are what the later stop exits")
+
+    # Property 3: the 09:45 DINO BUY must be REJECTED for §2b using the
+    # CORRECT ($5,000) equity -- proves running_cash was NOT inflated by
+    # crediting the full 100-share position instead of the 20 actually
+    # sold (which would have produced $9,000 equity and a $900 cap,
+    # wrongly accepting this $600 order).
+    dino_events = [e for e in plan.events if e["ticker"] == "DINO"]
+    assert len(dino_events) == 1, dino_events
+    assert dino_events[0]["kind"] == "rejected", (
+        f"expected the DINO BUY rejected under correct (non-inflated) equity, "
+        f"got {dino_events[0]['kind']} -- the partial-sell cash bug may have regressed"
+    )
+    assert "§2b" in dino_events[0]["reason"], dino_events[0]["reason"]
+    print("  ok  the 09:45 BUY is rejected using the correct, non-inflated cash/equity "
+          "(would have been wrongly accepted under the old full-position-credit bug)")
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

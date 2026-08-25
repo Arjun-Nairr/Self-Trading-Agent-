@@ -587,7 +587,14 @@ def simulate_trading_day(
             events.append({"stage": "queued_sell", "ticker": order.ticker, "kind": "rejected",
                            "reason": outcome.reason, "order": order})
             continue
-        running_cash += holding.quantity * open_bar["open"]  # unslipped reference only
+        # Bug fix (2026-08-25): a PARTIAL sell (order.quantity < holding.
+        # quantity) must credit cash for only the shares actually sold --
+        # crediting the whole position's value inflated running_cash (and
+        # therefore the 09:45 equity/cash context a later queued BUY gets
+        # risk-checked against) by the value of shares that were never
+        # sold and are still held.
+        executed_quantity = min(order.quantity, holding.quantity)
+        running_cash += executed_quantity * open_bar["open"]  # unslipped reference only
         if order.quantity >= holding.quantity:
             del remaining[order.ticker]
         else:
