@@ -118,12 +118,22 @@ async def _record_decision(
     technical_basis: str | None = None,
     strategy_notes: str | None = None,
     data_timestamps: dict[str, Any] | None = None,
+    decision_id: str | None = None,
 ) -> dict[str, Any]:
+    """decision_id: optional caller-supplied id. Live Hermes never passes
+    one (always gets a fresh uuid4, unchanged behavior). The backtest
+    harness passes a DETERMINISTIC id derived from (run, day, ticker,
+    action, kind) -- Phase 0 repair -- so that retrying a failed backtest
+    day regenerates the SAME id for the SAME real-world event instead of a
+    fresh random one. ON CONFLICT DO NOTHING + the fallback SELECT below
+    make a retried write a safe no-op, mirroring
+    _record_execution_result's own idempotency pattern (only resolves a
+    row that's still 'pending')."""
     _validate_decision_fields(
         action, confidence, primary_signal, expected_reward_risk,
         invalidation_condition, strategy_notes, technical_basis,
     )
-    decision_id = str(uuid.uuid4())
+    decision_id = decision_id or str(uuid.uuid4())
     pool = await get_pool()
     row = await pool.fetchrow(
         """
@@ -133,6 +143,7 @@ async def _record_decision(
                              expected_reward_risk, invalidation_condition,
                              strategy_notes, data_timestamps)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        ON CONFLICT (decision_id) DO NOTHING
         RETURNING *
         """,
         decision_id, ticker, action, intended_quantity, intended_notional,
@@ -140,6 +151,11 @@ async def _record_decision(
         expected_reward_risk, invalidation_condition, strategy_notes,
         json.dumps(data_timestamps) if data_timestamps else None,
     )
+    if row is None:
+        # A caller-supplied decision_id that already exists -- a retry of
+        # an already-journaled event. Return the existing row instead of
+        # a duplicate insert or an error.
+        row = await pool.fetchrow("SELECT * FROM trades WHERE decision_id = $1", decision_id)
     return dict(row)
 
 

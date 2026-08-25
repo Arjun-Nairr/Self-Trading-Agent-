@@ -11,10 +11,14 @@ itself so it never pollutes backtest results.
 """
 from datetime import date
 
-from run_backtest import fetch_bars, record_trade, run_in, simulate_fill
+from run_backtest import fetch_bars, make_decision_id, record_trade, run_in, simulate_fill
 
 TICKER = "OLN"
 DAY = date(2026, 2, 18)
+# A test run_key, distinct from any real backtest run's (start|seed) key --
+# cannot collide with a genuine trade even if this test's cleanup somehow
+# didn't run.
+TEST_RUN_KEY = "test_execution_path|999"
 
 
 def main():
@@ -41,8 +45,22 @@ def main():
         "invalidation_condition": "execution-path test row, not a real trade",
         "reasoning": "Integration test of the harness execution path.",
     }
-    decision_id = record_trade(decision, TICKER, fill)
+    fixed_id = make_decision_id(TEST_RUN_KEY, 1, TICKER, "BUY", "queued_fill")
+    decision_id = record_trade(decision, TICKER, fill, decision_id=fixed_id)
+    assert decision_id == fixed_id, (decision_id, fixed_id)
     print(f"  ok  journalled {decision_id}")
+
+    # PHASE 0 REPAIR: prove the ACTUAL DB-level idempotency guarantee, not
+    # just that the id-generation scheme is deterministic (that part is
+    # tested separately, without a container, in test_execution_semantics
+    # .py). Retrying the exact same call with the exact same decision_id --
+    # exactly what happens when a failed backtest day is re-run -- must be
+    # a safe no-op, never a second row.
+    decision_id_retry = record_trade(decision, TICKER, fill, decision_id=fixed_id)
+    assert decision_id_retry == fixed_id, "retry returned a different id than the original write"
+    row_count = count_rows(fixed_id)
+    assert row_count == 1, f"retrying an already-journaled trade created {row_count} rows, expected 1"
+    print("  ok  retrying the SAME decision_id (a retried failed day) journals exactly ONE row, not two")
 
     try:
         verify(decision_id)
@@ -56,6 +74,21 @@ def main():
         print("  ok  test row deleted")
 
     print("PASS: bars -> fill sim -> journal -> read-back all wired correctly")
+
+
+def count_rows(decision_id: str) -> int:
+    check = run_in("trade-journal", f'''
+import asyncio
+from server import get_pool
+
+async def main():
+    pool = await get_pool()
+    n = await pool.fetchval("SELECT count(*) FROM trades WHERE decision_id = $1", "{decision_id}")
+    print(n)
+
+asyncio.run(main())
+''')
+    return int(check.strip().splitlines()[-1])
 
 
 def cleanup(decision_id: str) -> None:

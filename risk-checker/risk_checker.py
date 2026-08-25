@@ -160,7 +160,18 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str]) -> None:
     lim, acct = ctx.limits, ctx.account
 
     # -- §1 scope ---------------------------------------------------------
-    if ctx.watchlist and trade.ticker.upper() not in {t.upper() for t in ctx.watchlist}:
+    # Fail CLOSED on an empty/unavailable watchlist -- `if ctx.watchlist and
+    # ...` previously short-circuited to False on an empty list, which
+    # SKIPPED the check entirely and let every ticker through. An empty
+    # watchlist means "cannot verify eligibility," not "everything is
+    # eligible" -- same fail-closed contract as a null equity figure
+    # elsewhere in this module. Exits are unaffected (this function is
+    # entry-only); a position legitimately opened while the watchlist was
+    # populated must still be exitable if the watchlist source later
+    # becomes unavailable.
+    if not ctx.watchlist:
+        v.append("§1/§9.3: watchlist is empty or unavailable — cannot verify eligibility, blocking")
+    elif trade.ticker.upper() not in {t.upper() for t in ctx.watchlist}:
         v.append(f"§1/§9.3: {trade.ticker} is not on the watchlist")
 
     # -- §9 prohibitions --------------------------------------------------

@@ -23,18 +23,35 @@ Every order still passes the SAME risk_checker the live path uses, with
 fuller context: the harness holds the trade journal, so unlike alpaca-mcp it
 can also enforce §4a (losing streaks) and §9.4 (same-day re-entry).
 
+PHASE 0 REPAIR (2026-08-21) -- NO SAME-DAY LOOKAHEAD: a discretionary BUY or
+SELL Hermes decides on day T's completed data is QUEUED (see QueuedOrder),
+never filled that same day. It resolves against day T+1's REAL open on the
+very next cycle, re-validated by the SAME risk checker against the actual
+opening price -- never against what Hermes originally guessed. See
+resolve_queued_order and the "STEP B" block in run_day. Also from that
+repair: run_day operates on a deep-copied working portfolio and only the
+caller adopts it on success (never publish a partially mutated portfolio);
+a failed cycle halts the run rather than silently skipping the day (see
+_run_cycle_or_halt); and every journal write now carries a deterministic
+decision_id (see make_decision_id) so retrying a failed day cannot
+duplicate an already-journaled trade.
+
 Usage:
     python run_backtest.py --start 2026-02-17 --end 2026-08-14 --days 3
 """
 import argparse
+import copy
 import json
+import os
 import re
 import subprocess
 import sys
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "risk-checker"))
 
@@ -178,6 +195,38 @@ class Holding:
 
 
 @dataclass
+class QueuedOrder:
+    """A discretionary (BUY or SELL) decision Hermes made on `queued_day_index`,
+    awaiting the NEXT real trading day's open before it can fill.
+
+    PHASE 0 REPAIR (2026-08-21): this is what removes same-day lookahead.
+    Hermes previously reasoned on day T's own completed data and got filled
+    within that SAME day's range -- meaning the decision and the fill both
+    drew on day T's fully-known outcome, which is lookahead by construction
+    even though no individual line looked wrong. Now every discretionary
+    decision is queued here instead of executed immediately; `run_day`
+    resolves each one against the FOLLOWING real trading day's actual open,
+    never against `entry_price` (see `resolve_queued_order`).
+
+    `entry_price` is kept for audit/logging ONLY (what Hermes originally
+    proposed, for the activity trail) -- it must never be fed into
+    `ProposedTrade.entry_price` at fill time, which is the actual guarantee
+    against lookahead. `decision` carries the raw Hermes response dict
+    (confidence, primary_signal, reasoning, ...) needed to journal the
+    eventual fill honestly.
+    """
+    ticker: str
+    alias: str
+    action: str                       # "BUY" or "SELL"
+    quantity: int
+    stop_price: float | None          # required for BUY, unused for SELL
+    target_price: float | None        # required for BUY, unused for SELL
+    entry_price: float                # Hermes' original guess -- audit only, never used to fill
+    queued_day_index: int
+    decision: dict
+
+
+@dataclass
 class Portfolio:
     cash: float = STARTING_EQUITY
     holdings: dict[str, Holding] = field(default_factory=dict)
@@ -204,6 +253,11 @@ class Portfolio:
     # increments against; entry_day (calendar) stays only for the
     # dashboard-facing "days_held" display.
     trading_days_elapsed: int = 0
+    # Discretionary decisions awaiting the next real trading day's open --
+    # see QueuedOrder. Persisted (not a local run_day variable) so a
+    # process restart between the decision day and the fill day cannot
+    # lose the order -- Phase 0 repair.
+    pending_orders: list[QueuedOrder] = field(default_factory=list)
 
     def equity(self, prices: dict[str, dict]) -> float:
         held = sum(
@@ -241,6 +295,7 @@ class Portfolio:
             "closed_pnl": self.closed_pnl,
             "cycles_since_reflection": self.cycles_since_reflection,
             "trading_days_elapsed": self.trading_days_elapsed,
+            "pending_orders": [vars(o) for o in self.pending_orders],
         }
 
     @classmethod
@@ -260,7 +315,109 @@ class Portfolio:
             # .get(): old state files predate these fields.
             cycles_since_reflection=d.get("cycles_since_reflection", 0),
             trading_days_elapsed=d.get("trading_days_elapsed", 0),
+            pending_orders=[QueuedOrder(**o) for o in d.get("pending_orders", [])],
         )
+
+
+# --------------------------------------------------------------------------
+# queued-order resolution -- pure, no I/O (Phase 0 repair)
+#
+# Mirrors risk_checker.py's own design philosophy on purpose: a decision
+# this safety-critical needs to be exhaustively unit-testable against
+# hand-built scenarios, which is only possible if it does zero I/O and
+# takes every fact as an explicit argument.
+# --------------------------------------------------------------------------
+
+@dataclass
+class QueuedOrderOutcome:
+    accepted: bool
+    reason: str = ""                        # rejection reason, if not accepted
+    same_day_exit_price: float | None = None
+    same_day_exit_reason: str | None = None  # "stop hit" | "target hit"
+
+
+def resolve_queued_order(order: QueuedOrder, bar: dict, ctx: Context) -> QueuedOrderOutcome:
+    """Decide whether a queued order fills at `bar["open"]` (the scheduled
+    day's real opening price) -- NEVER at `order.entry_price`, which is
+    Hermes' stale, pre-gap guess and is not even read here.
+
+    Re-runs the SAME risk checker used at decision time, but now against
+    the REAL open. Rejects outright on any breach (stop distance, reward:
+    risk, exposure, cash, sizing) -- never silently resizes a gapped
+    order to make it fit, which would substitute the checker's judgment
+    for Hermes' and hide how large the gap actually was.
+
+    For a BUY that's accepted: the position was just opened at the very
+    start of this trading day, so the REST of that same day's real range
+    can still resolve its stop or target before the day is over. OHLC
+    alone cannot say whether price touched the stop or the target FIRST
+    when both fall inside [low, high] -- resolved conservatively (assume
+    the stop, never the target), matching the mechanical-exit priority
+    ordering used elsewhere in this file (stop checked before target).
+    """
+    open_price = bar["open"]
+    trade = ProposedTrade(
+        ticker=order.ticker, action=order.action, quantity=order.quantity,
+        entry_price=open_price, stop_price=order.stop_price, target_price=order.target_price,
+    )
+    verdict = check_trade(trade, ctx)
+    if not verdict.allowed:
+        return QueuedOrderOutcome(accepted=False, reason="; ".join(verdict.violations))
+
+    if order.action == "BUY":
+        if bar["low"] <= order.stop_price:
+            return QueuedOrderOutcome(
+                accepted=True,
+                same_day_exit_price=min(bar["open"], order.stop_price),
+                same_day_exit_reason="stop hit",
+            )
+        if bar["high"] >= order.target_price:
+            return QueuedOrderOutcome(
+                accepted=True, same_day_exit_price=order.target_price, same_day_exit_reason="target hit",
+            )
+    return QueuedOrderOutcome(accepted=True)
+
+
+# Fixed, arbitrary constant -- only needs to be stable across runs of THIS
+# project, never collide with a real UUID, and never change once chosen.
+_DECISION_ID_NAMESPACE = uuid.UUID("6f9c9a1e-6b3a-4b8e-9c8a-2f7a2e6f9a10")
+
+
+def make_decision_id(run_key: str, day_index: int, ticker: str, action: str, kind: str) -> str:
+    """Deterministic decision_id -- the SAME (run, day, ticker, action, kind)
+    always produces the SAME uuid5. Paired with trade-journal's
+    `ON CONFLICT (decision_id) DO NOTHING`, this is what makes retrying a
+    failed day safe: the retry regenerates the identical id for the
+    identical real-world event instead of a fresh random one, so a
+    second attempt at an already-journaled trade is a no-op, not a
+    duplicate row. `kind` disambiguates same-ticker-same-action events on
+    one day that come from different code paths (a mechanical exit vs. a
+    queued discretionary fill vs. a same-day post-entry exit) -- RULES.md
+    §9.1 already guarantees at most one open lot per ticker, so this is
+    defensive, not load-bearing on its own.
+    """
+    key = f"{run_key}|{day_index}|{ticker}|{action}|{kind}"
+    return str(uuid.uuid5(_DECISION_ID_NAMESPACE, key))
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write-to-temp-then-atomic-rename -- the same pattern quota_pacer.py's
+    `_save` already uses. A process killed mid-write (exactly the failure
+    mode this whole repair is about) must never leave backtest_state.json
+    half-written; `os.replace` is atomic on both POSIX and Windows for a
+    same-directory rename, so a reader sees either the fully-old or
+    fully-new file, never a partial one."""
+    fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".backtest_state_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=1)
+        os.replace(tmp_path, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
 
 # --------------------------------------------------------------------------
@@ -360,15 +517,20 @@ print(json.dumps(place_order(
     return json_from(run_in("execution-sim", script))
 
 
-def record_trade(decision: dict, real_ticker: str, fill: dict) -> str:
+def record_trade(decision: dict, real_ticker: str, fill: dict, decision_id: str) -> str:
     """Journal the REAL ticker, never the alias — the mask exists to keep
-    Hermes honest, not to obscure our own records."""
+    Hermes honest, not to obscure our own records.
+
+    decision_id is now REQUIRED, deterministic (see make_decision_id), and
+    supplied by the caller rather than generated server-side -- Phase 0
+    repair, so retrying a failed day cannot double-journal this trade."""
     script = f'''
 import asyncio, json
 from server import _record_decision, _record_execution_result
 
 async def main():
     d = await _record_decision(
+        decision_id={decision_id!r},
         ticker={real_ticker!r}, action={decision["action"]!r},
         intended_quantity={int(decision["quantity"])},
         intended_notional={float(decision["quantity"]) * float(decision["entry_price"])},
@@ -396,7 +558,7 @@ asyncio.run(main())
     return json_from(run_in("trade-journal", script))["decision_id"]
 
 
-def record_exit(real_ticker: str, quantity: int, exit_price: float, reason: str) -> str:
+def record_exit(real_ticker: str, quantity: int, exit_price: float, reason: str, decision_id: str) -> str:
     """Journal a mechanical exit (stop/target/time-stop) as a real SELL row.
 
     Found missing by actually checking the dashboard against real data, not
@@ -408,6 +570,9 @@ def record_exit(real_ticker: str, quantity: int, exit_price: float, reason: str)
     Hermes-authored entry decision with real confidence/reasoning); this is
     its mechanical-exit counterpart, tagged 'other' honestly rather than
     inventing a fake technical thesis for a stop firing.
+
+    decision_id is now REQUIRED and deterministic (see make_decision_id) --
+    Phase 0 repair, same idempotency reasoning as record_trade.
     """
     script = f'''
 import asyncio, json
@@ -415,6 +580,7 @@ from server import _record_decision, _record_execution_result
 
 async def main():
     d = await _record_decision(
+        decision_id={decision_id!r},
         ticker={real_ticker!r}, action="SELL",
         intended_quantity={int(quantity)},
         intended_notional={float(quantity) * float(exit_price)},
@@ -691,7 +857,7 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     return "\n".join(lines)
 
 
-def _call_hermes(prompt: str) -> str:
+def _call_hermes(prompt: str, on_invoked: "Callable[[], None] | None" = None) -> str:
     escaped = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
     # --usage-file: real per-call token accounting (input/output/cache/
     # reasoning tokens, api_calls) written to a JSON report inside the
@@ -708,6 +874,16 @@ def _call_hermes(prompt: str) -> str:
     if result.returncode != 0:
         raise RuntimeError(f"hermes failed:\n{result.stderr[-1500:]}")
 
+    # PHASE 0 REPAIR: fire the quota-counting callback HERE -- the instant
+    # we know the model was actually invoked and returned (returncode 0),
+    # not after ask_hermes's JSON parsing or anything downstream succeeds.
+    # A cycle that spent a real call and then failed to parse, journal, or
+    # process further must still count against the weekly budget; the old
+    # code only recorded the cycle after run_day returned successfully,
+    # silently under-counting every failure that happened after this point.
+    if on_invoked is not None:
+        on_invoked()
+
     usage_result = subprocess.run(
         ["docker", "compose", "exec", "-T", "gateway", "cat", usage_path],
         capture_output=True, text=True, cwd=REPO, timeout=30, encoding="utf-8",
@@ -720,7 +896,7 @@ def _call_hermes(prompt: str) -> str:
     return result.stdout, usage
 
 
-def ask_hermes(prompt: str, usage_totals: dict) -> dict:
+def ask_hermes(prompt: str, usage_totals: dict, on_invoked: "Callable[[], None] | None" = None) -> dict:
     """One retry on malformed JSON — a real failure mode, seen on the very
     first live cycle (an unescaped quote inside the reasoning text broke the
     whole object and cost the cycle).
@@ -734,6 +910,11 @@ def ask_hermes(prompt: str, usage_totals: dict) -> dict:
     usage_totals accumulates across both the original call and a retry (a
     retry is a second real API call and a second real cost -- both must
     count, not just the one that happened to parse).
+
+    on_invoked: passed straight through to _call_hermes on both the
+    original call and the retry -- the caller's callback must itself be
+    idempotent (fire at most once per cycle) since this can invoke it
+    twice; run_day's own closure guards that.
     """
     def _accumulate(usage: dict) -> None:
         for key in ("input_tokens", "output_tokens", "cache_read_tokens",
@@ -743,7 +924,7 @@ def ask_hermes(prompt: str, usage_totals: dict) -> dict:
             usage_totals.get("estimated_cost_usd", 0.0) + usage.get("estimated_cost_usd", 0.0)
         )
 
-    raw, usage = _call_hermes(prompt)
+    raw, usage = _call_hermes(prompt, on_invoked)
     _accumulate(usage)
     try:
         return json_from(raw)
@@ -754,7 +935,7 @@ def ask_hermes(prompt: str, usage_totals: dict) -> dict:
             "field to one short line with no quote characters, apostrophes, "
             "or line breaks inside it."
         )
-        raw2, usage2 = _call_hermes(retry)
+        raw2, usage2 = _call_hermes(retry, on_invoked)
         _accumulate(usage2)
         return json_from(raw2)
 
@@ -764,7 +945,27 @@ def ask_hermes(prompt: str, usage_totals: dict) -> dict:
 # --------------------------------------------------------------------------
 
 def run_day(day: date, day_index: int, portfolio: Portfolio,
-            masking: RunMasking, watchlist: list[dict], limits_ctx: dict) -> dict:
+            masking: RunMasking, watchlist: list[dict], limits_ctx: dict,
+            pacer: QuotaPacer, run_key: str) -> tuple[Portfolio, dict]:
+    """Run one simulated trading day. Returns (new_portfolio, summary).
+
+    PHASE 0 REPAIR -- two structural changes from before:
+
+    1. NO SAME-DAY LOOKAHEAD. Hermes still reasons on TODAY's completed
+       data, but any BUY/SELL it decides is QUEUED, never executed today.
+       Step B below resolves YESTERDAY's queued orders against TODAY's
+       real open before anything else happens. See QueuedOrder /
+       resolve_queued_order.
+
+    2. WORKING COPY. Every mutation in this function happens on `working`,
+       a deep copy of the portfolio passed in -- the caller's `portfolio`
+       object is never touched. Only on full success (every journal write
+       below completes) does the caller adopt `working` as the new
+       portfolio. If anything raises partway through, `working` is simply
+       discarded and the caller's object is exactly as it was -- "never
+       publish partially mutated portfolio state."
+    """
+    working = copy.deepcopy(portfolio)
     tickers = [t["symbol"] for t in watchlist]
     summary = {"day": str(day), "exits": [], "decisions": [], "blocked": [], "usage": {}}
     day_label = masking.day_index(day)
@@ -775,15 +976,21 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     bars = fetch_bars(tickers, day)
     if not bars:
         summary["skipped"] = "no market data (holiday/weekend)"
-        return summary
+        return portfolio, summary  # nothing happened -- caller's object, unchanged
     # This IS a trading day (real bars exist) -- count it before anything
     # below reads it, so a position opened today is at trading-day-offset 0,
     # not -1.
-    portfolio.trading_days_elapsed += 1
+    working.trading_days_elapsed += 1
 
-    # -- mechanical exits first: a resting stop fires without judgment ----
-    portfolio.stopped_out_today = []
-    for ticker, holding in list(portfolio.holdings.items()):
+    # -- STEP A: mechanical exits first -- a resting stop fires without ---
+    # judgment, on TODAY's bar, for positions opened on a PRIOR day. This is
+    # not lookahead: a real stop resting at a broker triggers off whatever
+    # the market does after it was placed, which is exactly what this
+    # simulates. Must run BEFORE step B so a queued discretionary SELL on a
+    # ticker that gapped through its own stop this morning is correctly
+    # seen as already-closed, not double-handled.
+    working.stopped_out_today = []
+    for ticker, holding in list(working.holdings.items()):
         bar = bars.get(ticker)
         if not bar:
             continue
@@ -797,38 +1004,162 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             # resting stop fills at the worse of the two.
             exit_price = min(bar["open"], holding.stop_price)
             reason = "stop hit"
-            portfolio.stopped_out_today.append(ticker)
+            working.stopped_out_today.append(ticker)
         elif bar["high"] >= holding.target_price:
             exit_price, reason = holding.target_price, "target hit"
-        elif portfolio.trading_days_elapsed - holding.entry_trading_day >= TIME_STOP_TRADING_DAYS:
+        elif working.trading_days_elapsed - holding.entry_trading_day >= TIME_STOP_TRADING_DAYS:
             exit_price, reason = bar["close"], f"time stop ({TIME_STOP_TRADING_DAYS} trading days)"
         if exit_price:
             proceeds = holding.quantity * exit_price
-            portfolio.cash += proceeds
-            portfolio.closed_pnl.append(
+            working.cash += proceeds
+            working.closed_pnl.append(
                 proceeds - holding.quantity * holding.entry_price
             )
-            del portfolio.holdings[ticker]
+            del working.holdings[ticker]
             line = (
                 f"{ticker} {reason} @ ${exit_price:.2f} "
-                f"(P&L ${portfolio.closed_pnl[-1]:+,.2f})"
+                f"(P&L ${working.closed_pnl[-1]:+,.2f})"
             )
             summary["exits"].append(line)
-            exit_decision_id = record_exit(ticker, holding.quantity, exit_price, reason)
-            activity.append(("exit", line, exit_decision_id))
+            exit_id = record_exit(
+                ticker, holding.quantity, exit_price, reason,
+                decision_id=make_decision_id(run_key, day_index, ticker, "SELL", "mechanical_exit"),
+            )
+            activity.append(("exit", line, exit_id))
 
-    equity = portfolio.equity(bars)
-    portfolio.equity_curve.append(equity)
+    # -- STEP B: resolve YESTERDAY's queued discretionary decisions against --
+    # TODAY's real open. This is the actual no-lookahead guarantee: the
+    # order was decided on completed data from the PRIOR day, and only now,
+    # against a price that didn't exist when Hermes reasoned, does it fill.
+    for order in working.pending_orders:
+        bar = bars.get(order.ticker)
+        if bar is None:
+            line = f"{order.ticker}: no bar data at scheduled fill -- queued order dropped"
+            summary["blocked"].append(line)
+            activity.append(("order_rejected", line, None))
+            continue
+
+        if order.action == "SELL" and order.ticker not in working.holdings:
+            # Superseded, not a violation -- the position this SELL targeted
+            # was already closed (mechanical exit above, or an earlier fill
+            # this same loop). Journaling it as a "blocked short" would be
+            # actively misleading.
+            line = f"{order.ticker}: queued SELL superseded -- position already closed"
+            activity.append(("order_queued", line, None))
+            continue
+        if order.action == "BUY" and order.ticker in working.holdings:
+            line = f"{order.ticker}: queued BUY superseded -- already holding"
+            activity.append(("order_queued", line, None))
+            continue
+
+        ctx = Context(
+            account=AccountState(
+                equity=working.equity(bars), cash=working.cash,
+                daily_pl_pct=working.pct_since(1), weekly_pl_pct=working.pct_since(5),
+                drawdown_from_peak_pct=working.drawdown_pct(),
+            ),
+            clock=MarketClock(is_open=True, minutes_since_open=120, minutes_until_close=120),
+            positions=[
+                Position(ticker=t, quantity=h.quantity,
+                         market_value=h.quantity * bars.get(t, {}).get("close", h.entry_price))
+                for t, h in working.holdings.items()
+            ],
+            watchlist=tickers,
+            recent_losses=[p < 0 for p in reversed(working.closed_pnl)],
+            stopped_out_today=working.stopped_out_today,
+            **limits_ctx,
+        )
+        outcome = resolve_queued_order(order, bar, ctx)
+        if not outcome.accepted:
+            line = f"{order.ticker}: gap-invalidated at open -- {outcome.reason}"
+            summary["blocked"].append(line)
+            activity.append(("order_rejected", line, None))
+            continue
+
+        fill = simulate_fill(order.alias, order.action, order.quantity, bar["open"], bar)
+        if fill["status"] != "filled":
+            line = f"{order.ticker}: sim {fill['rejection_reason']}"
+            summary["blocked"].append(line)
+            activity.append(("order_rejected", line, None))
+            continue
+
+        if order.action == "BUY":
+            cost = fill["fill_price"] * fill["fill_quantity"]
+            working.cash -= cost
+            working.holdings[order.ticker] = Holding(
+                ticker=order.ticker, quantity=fill["fill_quantity"], entry_price=fill["fill_price"],
+                stop_price=order.stop_price, target_price=order.target_price,
+                entry_day=day_index, entry_trading_day=working.trading_days_elapsed,
+            )
+            fill_id = make_decision_id(run_key, day_index, order.ticker, "BUY", "queued_fill")
+            decision_id = record_trade(order.decision, order.ticker, fill, decision_id=fill_id)
+            line = (
+                f"BUY {order.ticker} ({order.alias}) {fill['fill_quantity']} @ ${fill['fill_price']:.2f} "
+                f"(queued day {order.queued_day_index + 1}, filled at open) [{decision_id[:8]}]"
+            )
+            summary["decisions"].append(line)
+            activity.append(("order_placed", line, decision_id))
+
+            if outcome.same_day_exit_reason:
+                # Entry happened at the very start of today -- the REST of
+                # today's real range can still resolve the fresh stop/target
+                # before the day ends. See resolve_queued_order's docstring
+                # for the conservative (stop-over-target) OHLC-ambiguity
+                # resolution already baked into `outcome`.
+                exit_price = outcome.same_day_exit_price
+                proceeds = fill["fill_quantity"] * exit_price
+                working.cash += proceeds
+                working.closed_pnl.append(proceeds - fill["fill_quantity"] * fill["fill_price"])
+                del working.holdings[order.ticker]
+                if outcome.same_day_exit_reason == "stop hit":
+                    working.stopped_out_today.append(order.ticker)
+                exit_id = make_decision_id(run_key, day_index, order.ticker, "SELL", "same_day_exit")
+                exit_decision_id = record_exit(
+                    order.ticker, fill["fill_quantity"], exit_price,
+                    f"same-day {outcome.same_day_exit_reason} after open fill", decision_id=exit_id,
+                )
+                line2 = (
+                    f"{order.ticker} {outcome.same_day_exit_reason} @ ${exit_price:.2f} same day as "
+                    f"entry (P&L ${working.closed_pnl[-1]:+,.2f})"
+                )
+                summary["exits"].append(line2)
+                activity.append(("exit", line2, exit_decision_id))
+        else:  # SELL
+            holding = working.holdings[order.ticker]
+            proceeds = fill["fill_price"] * fill["fill_quantity"]
+            working.cash += proceeds
+            working.closed_pnl.append(proceeds - fill["fill_quantity"] * holding.entry_price)
+            if fill["fill_quantity"] >= holding.quantity:
+                del working.holdings[order.ticker]
+            else:
+                holding.quantity -= fill["fill_quantity"]
+            fill_id = make_decision_id(run_key, day_index, order.ticker, "SELL", "queued_fill")
+            decision_id = record_trade(order.decision, order.ticker, fill, decision_id=fill_id)
+            line = (
+                f"SELL {order.ticker} ({order.alias}) {fill['fill_quantity']} @ ${fill['fill_price']:.2f} "
+                f"(queued day {order.queued_day_index + 1}, filled at open, P&L "
+                f"${working.closed_pnl[-1]:+,.2f}) [{decision_id[:8]}]"
+            )
+            summary["decisions"].append(line)
+            activity.append(("exit", line, decision_id))
+
+    # Every order queued yesterday has now been resolved one way or
+    # another (filled, rejected, dropped, or superseded) -- never carried
+    # forward indefinitely.
+    working.pending_orders = []
+
+    equity = working.equity(bars)
+    working.equity_curve.append(equity)
     record_snapshot(
-        day_label=masking.day_index(day), equity=equity, cash=portfolio.cash,
-        exposure_pct=portfolio.invested(bars) / equity * 100 if equity else 0.0,
-        drawdown_pct=portfolio.drawdown_pct(),
-        open_positions=len(portfolio.holdings),
+        day_label=masking.day_index(day), equity=equity, cash=working.cash,
+        exposure_pct=working.invested(bars) / equity * 100 if equity else 0.0,
+        drawdown_pct=working.drawdown_pct(),
+        open_positions=len(working.holdings),
     )
 
-    # -- gather + mask ----------------------------------------------------
+    # -- STEP C: gather + mask today's data for Hermes to reason on -------
     technicals = fetch_technicals(
-        [t for t in tickers if t not in portfolio.holdings], day
+        [t for t in tickers if t not in working.holdings], day
     )
     news = fetch_news(list(technicals), day)
 
@@ -848,14 +1179,14 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         "stop_price": h.stop_price, "target_price": h.target_price,
         "current_price": bars.get(t, {}).get("close", h.entry_price),
         "days_held": day_index - h.entry_day,
-    } for t, h in portfolio.holdings.items()]
+    } for t, h in working.holdings.items()]
 
     account_view = {
-        "equity": equity, "cash": portfolio.cash,
-        "exposure_pct": portfolio.invested(bars) / equity * 100 if equity else 0.0,
-        "daily_pl_pct": portfolio.pct_since(1),
-        "weekly_pl_pct": portfolio.pct_since(5),
-        "drawdown_pct": portfolio.drawdown_pct(),
+        "equity": equity, "cash": working.cash,
+        "exposure_pct": working.invested(bars) / equity * 100 if equity else 0.0,
+        "daily_pl_pct": working.pct_since(1),
+        "weekly_pl_pct": working.pct_since(5),
+        "drawdown_pct": working.drawdown_pct(),
     }
 
     # Nothing leaves for Hermes without passing the leak check.
@@ -876,7 +1207,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # every 5th cycle -- see cycles_since_reflection's docstring on why this
     # is a persisted counter, not a local one.
     recent_insights = fetch_recent_insights()
-    is_reflection_day = portfolio.cycles_since_reflection >= 4
+    is_reflection_day = working.cycles_since_reflection >= 4
     reflection_trades = (
         fetch_recent_closed_trades(masking) if is_reflection_day else None
     )
@@ -884,7 +1215,19 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     prompt = build_prompt(masking.day_index(day), account_view,
                           positions_view, candidates, recent_insights,
                           reflection_trades)
-    response = ask_hermes(prompt, summary["usage"])
+
+    # PHASE 0 REPAIR: count the quota slot the instant Hermes is actually
+    # invoked (inside _call_hermes), not after this whole cycle finishes.
+    # `invoked` guards against double-counting a JSON-parse retry (2 real
+    # _call_hermes calls, still 1 cycle's quota) -- see ask_hermes.
+    invoked = {"done": False}
+
+    def mark_invoked() -> None:
+        if not invoked["done"]:
+            pacer.record_cycle()
+            invoked["done"] = True
+
+    response = ask_hermes(prompt, summary["usage"], on_invoked=mark_invoked)
     summary["no_action_reason"] = response.get("no_action_reason", "")
     if summary["no_action_reason"]:
         activity.append(("reasoning", summary["no_action_reason"][:900], None))
@@ -897,11 +1240,17 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             # not a guess.
             record_insight(reflection_text, sample_size=len(reflection_trades or []))
             activity.append(("weekly_reflection", reflection_text[:900], None))
-        portfolio.cycles_since_reflection = 0
+        working.cycles_since_reflection = 0
     else:
-        portfolio.cycles_since_reflection += 1
+        working.cycles_since_reflection += 1
 
-    # -- act on decisions -------------------------------------------------
+    # -- STEP D: QUEUE today's decisions -- never execute them today ------
+    # This is the other half of the no-lookahead guarantee: whatever
+    # Hermes decided from today's completed data waits for tomorrow's real
+    # open (step B, next invocation). Only light structural validation
+    # happens here (alias resolves, action/quantity/stop/target are
+    # present and sane) -- the real risk-checker validation is deliberately
+    # deferred to fill time against the REAL price, not duplicated here.
     for decision in response.get("decisions", []):
         try:
             real_ticker = masking.real(decision["alias"])
@@ -909,102 +1258,58 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             summary["blocked"].append(f"unknown alias {decision.get('alias')!r}")
             continue
 
-        trade = ProposedTrade(
-            ticker=real_ticker, action=decision["action"].upper(),
-            quantity=int(decision["quantity"]),
-            entry_price=float(decision["entry_price"]),
-            stop_price=decision.get("stop_price"),
-            target_price=decision.get("target_price"),
+        action = decision.get("action", "").upper()
+        if action not in ("BUY", "SELL"):
+            summary["blocked"].append(f"{real_ticker}: unsupported action {action!r}")
+            continue
+        try:
+            quantity = int(decision["quantity"])
+        except (KeyError, TypeError, ValueError):
+            summary["blocked"].append(f"{real_ticker}: missing/invalid quantity")
+            continue
+        if quantity <= 0:
+            summary["blocked"].append(f"{real_ticker}: quantity must be positive")
+            continue
+        stop_price = decision.get("stop_price")
+        target_price = decision.get("target_price")
+        if action == "BUY" and (stop_price is None or target_price is None):
+            summary["blocked"].append(f"{real_ticker}: BUY missing stop/target -- cannot queue")
+            continue
+
+        order = QueuedOrder(
+            ticker=real_ticker, alias=decision["alias"], action=action, quantity=quantity,
+            stop_price=float(stop_price) if stop_price is not None else None,
+            target_price=float(target_price) if target_price is not None else None,
+            entry_price=float(decision.get("entry_price", 0.0)),  # audit only, never used to fill
+            queued_day_index=day_index, decision=decision,
         )
-        ctx = Context(
-            account=AccountState(
-                equity=equity, cash=portfolio.cash,
-                daily_pl_pct=account_view["daily_pl_pct"],
-                weekly_pl_pct=account_view["weekly_pl_pct"],
-                drawdown_from_peak_pct=portfolio.drawdown_pct(),
-            ),
-            clock=MarketClock(is_open=True, minutes_since_open=120,
-                              minutes_until_close=120),
-            positions=[
-                Position(ticker=t, quantity=h.quantity,
-                         market_value=h.quantity * bars.get(t, {}).get("close", h.entry_price))
-                for t, h in portfolio.holdings.items()
-            ],
-            watchlist=tickers,
-            recent_losses=[p < 0 for p in reversed(portfolio.closed_pnl)],
-            stopped_out_today=portfolio.stopped_out_today,
-            **limits_ctx,
-        )
-
-        verdict = check_trade(trade, ctx)
-        if not verdict.allowed:
-            line = f"{real_ticker}: {'; '.join(verdict.violations)}"
-            summary["blocked"].append(line)
-            activity.append(("risk_check", f"BLOCKED — {line}", None))
-            continue
-        activity.append(("risk_check", f"{real_ticker}: passed RULES.md checks", None))
-
-        bar = bars.get(real_ticker)
-        if not bar:
-            summary["blocked"].append(f"{real_ticker}: no bar data")
-            continue
-
-        fill = simulate_fill(decision["alias"], trade.action, trade.quantity,
-                             trade.entry_price, bar)
-        if fill["status"] != "filled":
-            line = f"{real_ticker}: sim {fill['rejection_reason']}"
-            summary["blocked"].append(line)
-            activity.append(("order_rejected", line, None))
-            continue
-
-        if trade.action == "SELL":
-            # Discretionary (thesis-invalidation) exit -- the one exit type
-            # that's Hermes' judgment call, not a mechanical stop/target/
-            # time-stop (those go through record_exit in the loop above).
-            # This branch never fired until now, since no backtest cycle had
-            # produced a SELL decision -- found by tracing the code, not by
-            # a failure: the block below it unconditionally treated every
-            # fill as a BUY (subtracted cash, overwrote the holding with a
-            # new lot, mislabeled the log line), which would have corrupted
-            # the portfolio the first time Hermes actually called an exit.
-            holding = portfolio.holdings[real_ticker]
-            proceeds = fill["fill_price"] * fill["fill_quantity"]
-            portfolio.cash += proceeds
-            portfolio.closed_pnl.append(
-                proceeds - fill["fill_quantity"] * holding.entry_price
-            )
-            if fill["fill_quantity"] >= holding.quantity:
-                del portfolio.holdings[real_ticker]
-            else:
-                holding.quantity -= fill["fill_quantity"]
-            decision_id = record_trade(decision, real_ticker, fill)
-            line = (
-                f"SELL {real_ticker} ({decision['alias']}) {fill['fill_quantity']} "
-                f"@ ${fill['fill_price']:.2f} (P&L ${portfolio.closed_pnl[-1]:+,.2f}) "
-                f"[{decision_id[:8]}]"
-            )
-            summary["decisions"].append(line)
-            activity.append(("exit", line, decision_id))
-        else:
-            cost = fill["fill_price"] * fill["fill_quantity"]
-            portfolio.cash -= cost
-            portfolio.holdings[real_ticker] = Holding(
-                ticker=real_ticker, quantity=fill["fill_quantity"],
-                entry_price=fill["fill_price"], stop_price=float(trade.stop_price),
-                target_price=float(trade.target_price), entry_day=day_index,
-                entry_trading_day=portfolio.trading_days_elapsed,
-            )
-            decision_id = record_trade(decision, real_ticker, fill)
-            line = (
-                f"BUY {real_ticker} ({decision['alias']}) {fill['fill_quantity']} "
-                f"@ ${fill['fill_price']:.2f} conf={decision.get('confidence')} "
-                f"[{decision_id[:8]}]"
-            )
-            summary["decisions"].append(line)
-            activity.append(("order_placed", line, decision_id))
+        working.pending_orders.append(order)
+        line = f"{action} {real_ticker} ({decision['alias']}) x{quantity} queued for next trading day's open"
+        summary["decisions"].append(line)
+        activity.append(("order_queued", line, None))
 
     log_activity(activity)
-    return summary
+    return working, summary
+
+
+def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict]]"):
+    """Isolated control-flow wrapper -- the one piece of "a failed cycle
+    must not advance the simulated date" that's actually unit-testable
+    without Docker/Neon. Runs one cycle; on any exception, prints why and
+    returns (None, True) -- halted. The caller must not advance its cursor
+    or write state when halted is True. Deliberately does NOT retry or
+    advance anything itself -- "remove catch-and-continue behavior that
+    silently skips failed trading days" means the caller decides to stop,
+    not paper over the failure and move to the next day.
+    """
+    try:
+        return run_day_fn(), False
+    except Exception as exc:
+        print(f"  CYCLE FAILED — simulated date NOT advanced, state NOT written: "
+              f"{type(exc).__name__}: {exc}")
+        print("  Re-run the harness to retry this same day; any trade already "
+              "journaled before the failure is safe to retry (idempotent).")
+        return None, True
 
 
 def main() -> None:
@@ -1030,6 +1335,11 @@ def main() -> None:
     names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
     masking = RunMasking(names, run_start=start, seed=args.seed)
     pacer = QuotaPacer()
+    # Stable per (start, seed) -- feeds make_decision_id so a retry of the
+    # SAME logical run regenerates the SAME ids for the SAME real events.
+    # A genuinely different run (different window or seed) gets a
+    # different key, so it can never collide with an unrelated run's ids.
+    run_key = f"{args.start}|{args.seed}"
 
     if STATE_PATH.exists():
         state = json.loads(STATE_PATH.read_text())
@@ -1056,20 +1366,26 @@ def main() -> None:
 
         day_index = (cursor - start).days
         print(f"\n{'=' * 70}\nDay {day_index + 1} — {cursor}\n{'=' * 70}")
-        try:
-            summary = run_day(cursor, day_index, portfolio, masking,
-                              watchlist, {})
-        except Exception as exc:
-            print(f"  CYCLE FAILED: {type(exc).__name__}: {exc}")
-            cursor += timedelta(days=1)
-            continue
+
+        # PHASE 0 REPAIR: a failed cycle halts this run instead of silently
+        # skipping to the next day. The simulated date is NOT advanced and
+        # state is NOT written -- re-running the harness later retries this
+        # exact day, safely (deterministic decision_ids make an already-
+        # journaled trade a no-op on retry; quota was already correctly
+        # counted at invocation time regardless of the failure -- see
+        # run_day's mark_invoked).
+        result, halted = _run_cycle_or_halt(
+            lambda: run_day(cursor, day_index, portfolio, masking, watchlist, {}, pacer, run_key)
+        )
+        if halted:
+            break
+        portfolio, summary = result
 
         if "skipped" in summary:
             print(f"  skipped: {summary['skipped']}")
             cursor += timedelta(days=1)
             continue
 
-        pacer.record_cycle()
         completed += 1
         for line in summary["exits"]:
             print(f"  EXIT    {line}")
@@ -1088,10 +1404,10 @@ def main() -> None:
                   f"({u.get('api_calls', 0)} call{'s' if u.get('api_calls') != 1 else ''}, "
                   f"{u.get('reasoning_tokens', 0)} reasoning)")
 
-        STATE_PATH.write_text(json.dumps(
+        _atomic_write_json(
+            STATE_PATH,
             {"portfolio": portfolio.to_dict(), "cursor": str(cursor + timedelta(days=1))},
-            indent=1,
-        ))
+        )
         cursor += timedelta(days=1)
 
     final = portfolio.equity_curve[-1]

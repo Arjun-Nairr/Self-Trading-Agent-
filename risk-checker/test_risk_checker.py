@@ -26,6 +26,7 @@ BASE_TRADE = dict(
 def _ctx(**overrides) -> Context:
     account_kw = overrides.pop("account", {})
     clock_kw = overrides.pop("clock", {})
+    watchlist = overrides.pop("watchlist", ["AAPL", "MSFT"])
     account = AccountState(**{
         "equity": 100_000.0, "cash": 100_000.0, "daily_pl_pct": 0.0,
         "weekly_pl_pct": 0.0, "drawdown_from_peak_pct": 0.0,
@@ -36,7 +37,7 @@ def _ctx(**overrides) -> Context:
         "minutes_until_close": 120, **clock_kw,
     })
     return Context(
-        account=account, clock=clock, watchlist=["AAPL", "MSFT"], **overrides
+        account=account, clock=clock, watchlist=watchlist, **overrides
     )
 
 
@@ -64,6 +65,23 @@ def main():
     _blocked_by("§1", trade=_trade(ticker="TSLA"))          # off-watchlist
     _blocked_by("§1", trade=_trade(action="SELL"))           # short (not held)
     print("  ok  §1  off-watchlist and short selling blocked")
+
+    # -- §1 watchlist fail-closed (Phase 0 repair) -------------------------
+    # Real bug: `if ctx.watchlist and ...` short-circuited to False on an
+    # EMPTY list, skipping the check entirely and letting every ticker
+    # through -- an unavailable watchlist must block, not wave through.
+    _blocked_by("§1", ctx=_ctx(watchlist=[]))
+    print("  ok  §1  empty/unavailable watchlist blocks every BUY (fail closed)")
+
+    # Exits must stay privileged even when the watchlist is empty -- a
+    # position legitimately opened earlier must still be exitable if the
+    # watchlist source later becomes unavailable.
+    verdict = check_trade(
+        _trade(action="SELL", stop_price=None, target_price=None),
+        _ctx(watchlist=[], positions=[Position(ticker="AAPL", quantity=90, market_value=9_000.0)]),
+    )
+    assert verdict.allowed, f"exit wrongly blocked by empty watchlist: {verdict.violations}"
+    print("  ok  §1  empty watchlist does not block an exit of an already-held position")
 
     # -- §9 prohibitions --------------------------------------------------
     _blocked_by("§9.1", ctx=_ctx(
