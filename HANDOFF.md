@@ -485,3 +485,12 @@ reintroducing it and confirming the test fails, then restoring the fix.
 *Repo: `github.com/Arjun-Nairr/Self-Trading-Agent-`. For the literal rules
 Hermes operates under, read `RULES.md`/`SOUL.md`/`AGENTS.md` in the repo
 root directly.*
+
+---
+
+**2026-08-27:** the fresh-start study guide was regenerated as
+`PROJECT_FRESH_START.md` (repo root), fully re-audited against the current
+code rather than carried forward from the prior version. The old private
+study artifact (an earlier Claude Artifact, "The Hermes Ledger") was
+retired — see that regeneration's own summary for details, not duplicated
+here.
