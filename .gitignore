@@ -10,6 +10,7 @@ __pycache__/
 # never commit them
 quota_pacer_state.json
 backtest_state.json
+cycle_checkpoint.json
 
 # Auto-installed third-party skill plugin (Leonxlnx/taste-skill), unrelated
 # to this project -- not our source, don't want it in this repo's history

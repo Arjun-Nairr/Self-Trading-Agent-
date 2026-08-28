@@ -118,6 +118,67 @@ def _validate_decision_fields(
         )
 
 
+def _num_close(a: Any, b: Any, tol: float = 0.01) -> bool:
+    """None-safe, tolerance-based numeric comparison -- a genuine retry
+    round-trips a float through Postgres's numeric type and back, which can
+    shift the last decimal place; that must never itself read as a
+    'materially different payload.'"""
+    if a is None or b is None:
+        return a is None and b is None
+    return abs(float(a) - float(b)) <= tol
+
+
+def _json_equal(a: Any, b: Any) -> bool:
+    """Normalizes a DB-stored JSON value (asyncpg may hand back a str,
+    depending on codec setup) against the incoming Python value before
+    comparing -- key-order or str-vs-dict representation differences must
+    never register as a mismatch on their own."""
+    def _norm(x: Any) -> Any:
+        if isinstance(x, str):
+            try:
+                return json.loads(x)
+            except (TypeError, ValueError):
+                return x
+        return x
+    return _norm(a) == _norm(b)
+
+
+def _decision_field_mismatches(
+    row: "asyncpg.Record",
+    *, ticker: str, action: str, intended_quantity: int, intended_notional: float,
+    order_type: str, confidence: int, primary_signal: str, technical_basis: str | None,
+    expected_reward_risk: float, invalidation_condition: str, strategy_notes: str | None,
+    data_timestamps: dict[str, Any] | None, stop_price: float | None,
+    target_price: float | None, limit_price: float | None, run_id: str | None,
+) -> list[str]:
+    """Every field that DEFINES the decision -- not only the four
+    (ticker/action/quantity/order_type) the prior check compared. A genuine
+    retry of the exact same event reproduces every one of these identically
+    (all derived from the same real-world decision); returns the names of
+    any that don't, so the caller can fail loudly and name exactly what
+    differed instead of silently keeping the stale row."""
+    checks: list[tuple[str, bool]] = [
+        ("ticker", row["ticker"] == ticker),
+        ("action", row["action"] == action),
+        ("intended_quantity", int(row["intended_quantity"]) == int(intended_quantity)),
+        ("order_type", row["order_type"] == order_type),
+        ("intended_notional", _num_close(row["intended_notional"], intended_notional)),
+        ("confidence", int(row["confidence"]) == int(confidence)),
+        ("primary_signal", row["primary_signal"] == primary_signal),
+        ("technical_basis", row["technical_basis"] == technical_basis),
+        ("expected_reward_risk", _num_close(row["expected_reward_risk"], expected_reward_risk)),
+        ("invalidation_condition",
+         (row["invalidation_condition"] or "").strip() == (invalidation_condition or "").strip()),
+        ("strategy_notes", (row["strategy_notes"] or "").strip() == (strategy_notes or "").strip()),
+        ("stop_price", _num_close(row["stop_price"], stop_price)),
+        ("target_price", _num_close(row["target_price"], target_price)),
+        ("limit_price", _num_close(row["limit_price"], limit_price)),
+        ("data_timestamps", _json_equal(row["data_timestamps"], data_timestamps)),
+        ("run_id", row["run_id"] == run_id),
+    ]
+    return [name for name, ok in checks if not ok]
+
+
 async def _record_decision(
     ticker: str,
     action: str,
@@ -186,18 +247,22 @@ async def _record_decision(
         row = await pool.fetchrow("SELECT * FROM trades WHERE decision_id = $1", decision_id)
         if row is None:
             raise ValueError(f"decision_id {decision_id} conflicted on insert but no row exists -- unexpected state")
-        mismatch = (
-            row["ticker"] != ticker
-            or row["action"] != action
-            or int(row["intended_quantity"]) != int(intended_quantity)
-            or row["order_type"] != order_type
+        # 2026-08-28 correctness pass (item 3): every decision-defining
+        # field, not only ticker/action/quantity/order_type -- see
+        # _decision_field_mismatches.
+        mismatches = _decision_field_mismatches(
+            row, ticker=ticker, action=action, intended_quantity=intended_quantity,
+            intended_notional=intended_notional, order_type=order_type,
+            confidence=confidence, primary_signal=primary_signal,
+            technical_basis=technical_basis, expected_reward_risk=expected_reward_risk,
+            invalidation_condition=invalidation_condition, strategy_notes=strategy_notes,
+            data_timestamps=data_timestamps, stop_price=stop_price, target_price=target_price,
+            limit_price=limit_price, run_id=run_id,
         )
-        if mismatch:
+        if mismatches:
             raise ValueError(
                 f"decision_id {decision_id} collision with a DIFFERENT payload -- "
-                f"existing: ticker={row['ticker']!r} action={row['action']!r} "
-                f"qty={row['intended_quantity']}; incoming: ticker={ticker!r} "
-                f"action={action!r} qty={intended_quantity}. This should never "
+                f"mismatched field(s): {', '.join(mismatches)}. This should never "
                 "happen for a genuine retry of the same event -- failing loudly "
                 "instead of silently returning a different trade's data."
             )

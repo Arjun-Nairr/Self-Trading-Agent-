@@ -26,7 +26,21 @@ def _default_history_fn(
 ) -> pd.DataFrame:
     import yfinance as yf
 
-    return yf.Ticker(symbol).history(start=start, end=end, interval=interval)
+    # 2026-08-28 correctness pass (item 4): explicit, not yfinance's own
+    # default. yfinance's Ticker.history() defaults to auto_adjust=True
+    # (dividend/split-adjusted OHLC), while Alpaca execution (alpaca-mcp's
+    # bars, and execution-sim's fills) always requests RAW, unadjusted
+    # prices -- a stop/target/entry computed here from adjusted history
+    # could silently disagree with the real price the simulated (or live)
+    # fill happens at, especially around an ex-dividend date. Pinned to
+    # the SAME raw basis explicitly so both sides of the pipeline agree,
+    # without silently depending on a library default that could change.
+    # Never touches point-in-time filtering -- start/end/as_of gating
+    # happens entirely in the caller (MarketDataService/TechnicalService),
+    # unaffected by this flag.
+    return yf.Ticker(symbol).history(
+        start=start, end=end, interval=interval, auto_adjust=False,
+    )
 
 
 def _default_info_fn(symbol: str) -> dict[str, Any]:

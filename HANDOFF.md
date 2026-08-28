@@ -179,15 +179,97 @@ any prior reset): `{"2026-W34": 34, "2026-W35": 6}` — real invocation
 history, preserved exactly.
 
 **Neon:** zero `mode='backtest'`/`execution_mode='backtest'` rows in
-`trades`, `agent_activity`, `portfolio_snapshots`, `insight_log`. Exactly
-one live row exists project-wide: the AAPL manual integration-test
-decision (`execution_mode: 'alpaca'`, `status: 'rejected'`, resolved
-against real Alpaca broker state on 2026-08-28) — unchanged, verified
-present.
+`trades`, `agent_activity`, `portfolio_snapshots`, `insight_log`. The
+AAPL manual integration-test row (`execution_mode: 'alpaca'`,
+`status: 'rejected'`) was removed on 2026-08-28 (backed up first — see
+`~/.hermes-trading-agent/backups/aapl_manual_test_row_backup_2026-08-28.json`)
+— `trades` is now genuinely empty project-wide, zero rows.
 
 **Dashboard**, verified live in a browser without running a Hermes cycle:
-Training view shows zero cycles/trades/positions/snapshots; Live view is
-unaffected and still shows the real AAPL decision. Zero console errors.
+Training and Live views both show zero cycles/trades/positions/snapshots.
+Zero console errors.
+
+---
+
+## 2026-08-28 correctness pass (second pass) — repaired guarantees
+
+Narrowly scoped repair, no training started, no architecture/feature
+changes. Full narrative in
+`docs/history/HANDOFF_FULL_2026-08-28.md` is NOT written yet for this
+pass (nothing to archive from — this is new content); this section is
+the complete record.
+
+1. **Circuit breakers now see this morning's own losses before a 09:45
+   BUY.** `simulate_trading_day` used to receive daily/weekly/drawdown
+   percentages frozen as of yesterday's close; a same-morning opening-gap
+   or 09:30–09:45 stop never touched a 09:45 entry's risk check. Fixed by
+   passing the raw `equity_curve` through and recalculating breakers
+   fresh, from a real intraday equity mark, at every 09:30 SELL and 09:45
+   BUY decision point (see `_recalc_breakers`).
+2. **Failed-cycle retries are now deterministic.** A validated Hermes
+   response is durably checkpointed (`backtest-harness/cycle_checkpoint.json`,
+   gitignored, atomic write) the instant it exists — before
+   `record_snapshot_once`, decision journaling, or activity logging. A
+   retry of the same `(run_id, day_index)` reuses the checkpointed
+   response verbatim: no second Hermes call, no quota charge. Cleared only
+   after the atomic local-state commit for that cycle succeeds (see
+   `_load_checkpoint` / `_save_checkpoint` / `_clear_checkpoint`).
+3. **`decision_id` collisions now compare every decision-defining field**
+   (notional, stop/target, confidence, signals, reward:risk, invalidation,
+   notes, timestamps, `run_id` — not just ticker/action/quantity/order_type),
+   normalized sensibly (numeric tolerance, JSON structural equality). A
+   genuine retry stays a no-op; anything materially different fails loudly,
+   naming the field (`trade-journal-mcp/server.py`, `_decision_field_mismatches`).
+4. **Maverick's historical OHLC now explicitly requests the same raw basis
+   Alpaca execution uses** (`auto_adjust=False` on the yfinance fetch) —
+   previously yfinance's own default (dividend/split-adjusted) could
+   silently disagree with real fill prices around an ex-dividend date.
+   `as_of` point-in-time gating is untouched.
+5. **Queued BUY risk checks now use the slippage-adjusted fill price**,
+   not the raw bar open — mirrors execution-sim-mcp's own `SLIPPAGE_BPS=5`
+   MARKET-fill rule exactly (`_slipped_buy_price`). A trade that only
+   breaches a hard cap after slippage is now rejected before it can ever
+   reach execution. SELL is deliberately unaffected (slippage only makes
+   an exit more conservative against a cap).
+6. **Dashboard's "blocked by rule" summary count now uses the complete
+   blocked-activity dataset**, not the 80-row recent-activity feed — it
+   could previously undercount on any run with more than 80 recent
+   activity rows.
+7. **The masking seed is now persisted** in `backtest_state.json`. A
+   resumed run reuses its stored seed; a conflicting `--seed` fails
+   loudly (`SystemExit`, names both seeds) instead of silently remapping
+   ticker↔alias assignments Hermes has already learned this run. A
+   fresh/`--reset` run may establish a new seed. A legacy state file
+   missing the field falls back to the supplied/default seed safely.
+
+**New regression tests** (`backtest-harness/test_execution_semantics.py`
+unless noted): `test_combined_morning_stop_losses_trip_breaker_before_945_buy`,
+`test_checkpoint_survives_a_retry_without_a_second_hermes_call_or_duplicate_journal_row`,
+`test_buy_risk_check_slippage_price_matches_execution_sim_rule` +
+`test_buy_risk_check_uses_slippage_adjusted_price_not_raw_open`,
+`test_resolve_seed_resume_and_mismatch`; extended
+`trade-journal-mcp/test_idempotency.py` with changed-stop/target/notional/
+metadata collision cases; new
+`maverick-mcp/tests/market_data/test_fetchers.py::test_default_history_fn_requests_raw_unadjusted_basis`.
+
+**Exact verification results (2026-08-28):** all first-party Python files
+touched compile clean. `risk-checker/test_risk_checker.py`,
+`backtest-harness/test_execution_semantics.py` (58 checks),
+`test_anonymize.py`, `test_quota_pacer.py`,
+`trade-journal-mcp/test_decision_fields.py`, `test_idempotency.py`
+(extended), `test_run_isolation.py`, `test_dashboard_fields.py` (real
+Neon, self-cleaning), `execution-sim-mcp/test_fill_logic.py`,
+`maverick-mcp/tests/market_data/test_fetchers.py` (22 tests) — all PASS.
+`docker compose config -q` valid. Dashboard smoke-checked live in both
+Training and Live modes, zero console errors. Backtest tables confirmed
+empty before and after (found 8 stray `cycle_failed` rows generated by
+running `test_execution_semantics.py`'s pre-existing
+`_run_cycle_or_halt` test locally — backed up, then deleted, root cause
+noted: that one test's best-effort failure logging shells out to the
+real trade-journal container even when run standalone).
+
+**Remaining blocker: none.** Stack is training-ready pending human
+approval to start the run.
 
 ---
 

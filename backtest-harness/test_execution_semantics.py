@@ -20,13 +20,17 @@ from unittest.mock import patch
 # effect -- must be imported first, matching test_execution_path.py's
 # existing pattern.
 from run_backtest import (
-    Holding, Portfolio, QueuedOrder, ResponseValidationError, _atomic_write_json,
-    _run_cycle_or_halt, build_decision_time_context, build_prompt,
+    DEFAULT_MASKING_SEED, Holding, Portfolio, QueuedOrder, ResponseValidationError,
+    _atomic_write_json, _clear_checkpoint, _load_checkpoint, _resolve_seed,
+    _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
+    build_decision_time_context, build_prompt,
     evaluate_bar_stop_target, evaluate_opening_gap, make_decision_id,
     require_intraday_coverage, resolve_queued_order, simulate_trading_day,
     validate_hermes_response,
 )
-from risk_checker import AccountState, Context, MarketClock, ProposedTrade, check_trade  # noqa: E402
+from risk_checker import (  # noqa: E402
+    AccountState, Context, MarketClock, Position, ProposedTrade, check_trade,
+)
 
 
 def _ctx(**overrides) -> Context:
@@ -79,6 +83,54 @@ def test_gap_invalidated_order_is_rejected_not_resized():
     assert not outcome.accepted, "a real concentration-cap-busting gap was wrongly accepted"
     assert "§2b" in outcome.reason, outcome.reason
     print("  ok  a real gap that breaks position sizing is rejected outright, not resized")
+
+
+def test_buy_risk_check_slippage_price_matches_execution_sim_rule():
+    """The exact price used for the risk check must match execution-sim-
+    mcp's own MARKET-fill formula (reference_price * (1 + 5bps)) -- one
+    clearly defined slippage rule, not an approximation of it."""
+    assert _slipped_buy_price(100.0) == 100.05
+    assert _slipped_buy_price(200.0) == 200.10
+    print("  ok  _slipped_buy_price matches execution-sim-mcp's SLIPPAGE_BPS=5 MARKET-fill formula exactly")
+
+
+def test_buy_risk_check_uses_slippage_adjusted_price_not_raw_open():
+    """2026-08-28 correctness pass, item 5 -- boundary regression. A BUY
+    sized to land EXACTLY at the §2b concentration cap on the raw open
+    (100 shares @ $100 = $10,000 = exactly 10% of $100k equity, allowed --
+    §2b is a strict '>', not '>=') must be REJECTED once the same 5bps
+    slippage execution will actually apply pushes the real notional over
+    the cap."""
+    bar = {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}
+    order = _order(action="BUY", ticker="OLN", quantity=100, stop_price=93.0, target_price=115.0)
+
+    # Sanity: the RAW open lands exactly at the cap and is allowed --
+    # confirms this is a genuine boundary case, not just an oversized trade.
+    raw_trade = ProposedTrade(ticker="OLN", action="BUY", quantity=100,
+                              entry_price=bar["open"], stop_price=93.0, target_price=115.0)
+    raw_verdict = check_trade(raw_trade, _ctx())
+    assert raw_verdict.allowed, (
+        f"test scenario itself must pass at the raw open to be a real boundary case: {raw_verdict.violations}"
+    )
+    print("  ok  the scenario passes §2b exactly at the raw open (10.00% == the 10% cap)")
+
+    outcome = resolve_queued_order(order, bar, _ctx())
+    assert not outcome.accepted, (
+        "a BUY that only breaches its concentration cap AFTER slippage was wrongly accepted"
+    )
+    assert "§2b" in outcome.reason, outcome.reason
+    print("  ok  the SAME BUY is rejected once risk-checked against the slippage-adjusted "
+          "fill price (10.005% > the 10% cap)")
+
+    # And the reverse must never happen: a genuinely oversized SELL is not
+    # made MORE lenient by staying at the raw open (SELL is unaffected by
+    # this fix on purpose -- see resolve_queued_order's docstring).
+    sell_bar = {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0}
+    sell_order = _sell_order(ticker="OLN", quantity=100)
+    sell_ctx = _ctx(positions=[Position(ticker="OLN", quantity=100, market_value=10_000.0)])
+    sell_outcome = resolve_queued_order(sell_order, sell_bar, sell_ctx)
+    assert sell_outcome.accepted, sell_outcome.reason
+    print("  ok  a full-exit SELL at the same price is unaffected by the BUY-only slippage fix")
 
 
 def test_evaluate_bar_stop_target_conservative_ambiguity():
@@ -175,6 +227,71 @@ def test_atomic_write_never_leaves_a_corrupt_or_partial_state_file():
     leftovers = list(tmp_dir.glob(".backtest_state_*.tmp"))
     assert not leftovers, f"crash left a temp file behind: {leftovers}"
     print("  ok  a crash mid-write leaves the previous valid state file completely untouched")
+
+
+def test_checkpoint_survives_a_retry_without_a_second_hermes_call_or_duplicate_journal_row():
+    """2026-08-28 correctness pass, item 2 -- the actual failure-injection
+    regression this repair targets. Attempt 1 calls (fake) Hermes, journals
+    a decision using the response, THEN fails (simulating a downstream
+    journal-write exception for a LATER decision, after the checkpoint was
+    already saved). A retry (same run_id/day_index) must reuse the
+    checkpointed response verbatim -- zero additional Hermes calls -- and
+    produce the identical decision_id, so a real `ON CONFLICT (decision_id)
+    DO NOTHING` write is a true no-op, never a duplicate row."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    ckpt_path = tmp_dir / "cycle_checkpoint.json"
+    hermes_calls = []
+    journal_rows: dict[str, dict] = {}  # simulates ON CONFLICT (decision_id) DO NOTHING
+
+    def fake_ask_hermes() -> dict:
+        hermes_calls.append(1)
+        return {"decisions": [{"alias": "ALPHA", "action": "BUY", "quantity": 10}],
+                "no_action_reason": ""}
+
+    def run_one_cycle_attempt(run_id: str, day_index: int, fail_after_journaling: bool) -> dict:
+        with patch("run_backtest.CHECKPOINT_PATH", ckpt_path):
+            checkpoint = _load_checkpoint(run_id, day_index)
+            if checkpoint is not None:
+                response = checkpoint["response"]
+            else:
+                response = fake_ask_hermes()
+                _save_checkpoint(run_id, day_index, response, {})
+
+            decision_id = make_decision_id(run_id, day_index, "OLN", "BUY", "queued_proposal")
+            journal_rows.setdefault(decision_id, response)  # idempotent, same as the real write
+
+            if fail_after_journaling:
+                raise RuntimeError("simulated failure after decision journaling")
+            _clear_checkpoint()  # only reached on a fully successful attempt
+        return response
+
+    try:
+        run_one_cycle_attempt("run-x", 5, fail_after_journaling=True)
+        raise AssertionError("expected the simulated failure to propagate")
+    except RuntimeError:
+        pass
+    assert len(hermes_calls) == 1
+    assert ckpt_path.exists(), "the checkpoint must survive a failure after journaling"
+    print("  ok  attempt 1 calls Hermes once, journals the decision, then fails -- checkpoint persists")
+
+    response2 = run_one_cycle_attempt("run-x", 5, fail_after_journaling=False)
+    assert len(hermes_calls) == 1, f"a retry called Hermes again ({len(hermes_calls)} total calls)"
+    assert response2 == {"decisions": [{"alias": "ALPHA", "action": "BUY", "quantity": 10}],
+                         "no_action_reason": ""}
+    assert len(journal_rows) == 1, f"a retry produced a duplicate journal row: {journal_rows}"
+    assert not ckpt_path.exists(), "the checkpoint must be cleared only after full success"
+    print("  ok  the retry reuses the checkpointed response verbatim -- no second Hermes call, "
+          "no duplicate journal row, checkpoint cleared only after the retry fully succeeds")
+
+    # A checkpoint from a DIFFERENT run/day must never be reused -- a fresh
+    # (run_id, day_index) forces a fresh Hermes call.
+    with patch("run_backtest.CHECKPOINT_PATH", ckpt_path):
+        _save_checkpoint("run-x", 5, {"decisions": [], "no_action_reason": "n/a"}, {})
+        assert _load_checkpoint("run-y", 5) is None
+        assert _load_checkpoint("run-x", 6) is None
+        assert _load_checkpoint("run-x", 5) is not None
+        _clear_checkpoint()
+    print("  ok  a checkpoint only satisfies an EXACT (run_id, day_index) match")
 
 
 def test_mark_invoked_fires_exactly_once_per_cycle_even_with_a_retry():
@@ -315,7 +432,7 @@ def _run(holdings=None, orders=None, bars=None, trading_days_elapsed=5):
         holdings=holdings or {}, pending_orders=orders or [],
         intraday={"OLN": bars or _flat_session()}, day_index=8,
         trading_days_elapsed=trading_days_elapsed, limits_ctx={}, watchlist=["OLN"], closed_pnl=[],
-        starting_cash=100_000.0, daily_pl_pct=0.0, weekly_pl_pct=0.0, drawdown_from_peak_pct=0.0,
+        starting_cash=100_000.0, equity_curve=[100_000.0] * 6,
     )
 
 
@@ -388,7 +505,7 @@ def test_buy_risk_check_uses_945_marks_not_the_close():
             holdings=_held(), pending_orders=[order],
             intraday={"OLN": bars, "DINO": _flat_session()}, day_index=8,
             trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN", "DINO"], closed_pnl=[],
-            starting_cash=100_000.0, daily_pl_pct=0.0, weekly_pl_pct=0.0, drawdown_from_peak_pct=0.0,
+            starting_cash=100_000.0, equity_curve=[100_000.0] * 6,
         )
 
     plan_a = run_with(bars_normal_close)
@@ -415,7 +532,7 @@ def test_extreme_closing_move_cannot_affect_945_verdict():
             holdings=_held(), pending_orders=[order],
             intraday={"OLN": oln_bars, "DINO": _flat_session()}, day_index=8,
             trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN", "DINO"], closed_pnl=[],
-            starting_cash=100_000.0, daily_pl_pct=0.0, weekly_pl_pct=0.0, drawdown_from_peak_pct=0.0,
+            starting_cash=100_000.0, equity_curve=[100_000.0] * 6,
         )
 
     normal = run_with(_flat_session())
@@ -466,6 +583,81 @@ def test_entry_day_stops_only_consider_bars_after_entry():
     print("  ok  entry-day stop/target resolution only considers bars at or after the entry bar")
 
 
+def test_combined_morning_stop_losses_trip_breaker_before_945_buy():
+    """2026-08-28 correctness pass, item 1 -- the actual regression this
+    repair targets. Two held positions each gap through their stop at the
+    09:30 open, realising a combined ~6.6% loss BEFORE a third ticker's
+    queued BUY is considered at 09:45. The daily (-3%) and weekly (-6%)
+    circuit breakers must see that real, same-morning loss and reject the
+    BUY -- not the stale, pre-session percentages the bug used to pass."""
+    equity_curve = [100_000.0] * 6  # yesterday's close, flat baseline
+    holdings = {
+        "OLN": Holding(ticker="OLN", quantity=100, entry_price=100.0,
+                       stop_price=95.0, target_price=130.0, entry_day=1, entry_trading_day=1),
+        "DINO": Holding(ticker="DINO", quantity=100, entry_price=100.0,
+                        stop_price=95.0, target_price=130.0, entry_day=1, entry_trading_day=1),
+    }
+    # Both gap well through their stop at the open -- fills at the gapped
+    # open (worse than the stop itself), $33/share below entry each.
+    gapped_open = {"time": "09:30", "open": 67.0, "high": 67.0, "low": 65.0, "close": 67.0}
+    buy_order = _buy_order(ticker="TSLA", alias="ECHO", stop_price=90.0, target_price=115.0)
+    plan = simulate_trading_day(
+        holdings=holdings, pending_orders=[buy_order],
+        intraday={
+            "OLN": _flat_session(overrides={"09:30": gapped_open}),
+            "DINO": _flat_session(overrides={"09:30": gapped_open}),
+            "TSLA": _flat_session(price=100.0),
+        },
+        day_index=8, trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN", "DINO", "TSLA"],
+        closed_pnl=[], starting_cash=80_000.0,  # 80k cash + 2x(100@$100) holdings == 100k equity yday
+        equity_curve=equity_curve,
+    )
+    gap_exits = [e for e in plan.events if e["stage"] == "opening_gap" and e["kind"] == "exit"]
+    assert len(gap_exits) == 2, plan.events
+    realized_loss = sum(e["quantity"] * (e["entry_price"] - e["exit_price"]) for e in gap_exits)
+    assert realized_loss >= 6_000, f"test scenario itself must realise a real >=6% loss, got ${realized_loss}"
+    print(f"  ok  two morning gap stops realised a combined ${realized_loss:,.0f} loss before 09:45")
+
+    buy_events = [e for e in plan.events if e["ticker"] == "TSLA"]
+    assert len(buy_events) == 1 and buy_events[0]["kind"] == "rejected", (
+        f"a queued 09:45 BUY was NOT rejected despite a {realized_loss / 1000:.1f}% same-morning "
+        f"loss already realised -- breaker values leaked stale pre-session numbers: {buy_events}"
+    )
+    assert "§4" in buy_events[0]["reason"], buy_events[0]["reason"]
+    print("  ok  the queued 09:45 BUY is rejected by §4 -- this morning's own stop losses "
+          "are reflected in the breaker check, not the stale pre-session figures")
+
+
+def test_resolve_seed_resume_and_mismatch():
+    """2026-08-28 correctness pass, item 7 -- masking-seed persistence."""
+    # A resumed run with no --seed passed reuses the stored seed exactly.
+    assert _resolve_seed(stored_seed=7, requested_seed=None) == 7
+    print("  ok  a resumed run with no --seed reuses its stored seed")
+
+    # Passing the SAME seed the stored one already has is a no-op, not a conflict.
+    assert _resolve_seed(stored_seed=7, requested_seed=7) == 7
+    print("  ok  passing back the same stored seed is not treated as a conflict")
+
+    # A genuinely conflicting --seed fails loudly, never silently remaps aliases.
+    try:
+        _resolve_seed(stored_seed=7, requested_seed=99)
+        raise AssertionError("expected a conflicting --seed to fail closed")
+    except SystemExit as exc:
+        assert "conflicts" in str(exc) and "7" in str(exc) and "99" in str(exc)
+    print("  ok  a conflicting --seed on a resumed run fails loudly, naming both seeds")
+
+    # A legacy state file (seed missing entirely) falls back safely: an
+    # explicit --seed wins, otherwise the project default is used.
+    assert _resolve_seed(stored_seed=None, requested_seed=55) == 55
+    assert _resolve_seed(stored_seed=None, requested_seed=None) == DEFAULT_MASKING_SEED
+    print("  ok  a legacy state file with no stored seed falls back safely "
+          "(explicit --seed, else the project default)")
+
+    # A fresh/--reset run (no stored seed at all) may establish any seed.
+    assert _resolve_seed(stored_seed=None, requested_seed=123) == 123
+    print("  ok  a fresh/--reset run may establish a new seed with nothing to conflict with")
+
+
 def test_missing_required_intraday_data_fails_closed():
     """A ticker that's held or has a pending order but has NO intraday
     bars at all -- or is missing a required boundary bar -- must raise,
@@ -511,7 +703,7 @@ def test_partial_sell_rejected_full_exit_still_works():
         holdings=oln_holding, pending_orders=[partial_sell],
         intraday={"OLN": oln_bars}, day_index=8,
         trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN"], closed_pnl=[],
-        starting_cash=0.0, daily_pl_pct=0.0, weekly_pl_pct=0.0, drawdown_from_peak_pct=0.0,
+        starting_cash=0.0, equity_curve=[100_000.0] * 6,
     )
     sell_events = [e for e in plan.events if e["stage"] == "queued_sell"]
     assert len(sell_events) == 1 and sell_events[0]["kind"] == "rejected", plan.events
@@ -525,7 +717,7 @@ def test_partial_sell_rejected_full_exit_still_works():
         holdings=oln_holding, pending_orders=[full_sell],
         intraday={"OLN": oln_bars}, day_index=8,
         trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN"], closed_pnl=[],
-        starting_cash=0.0, daily_pl_pct=0.0, weekly_pl_pct=0.0, drawdown_from_peak_pct=0.0,
+        starting_cash=0.0, equity_curve=[100_000.0] * 6,
     )
     full_sell_events = [e for e in plan2.events if e["stage"] == "queued_sell"]
     assert len(full_sell_events) == 1 and full_sell_events[0]["kind"] == "fill", plan2.events

@@ -2,12 +2,14 @@
 
 import asyncio
 import sys
+import types
 
 import httpx
 import pandas as pd
 import pytest
 from pydantic import SecretStr
 
+from maverick.market_data import fetchers as fetchers_module
 from maverick.market_data.config import MarketDataSettings
 from maverick.market_data.fetchers import (
     MoverFetcher,
@@ -62,6 +64,38 @@ async def test_history_passes_through_already_naive_frame():
 
     assert result.index.tz is None
     assert list(result["Open"]) == [1.0, 2.0]
+
+
+def test_default_history_fn_requests_raw_unadjusted_basis(monkeypatch):
+    """2026-08-28 correctness pass (item 4): Maverick's default historical
+    OHLC fetch (the real path -- not the injected test fakes above) must
+    explicitly request the SAME raw basis Alpaca execution uses.
+    yfinance's own default (auto_adjust=True, dividend/split-adjusted)
+    would silently disagree with real fill prices around an ex-dividend
+    date; this must be pinned explicitly, not left to the library default."""
+    calls: list[dict] = []
+
+    class _FakeTicker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        def history(self, **kwargs):
+            calls.append(kwargs)
+            return pd.DataFrame({"Open": [10.0], "High": [11.0], "Low": [9.0], "Close": [10.5]})
+
+    fake_yfinance = types.SimpleNamespace(Ticker=_FakeTicker)
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yfinance)
+
+    result = fetchers_module._default_history_fn("AAPL", "2026-07-13", "2026-07-16")
+
+    assert calls, "the default history function never called yfinance's Ticker.history"
+    assert calls[0].get("auto_adjust") is False, (
+        f"expected an explicit auto_adjust=False (raw basis, matching Alpaca "
+        f"execution) -- got {calls[0]}"
+    )
+    # The raw frame passes through completely untouched -- nothing here
+    # silently re-adjusts it after the fact.
+    assert list(result["Close"]) == [10.5]
 
 
 async def test_batch_history_strips_timezone_per_symbol():

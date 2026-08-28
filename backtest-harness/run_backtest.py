@@ -74,7 +74,16 @@ from risk_checker import (                                          # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
 STATE_PATH = Path(__file__).resolve().parent / "backtest_state.json"
+# 2026-08-28 correctness pass (item 2): a single slot, not one file per
+# cycle -- the harness runs one cycle at a time in one process, so at most
+# one cycle's checkpoint is ever "in flight." See _load_checkpoint /
+# _save_checkpoint / _clear_checkpoint.
+CHECKPOINT_PATH = Path(__file__).resolve().parent / "cycle_checkpoint.json"
 STARTING_EQUITY = 100_000.0
+# The masking seed used when nothing is stored yet and no --seed is given
+# (a fresh or --reset run) -- was argparse's own default before item 7's
+# seed-persistence fix; unchanged in value, only in where it lives.
+DEFAULT_MASKING_SEED = 42
 # RULES.md §6c, revised from 10 -> 15 trading days. The original 10-day
 # figure, paired with the 5% stop floor (§6a) and the 2:1 target minimum
 # (§6b), asks for a 10%+ move inside a window whose typical 10-day
@@ -358,6 +367,21 @@ class Portfolio:
 # takes every fact as an explicit argument.
 # --------------------------------------------------------------------------
 
+# Mirrors execution-sim-mcp/server.py's SLIPPAGE_BPS=5 EXACTLY -- the ONE
+# slippage rule this project uses (2026-08-28 correctness pass, item 5).
+# Duplicated as a constant, not a shared import, because the two are
+# isolated processes (hub-and-spoke, RULES.md/AGENTS.md §12B) -- if
+# execution-sim's rate ever changes, this constant must change with it.
+BUY_SLIPPAGE_BPS = 5
+
+
+def _slipped_buy_price(reference_price: float) -> float:
+    """The price a BUY will ACTUALLY fill at, per execution-sim-mcp's own
+    MARKET-order slippage rule -- see resolve_queued_order's docstring for
+    why the risk check must use this instead of the raw bar open."""
+    return round(reference_price * (1 + BUY_SLIPPAGE_BPS / 10_000), 2)
+
+
 @dataclass
 class QueuedOrderOutcome:
     accepted: bool
@@ -383,11 +407,23 @@ def resolve_queued_order(order: QueuedOrder, bar: dict, ctx: Context) -> QueuedO
     15-minute bars one at a time -- see evaluate_bar_stop_target and
     simulate_trading_day's final walk stage -- so this function's job
     shrank to exactly the risk-check re-validation.
+
+    2026-08-28 correctness pass (item 5): a BUY is risk-checked against
+    the SAME slippage-adjusted price execution-sim will actually fill at
+    (see _slipped_buy_price) -- not the raw bar open. The raw open
+    under-states a BUY's real notional/risk by the same 5bps every time,
+    so a trade that just barely passes §2a/§2b/§3's hard caps on the open
+    could genuinely breach them once the broker-side markup is applied,
+    exactly the gap this closes. SELL is unaffected and keeps the raw
+    open: slippage works AGAINST a seller (lower proceeds), which can
+    only make an exit MORE conservative against a cap, never less --
+    deliberately BUY-only, not a general simulator redesign.
     """
     open_price = bar["open"]
+    risk_check_price = _slipped_buy_price(open_price) if order.action == "BUY" else open_price
     trade = ProposedTrade(
         ticker=order.ticker, action=order.action, quantity=order.quantity,
-        entry_price=open_price, stop_price=order.stop_price, target_price=order.target_price,
+        entry_price=risk_check_price, stop_price=order.stop_price, target_price=order.target_price,
     )
     verdict = check_trade(trade, ctx)
     if not verdict.allowed:
@@ -407,6 +443,45 @@ def resolve_queued_order(order: QueuedOrder, bar: dict, ctx: Context) -> QueuedO
 # verified for the whole watchlist -- see HANDOFF.md) fix all three by
 # actually walking the session in chronological order.
 # --------------------------------------------------------------------------
+
+def _recalc_breakers(equity_curve: list[float], equity_now: float) -> tuple[float | None, float | None, float]:
+    """Recompute §4 circuit-breaker percentages from a REAL intraday equity
+    mark (`equity_now`), against the historical curve as of end of
+    yesterday (`equity_curve` -- never mutated by this function or by
+    today's session).
+
+    2026-08-28 correctness pass (item 1): previously simulate_trading_day
+    received daily/weekly/drawdown percentages computed ONCE, before this
+    same morning's opening-gap/09:30-09:45 exits ran -- Portfolio.
+    pct_since()/drawdown_pct() only ever compare CLOSED days
+    (equity_curve[-1], last updated at the END of the PRIOR day), so a
+    09:45 BUY's risk check was validated against numbers that could not
+    possibly reflect a stop that fired 15 minutes earlier the same
+    morning. Root-caused by passing the raw curve through instead, and
+    recomputing fresh at every point simulate_trading_day needs a breaker
+    value -- so two sequential opening-gap/09:30 stops (each updating
+    `running_cash`/`remaining` before this is next called) really do
+    compound before the next entry is checked.
+
+    Same distance-back semantics Portfolio.pct_since used (index_back=1 ->
+    vs yesterday's close, index_back=5 -> vs 5 trading days back) -- only
+    difference is "now" is a real intraday mark, not yesterday's own
+    close standing in for it.
+    """
+    def pct(index_back: int) -> float | None:
+        if len(equity_curve) < index_back:
+            return None
+        past = equity_curve[-index_back]
+        if not past:
+            return None
+        return round((equity_now - past) / past * 100, 2)
+
+    daily = pct(1)
+    weekly = pct(5)
+    peak = max(equity_curve + [equity_now]) if equity_curve else equity_now
+    drawdown = round((equity_now - peak) / peak * 100, 2) if peak else 0.0
+    return daily, weekly, drawdown
+
 
 def evaluate_opening_gap(stop_price: float, target_price: float, open_price: float) -> tuple[str, float] | None:
     """Did the session's 09:30 open already blow through a resting stop or
@@ -508,7 +583,7 @@ def simulate_trading_day(
     holdings: dict[str, "Holding"], pending_orders: list[QueuedOrder],
     intraday: dict[str, list[dict]], day_index: int, trading_days_elapsed: int,
     limits_ctx: dict, watchlist: list[str], closed_pnl: list[float], starting_cash: float,
-    daily_pl_pct: float | None, weekly_pl_pct: float | None, drawdown_from_peak_pct: float | None,
+    equity_curve: list[float],
 ) -> DayResult:
     """The full chronological session, pure. Order matters and is exactly
     what fixes the three problems this follow-up repair targets:
@@ -590,11 +665,13 @@ def simulate_trading_day(
             continue
         holding = remaining[order.ticker]
         open_bar = _bar_at(intraday, order.ticker, "09:30")
+        equity_at_930 = equity_mark({order.ticker: open_bar["open"]}, running_cash)
+        daily_now, weekly_now, drawdown_now = _recalc_breakers(equity_curve, equity_at_930)
         ctx = Context(
             account=AccountState(
-                equity=equity_mark({order.ticker: open_bar["open"]}, running_cash), cash=running_cash,
-                daily_pl_pct=daily_pl_pct, weekly_pl_pct=weekly_pl_pct,
-                drawdown_from_peak_pct=drawdown_from_peak_pct,
+                equity=equity_at_930, cash=running_cash,
+                daily_pl_pct=daily_now, weekly_pl_pct=weekly_now,
+                drawdown_from_peak_pct=drawdown_now,
             ),
             clock=MarketClock(is_open=True, minutes_since_open=0, minutes_until_close=390),
             positions=[Position(ticker=order.ticker, quantity=holding.quantity,
@@ -656,11 +733,17 @@ def simulate_trading_day(
         # a bar later than this one.
         marks = {t: _bar_at(intraday, t, "09:30")["close"] for t in remaining}
         equity_at_945 = equity_mark(marks, running_cash)
+        # Recalculated fresh EVERY iteration (item 1, bullet 4): running_cash
+        # and remaining already reflect every opening-gap/09:30-09:45 exit
+        # AND every earlier BUY fill this same loop -- so a second queued
+        # BUY sees the breaker impact of the first one's fill, not a
+        # snapshot taken before either.
+        daily_now, weekly_now, drawdown_now = _recalc_breakers(equity_curve, equity_at_945)
         ctx = Context(
             account=AccountState(
                 equity=equity_at_945, cash=running_cash,
-                daily_pl_pct=daily_pl_pct, weekly_pl_pct=weekly_pl_pct,
-                drawdown_from_peak_pct=drawdown_from_peak_pct,
+                daily_pl_pct=daily_now, weekly_pl_pct=weekly_now,
+                drawdown_from_peak_pct=drawdown_now,
             ),
             # REAL values for the fixed 09:45 execution point -- 15 minutes
             # elapsed (RULES.md §7's "< 15" floor is satisfied exactly at
@@ -733,6 +816,33 @@ def make_decision_id(run_key: str, day_index: int, ticker: str, action: str, kin
     return str(uuid.uuid5(_DECISION_ID_NAMESPACE, key))
 
 
+def _resolve_seed(stored_seed: int | None, requested_seed: int | None) -> int:
+    """Pure decision logic for item 7, 2026-08-28 correctness pass (masking-
+    seed persistence) -- separated from main() so it's unit-testable
+    without Docker/preflight.
+
+      - No stored seed yet (a fresh/--reset run, or a legacy state file
+        written before this field existed): use whatever was requested,
+        or the project default -- nothing to conflict with yet.
+      - A stored seed exists and the request conflicts: fail loudly
+        (SystemExit) instead of silently remapping ticker<->alias
+        assignments Hermes has already learned this run.
+      - A stored seed exists and the request matches it (or nothing was
+        requested): reuse the stored seed.
+    """
+    if stored_seed is None:
+        return requested_seed if requested_seed is not None else DEFAULT_MASKING_SEED
+    if requested_seed is not None and requested_seed != stored_seed:
+        raise SystemExit(
+            f"--seed {requested_seed} conflicts with this run's stored masking "
+            f"seed ({stored_seed}) in {STATE_PATH.name} -- a resumed run must "
+            "reuse its stored seed; changing it mid-run would silently remap "
+            "ticker<->alias assignments Hermes has already learned this run. "
+            "Use --reset to start a genuinely new run instead."
+        )
+    return stored_seed
+
+
 def _atomic_write_json(path: Path, data: dict) -> None:
     """Write-to-temp-then-atomic-rename -- the same pattern quota_pacer.py's
     `_save` already uses. A process killed mid-write (exactly the failure
@@ -751,6 +861,64 @@ def _atomic_write_json(path: Path, data: dict) -> None:
         except OSError:
             pass
         raise
+
+
+# --------------------------------------------------------------------------
+# per-cycle checkpoint (2026-08-28 correctness pass, item 2)
+#
+# Root cause being fixed: a validated Hermes response was previously only
+# ever held in a local variable. Every external mutation after it
+# (record_snapshot_once, record_queued_decision, log_activity) could fail
+# independently, and the LOCAL state file (the only thing that decides what
+# a retry sees) is never written until the whole cycle succeeds. So a
+# retry of the same day replayed the SAME inputs but called Hermes AGAIN --
+# a fresh, possibly different response -- while Neon could already hold a
+# 'pending' trade row journaled from the FIRST response. Two different
+# "intents" for the same real-world day, one only in Neon, one only in the
+# retry's local working state.
+#
+# Fix: durably save the validated response (the cycle's whole "intent") the
+# INSTANT it exists, before ANY further external mutation. A retry checks
+# for a checkpoint matching (run_id, day_index) first and, if found, reuses
+# it verbatim -- no second Hermes call, no second quota charge. The
+# checkpoint is only cleared once the atomic local-state commit for THIS
+# cycle succeeds (main(), after _atomic_write_json) -- never inside run_day
+# itself, so a checkpoint always outlives every write it protects.
+# --------------------------------------------------------------------------
+
+def _load_checkpoint(run_id: str, day_index: int) -> dict | None:
+    """A checkpoint is only ever reused for an EXACT (run_id, day_index)
+    match -- one belonging to a different run or a different day is simply
+    ignored (treated as absent, forcing a fresh Hermes call), never
+    partially trusted."""
+    if not CHECKPOINT_PATH.exists():
+        return None
+    try:
+        data = json.loads(CHECKPOINT_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if data.get("run_id") == run_id and data.get("day_index") == day_index:
+        return data
+    return None
+
+
+def _save_checkpoint(run_id: str, day_index: int, response: dict, usage: dict) -> None:
+    """Atomic (see _atomic_write_json) -- a crash mid-write must never
+    leave a half-written checkpoint that a retry could partially trust."""
+    _atomic_write_json(CHECKPOINT_PATH, {
+        "run_id": run_id, "day_index": day_index, "response": response, "usage": usage,
+    })
+
+
+def _clear_checkpoint() -> None:
+    """Called ONLY by main(), ONLY after the local portfolio-state commit
+    for this exact cycle has already succeeded -- see the module docstring
+    above. Missing file is not an error (nothing to clear, e.g. a cycle
+    that never needed Hermes -- a holiday/no-data day)."""
+    try:
+        CHECKPOINT_PATH.unlink()
+    except FileNotFoundError:
+        pass
 
 
 # --------------------------------------------------------------------------
@@ -1808,18 +1976,21 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     require_intraday_coverage(needed, intraday)  # fails closed -- see its docstring
 
     if needed:
-        # Computed once, before any of today's processing -- equity_curve
-        # isn't touched again until the very end of run_day, so these are
-        # the same "as of end of yesterday" figures the whole session
-        # should see, never drifting mid-day.
+        # working.equity_curve as of end of YESTERDAY -- equity_curve isn't
+        # appended to until the very end of run_day (below), so this is the
+        # correct historical baseline. Breaker percentages used for every
+        # entry check INSIDE simulate_trading_day are recalculated fresh
+        # against this baseline using a real intraday equity mark (see
+        # _recalc_breakers) -- item 1, 2026-08-28 correctness pass: passing
+        # static pre-computed percentages here (the prior behaviour) meant
+        # a 09:45 BUY's risk check could never see this same morning's own
+        # opening-gap/09:30-09:45 stop losses.
         plan = simulate_trading_day(
             holdings=working.holdings, pending_orders=working.pending_orders,
             intraday=intraday, day_index=day_index,
             trading_days_elapsed=working.trading_days_elapsed,
             limits_ctx=limits_ctx, watchlist=tickers, closed_pnl=working.closed_pnl,
-            starting_cash=working.cash,
-            daily_pl_pct=working.pct_since(1), weekly_pl_pct=working.pct_since(5),
-            drawdown_from_peak_pct=working.drawdown_pct(),
+            starting_cash=working.cash, equity_curve=working.equity_curve,
         )
         working.stopped_out_today = []
         for event in plan.events:
@@ -2033,31 +2204,51 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                           positions_view, candidates, recent_insights,
                           reflection_trades)
 
-    # PHASE 0 REPAIR: count the quota slot the instant Hermes is actually
-    # invoked (inside _call_hermes), not after this whole cycle finishes.
-    # `invoked` guards against double-counting a JSON-parse retry (2 real
-    # _call_hermes calls, still 1 cycle's quota) -- see ask_hermes.
-    invoked = {"done": False}
+    # -- checkpoint gate (2026-08-28 correctness pass, item 2) ------------
+    # A retry of this EXACT (run_key, day_index) reuses the response
+    # already checkpointed by an earlier attempt -- Hermes is never called
+    # again, and no quota is charged (mark_invoked/pacer.record_cycle are
+    # simply never reached on this path). See the module-level checkpoint
+    # docstring above for why this is the actual root-cause fix.
+    checkpoint = _load_checkpoint(run_key, day_index)
+    if checkpoint is not None:
+        response = checkpoint["response"]
+        summary["usage"] = checkpoint.get("usage") or {}
+        print(f"  REPLAYING checkpointed response for day_index={day_index} "
+              "-- no new Hermes call, no quota charged")
+    else:
+        # PHASE 0 REPAIR: count the quota slot the instant Hermes is
+        # actually invoked (inside _call_hermes), not after this whole
+        # cycle finishes. `invoked` guards against double-counting a
+        # JSON-parse retry (2 real _call_hermes calls, still 1 cycle's
+        # quota) -- see ask_hermes.
+        invoked = {"done": False}
 
-    def mark_invoked() -> None:
-        if not invoked["done"]:
-            pacer.record_cycle()
-            invoked["done"] = True
+        def mark_invoked() -> None:
+            if not invoked["done"]:
+                pacer.record_cycle()
+                invoked["done"] = True
 
-    try:
-        response = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day,
-                              on_invoked=mark_invoked)
-    except Exception as exc:
-        # Tag with whatever real usage ask_hermes accumulated before
-        # failing (a validation-retry exhaustion still burns 1-2 real
-        # calls) -- _run_cycle_or_halt reads this for log_cycle_failure's
-        # "real token usage when available" (item 6). This is the single
-        # most usage-relevant failure point (a real _call_hermes just ran);
-        # a failure LATER in this function (a journal write, etc.) still
-        # gets the real, current quota-pacer count via log_cycle_failure's
-        # own pacer argument, just not this specific per-cycle token total.
-        exc.usage = summary["usage"]
-        raise
+        try:
+            response = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day,
+                                  on_invoked=mark_invoked)
+        except Exception as exc:
+            # Tag with whatever real usage ask_hermes accumulated before
+            # failing (a validation-retry exhaustion still burns 1-2 real
+            # calls) -- _run_cycle_or_halt reads this for log_cycle_failure's
+            # "real token usage when available" (item 6). This is the single
+            # most usage-relevant failure point (a real _call_hermes just ran);
+            # a failure LATER in this function (a journal write, etc.) still
+            # gets the real, current quota-pacer count via log_cycle_failure's
+            # own pacer argument, just not this specific per-cycle token total.
+            exc.usage = summary["usage"]
+            raise
+        # Durably save the validated response BEFORE any further external
+        # mutation (record_snapshot_once, decision journaling, activity
+        # logging, all below) -- this is the actual fix: the cycle's whole
+        # "intent" now exists outside this function's local variables the
+        # instant it's known, not only once the whole cycle succeeds.
+        _save_checkpoint(run_key, day_index, response, summary["usage"])
 
     # -- cycle-success gate (2026-08-28 pre-training pass, items 5+6) -----
     # This snapshot write is the ONE thing in this function protected by a
@@ -2221,7 +2412,15 @@ def main() -> None:
     parser.add_argument("--end", default="2026-08-14")
     parser.add_argument("--days", type=int, default=3,
                         help="max cycles this run (smoke tests use a few)")
-    parser.add_argument("--seed", type=int, default=42)
+    # default=None (not 42) so a resumed run can tell "the user explicitly
+    # asked for a seed" apart from "nothing was passed" -- see item 7 below.
+    parser.add_argument("--seed", type=int, default=None,
+                        help="masking seed; a RESUMED run must reuse its "
+                             "stored seed (see backtest_state.json's 'seed' "
+                             "field) -- pass a conflicting value and the run "
+                             "fails closed instead of silently remapping "
+                             "ticker<->alias assignments Hermes already "
+                             "learned this run")
     parser.add_argument("--reset", action="store_true")
     args = parser.parse_args()
 
@@ -2229,15 +2428,13 @@ def main() -> None:
 
     if args.reset and STATE_PATH.exists():
         STATE_PATH.unlink()
+    if args.reset:
+        _clear_checkpoint()  # a reset run has no relationship to any stale checkpoint
 
     watchlist = json.loads(
         (REPO / "watchlist" / "watchlist.json").read_text()
     )["tickers"]
     start = date.fromisoformat(args.start)
-
-    names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
-    masking = RunMasking(names, run_start=start, seed=args.seed)
-    pacer = QuotaPacer()
 
     if STATE_PATH.exists():
         state = json.loads(STATE_PATH.read_text())
@@ -2249,10 +2446,22 @@ def main() -> None:
         # today's baseline reset, but harmless either way: an old file has
         # no pending_orders with a real decision_id to collide with).
         run_id = state.get("run_id") or str(uuid.uuid4())
-        print(f"resuming from {cursor} (run_id={run_id})")
+        # 2026-08-28 correctness pass (item 7): the masking seed is now
+        # part of persisted state, not re-derived from --seed's default
+        # every invocation -- a resumed run reuses its STORED seed (or
+        # fails loudly on a genuine conflict). See _resolve_seed.
+        seed = _resolve_seed(state.get("seed"), args.seed)
+        print(f"resuming from {cursor} (run_id={run_id}, seed={seed})")
     else:
+        # A reset (or a genuinely fresh state file) may establish a new
+        # seed -- there is nothing stored yet to conflict with.
         portfolio, cursor = Portfolio(), start
         run_id = None  # generated below
+        seed = _resolve_seed(None, args.seed)
+
+    names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
+    masking = RunMasking(names, run_start=start, seed=seed)
+    pacer = QuotaPacer()
 
     # --reset (or a genuinely fresh state file) ALWAYS gets a brand new
     # run_id -- this is what makes "do not let --reset reuse old trade IDs
@@ -2325,8 +2534,14 @@ def main() -> None:
         _atomic_write_json(
             STATE_PATH,
             {"portfolio": portfolio.to_dict(), "cursor": str(cursor + timedelta(days=1)),
-             "run_id": run_id},
+             "run_id": run_id, "seed": seed},
         )
+        # Only NOW -- the atomic local-state commit for this exact cycle
+        # has actually succeeded -- is this cycle's checkpoint (if any) no
+        # longer needed. Clearing any earlier would let a crash between
+        # the clear and this write force a retry to call Hermes fresh for
+        # a cycle that already had a saved intent.
+        _clear_checkpoint()
         cursor += timedelta(days=1)
 
     final = portfolio.equity_curve[-1]

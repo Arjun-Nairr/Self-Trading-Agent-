@@ -362,11 +362,15 @@ function isBlockedRow(a) {
     && /§\d/.test(a.description);
 }
 
-function renderSummary(trades, snaps, activity, failedCount) {
+function renderSummary(trades, snaps, blockedActivity, failedCount) {
   const { closed, open } = pairTrades(trades);
   const cycles = snaps.length;
   const wins = closed.filter(c => c.pnl > 0).length;
-  const blocked = activity.filter(isBlockedRow).length;
+  // 2026-08-28 correctness pass (item 6): the COMPLETE blocked-activity
+  // dataset (same one renderAnalysis already uses), not the 80-row recent
+  // feed -- a whole-run "blocked by the risk checker" total must not
+  // silently cap out at whatever fits in the live tail.
+  const blocked = blockedActivity.filter(isBlockedRow).length;
 
   if (!cycles && !trades.length) {
     el("summary").innerHTML = `<span class="kv-key">No ${currentMode === "backtest" ? "training" : "live"} data recorded yet. This view populates as soon as the first cycle runs.</span>`;
@@ -714,7 +718,7 @@ async function refresh(withSkeletons = false) {
     ]);
     const { closed, open } = pairTrades(trades);
 
-    renderSummary(trades, snaps, activity, failedCount);
+    renderSummary(trades, snaps, blockedActivity, failedCount);
     renderStats(snaps, open.length, closed, lastFailed[0]);
     renderBars(snaps);
     renderUsageStats(snaps, failedCount);
