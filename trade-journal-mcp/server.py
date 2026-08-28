@@ -143,6 +143,19 @@ def _json_equal(a: Any, b: Any) -> bool:
     return _norm(a) == _norm(b)
 
 
+def _uuid_equal(a: Any, b: Any) -> bool:
+    """None-safe UUID comparison. 2026-08-28 correctness pass (third
+    pass, item 1): Neon/asyncpg returns a UUID column (e.g. `run_id`) as
+    a `uuid.UUID` object, while the backtest harness always supplies a
+    plain string -- comparing them with `==` directly is always False
+    even for the identical value, which made every genuine identical
+    retry that carried a real run_id fail with a false 'run_id' mismatch.
+    Both sides are normalized to their string form before comparing."""
+    if a is None or b is None:
+        return a is None and b is None
+    return str(a) == str(b)
+
+
 def _decision_field_mismatches(
     row: "asyncpg.Record",
     *, ticker: str, action: str, intended_quantity: int, intended_notional: float,
@@ -174,7 +187,7 @@ def _decision_field_mismatches(
         ("target_price", _num_close(row["target_price"], target_price)),
         ("limit_price", _num_close(row["limit_price"], limit_price)),
         ("data_timestamps", _json_equal(row["data_timestamps"], data_timestamps)),
-        ("run_id", row["run_id"] == run_id),
+        ("run_id", _uuid_equal(row["run_id"], run_id)),
     ]
     return [name for name, ok in checks if not ok]
 

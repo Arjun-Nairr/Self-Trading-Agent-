@@ -375,11 +375,20 @@ class Portfolio:
 BUY_SLIPPAGE_BPS = 5
 
 
-def _slipped_buy_price(reference_price: float) -> float:
-    """The price a BUY will ACTUALLY fill at, per execution-sim-mcp's own
-    MARKET-order slippage rule -- see resolve_queued_order's docstring for
-    why the risk check must use this instead of the raw bar open."""
-    return round(reference_price * (1 + BUY_SLIPPAGE_BPS / 10_000), 2)
+def _slipped_buy_price(reference_price: float, bar: dict) -> float:
+    """The price a BUY will ACTUALLY fill at -- mirrors execution-sim-mcp's
+    own `_simulate_fill` MARKET-order branch EXACTLY: 5bps slippage against
+    the trade direction, then clamped into the fill bar's own [low, high]
+    range (a bad/stale reference_price can't fill outside what actually
+    traded that bar). Used both for the risk check (resolve_queued_order)
+    and for simulate_trading_day's own internal sequential bookkeeping
+    (2026-08-28 correctness pass, third pass, item 2) so an earlier
+    accepted BUY's real fill/cash impact is visible to a LATER queued
+    BUY's risk check in the same batch -- the two paths can never disagree
+    since they're the same formula."""
+    slippage = reference_price * (BUY_SLIPPAGE_BPS / 10_000)
+    fill_price = reference_price + slippage
+    return round(min(max(fill_price, bar["low"]), bar["high"]), 2)
 
 
 @dataclass
@@ -420,7 +429,7 @@ def resolve_queued_order(order: QueuedOrder, bar: dict, ctx: Context) -> QueuedO
     deliberately BUY-only, not a general simulator redesign.
     """
     open_price = bar["open"]
-    risk_check_price = _slipped_buy_price(open_price) if order.action == "BUY" else open_price
+    risk_check_price = _slipped_buy_price(open_price, bar) if order.action == "BUY" else open_price
     trade = ProposedTrade(
         ticker=order.ticker, action=order.action, quantity=order.quantity,
         entry_price=risk_check_price, stop_price=order.stop_price, target_price=order.target_price,
@@ -572,9 +581,14 @@ class DayResult:
     "superseded" (informational only, no state change).
 
     Internal bookkeeping (which tickers are still held, for sequencing
-    purposes) uses UNSLIPPED bar-open reference prices throughout -- see
-    simulate_trading_day's docstring for why that's a small, bounded,
-    documented approximation rather than a correctness gap.
+    purposes): a queued BUY's real slippage-adjusted fill (see
+    _slipped_buy_price) is now reflected exactly, so a second queued BUY
+    in the same batch sees the first one's REAL cash/equity impact
+    (2026-08-28 correctness pass, third pass, item 2). A same-day SELL
+    still uses the unslipped open as its internal reference -- see
+    simulate_trading_day's docstring for why that remaining piece stays a
+    small, bounded, documented approximation rather than a correctness
+    gap.
     """
     events: list[dict]
 
@@ -609,14 +623,16 @@ def simulate_trading_day(
          happened at that bar's start; earlier bars that day do not,
          since the position didn't exist yet).
 
-    Approximation, stated plainly: this function's OWN internal cash
-    tracking (used only to decide the 09:45 risk-check equity figure) uses
-    UNSLIPPED bar-open reference prices for every leg, including a same-
-    day SELL that precedes a BUY. Real execution-sim slippage (5bps) is
-    applied by run_day only to the ACTUAL recorded fill/cash movement, not
-    fed back into this function's own sequencing math. Bounded to a few
-    dollars on a same-day SELL-then-BUY sequence -- documented in
-    HANDOFF.md, not silently assumed away.
+    Approximation, stated plainly: a same-day SELL's own internal cash
+    tracking (used only to decide the 09:45 risk-check equity figure)
+    still uses the UNSLIPPED bar-open reference price -- SELL proceeds
+    reducing cash conservatively can only make a later BUY's risk check
+    MORE conservative, never less, so this is bounded and deliberately
+    left as-is (unchanged scope, 2026-08-28 correctness pass item 2 is
+    BUY-only, mirroring item 5's own BUY-only scope). A queued BUY,
+    however, now uses its EXACT simulated fill (see _slipped_buy_price) --
+    the prior "bounded to a few dollars" approximation for BUY-after-BUY
+    sequencing is fixed, not just documented.
     """
     # Running cash balance, starting from the REAL portfolio cash --
     # updated with UNSLIPPED reference prices for every leg during this
@@ -722,16 +738,30 @@ def simulate_trading_day(
                            "entry_price": holding.entry_price, "bar_time": "09:30"})
 
     # -- 09:45: queued BUY entries -- the only entry execution point ------
+    # Snapshot of what was ALREADY open going into this stage -- distinct
+    # from a ticker that gets ADDED to `remaining` by an earlier fill
+    # later in this SAME loop (2026-08-28 correctness pass, third pass,
+    # item 2). A carried-over position's last fully-elapsed mark is its
+    # 09:30 close; a position that was just entered THIS loop has no
+    # meaningful 09:30 close to mark against (it wasn't held then) -- it
+    # must be marked at its own real fill price instead, see `marks` below.
+    held_before_945 = set(remaining)
     for order in [o for o in pending_orders if o.action == "BUY"]:
         if order.ticker in remaining:
             events.append({"stage": "buy_945", "ticker": order.ticker, "kind": "superseded",
                            "reason": "already holding", "order": order})
             continue
         bar_945 = _bar_at(intraday, order.ticker, "09:45")
-        # Marks known by 09:45: the 09:30 bar's close (fully elapsed by
-        # now) for anything still open -- never today's daily close, never
-        # a bar later than this one.
-        marks = {t: _bar_at(intraday, t, "09:30")["close"] for t in remaining}
+        # Marks known by 09:45: the 09:30 close for anything carried over
+        # from before this stage (fully elapsed by now) -- but a position
+        # entered EARLIER IN THIS SAME LOOP is marked at its own real fill
+        # price (also known at 09:45, the instant it filled), never its
+        # unrelated 09:30 close -- see held_before_945 above. Never
+        # today's daily close, never a bar later than 09:45.
+        marks = {
+            t: (_bar_at(intraday, t, "09:30")["close"] if t in held_before_945 else remaining[t].entry_price)
+            for t in remaining
+        }
         equity_at_945 = equity_mark(marks, running_cash)
         # Recalculated fresh EVERY iteration (item 1, bullet 4): running_cash
         # and remaining already reflect every opening-gap/09:30-09:45 exit
@@ -761,9 +791,18 @@ def simulate_trading_day(
             events.append({"stage": "buy_945", "ticker": order.ticker, "kind": "rejected",
                            "reason": outcome.reason, "order": order})
             continue
-        running_cash -= order.quantity * bar_945["open"]  # unslipped reference only
+        # 2026-08-28 correctness pass (third pass, item 2): the EXACT
+        # simulated fill (same 5bps slippage + bar-range clamp
+        # execution-sim-mcp's real MARKET fill will use -- see
+        # _slipped_buy_price), not the raw unslipped open. run_day's own
+        # real execution-sim-mcp call (I/O) later computes the identical
+        # number and is what actually gets journaled/persisted -- this
+        # mirrors it so a SECOND queued BUY in the same batch sees the
+        # first one's REAL cash/equity impact, not an approximation.
+        fill_price = _slipped_buy_price(bar_945["open"], bar_945)
+        running_cash -= order.quantity * fill_price
         remaining[order.ticker] = Holding(
-            ticker=order.ticker, quantity=order.quantity, entry_price=bar_945["open"],
+            ticker=order.ticker, quantity=order.quantity, entry_price=fill_price,
             stop_price=order.stop_price, target_price=order.target_price,
             entry_day=day_index, entry_trading_day=trading_days_elapsed,
         )
@@ -1917,8 +1956,30 @@ def build_decision_time_context(working: "Portfolio", bars: dict[str, dict],
 
 def run_day(day: date, day_index: int, portfolio: Portfolio,
             masking: RunMasking, watchlist: list[dict], limits_ctx: dict,
-            pacer: QuotaPacer, run_key: str) -> tuple[Portfolio, dict]:
-    """Run one simulated trading day. Returns (new_portfolio, summary).
+            pacer: QuotaPacer, run_key: str) -> tuple[Portfolio, dict, "Callable[[], None]"]:
+    """Run one simulated trading day. Returns (new_portfolio, summary,
+    do_observability).
+
+    `do_observability` is a zero-arg callable the CALLER must invoke --
+    and may ONLY invoke -- strictly AFTER the atomic local portfolio-state
+    commit and checkpoint clear for this exact cycle have already
+    succeeded (locked architectural decision, 2026-08-28 third pass: see
+    the ESSENTIAL vs. BEST-EFFORT split below). It writes this cycle's
+    portfolio snapshot and activity narration -- both best-effort
+    observability, never allowed to gate, halt, retry, or replay a
+    trading cycle. A failure inside it must be caught by the caller and
+    reported, never re-raised into _run_cycle_or_halt's retry path (that
+    would incorrectly replay already-committed essential work). See
+    main()'s own call site for the exact ordering this guarantees.
+
+    ESSENTIAL (must halt safely and retry deterministically, all
+    completed inside THIS function before it ever returns): the
+    checkpointed Hermes response, portfolio state and pending orders,
+    trade decisions and execution results, reflections/insights (they
+    feed future prompts), and every risk-enforcement check. BEST-EFFORT
+    OBSERVABILITY (deferred to `do_observability`, never controls
+    essential processing): portfolio snapshots, activity narration, and
+    the dashboard statistics derived from them.
 
     PHASE 0 REPAIR + 2026-08-25 INTRADAY-CHRONOLOGY FOLLOW-UP:
 
@@ -1960,7 +2021,9 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     bars = fetch_bars(tickers, day)
     if not bars:
         summary["skipped"] = "no market data (holiday/weekend)"
-        return portfolio, summary  # nothing happened -- caller's object, unchanged
+        # nothing happened -- caller's object, unchanged; 3-tuple to match
+        # the real return shape below (a no-op observability closure).
+        return portfolio, summary, (lambda: None)
     # This IS a trading day (real bars exist) -- count it before anything
     # below reads it, so a position opened today is at trading-day-offset 0,
     # not -1.
@@ -2243,29 +2306,20 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             # own pacer argument, just not this specific per-cycle token total.
             exc.usage = summary["usage"]
             raise
-        # Durably save the validated response BEFORE any further external
-        # mutation (record_snapshot_once, decision journaling, activity
-        # logging, all below) -- this is the actual fix: the cycle's whole
-        # "intent" now exists outside this function's local variables the
-        # instant it's known, not only once the whole cycle succeeds.
+        # Durably save the validated response BEFORE any further essential
+        # mutation (reflection insight, decision journaling, all below) --
+        # this is the checkpoint fix: the cycle's whole "intent" now
+        # exists outside this function's local variables the instant it's
+        # known, not only once the whole cycle succeeds.
         _save_checkpoint(run_key, day_index, response, summary["usage"])
 
-    # -- cycle-success gate (2026-08-28 pre-training pass, items 5+6) -----
-    # This snapshot write is the ONE thing in this function protected by a
-    # real database-level uniqueness constraint (cycle_id). `is_new` tells
-    # us whether THIS call is the first time this (run, day) has ever
-    # recorded a snapshot: if it is, this cycle's activity narration and
-    # reflection insight are genuinely new and get written below; if it is
-    # NOT (a retry of a day that fully succeeded before -- e.g. the local
-    # state-file write failed AFTER Neon writes already landed), they are
-    # correctly skipped, so a retry cannot duplicate a completed day's
-    # narration or reflection. This does not change decisions/trades
-    # journaling above -- those are already independently idempotent via
-    # each trade's own deterministic decision_id.
-    is_new = record_snapshot_once(run_id=run_key, cycle_id=cycle_id,
-                                  usage=summary["usage"], pacer=pacer, **snapshot_kwargs)
     summary["no_action_reason"] = response.get("no_action_reason", "")
-    if is_new and summary["no_action_reason"]:
+    # Activity narration is BEST-EFFORT OBSERVABILITY -- appended to the
+    # in-memory list unconditionally (no snapshot-derived gate; see
+    # do_observability below, which is the only thing that actually
+    # writes it, deferred until after the essential work below AND the
+    # caller's atomic state commit).
+    if summary["no_action_reason"]:
         activity.append(("reasoning", summary["no_action_reason"][:900], None))
 
     if is_reflection_day:
@@ -2274,14 +2328,25 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         # if/else is defense in depth, not the primary gate: a missing
         # reflection must never reset the cadence (item 1's last
         # requirement), it should keep trying every subsequent cycle.
+        #
+        # ESSENTIAL, item 6/7 (2026-08-28 third pass): record_insight is
+        # called UNCONDITIONALLY here -- no longer gated by
+        # record_snapshot_once's is_new (that gate is removed entirely;
+        # snapshots are best-effort observability and must never control
+        # essential processing). record_insight is idempotent on its OWN
+        # merit (insight_log.cycle_id is UNIQUE) and returns whether THIS
+        # call actually inserted (True) or an identical cycle-scoped
+        # insight was already durably present (False, ON CONFLICT). Per
+        # item 7, the cadence may reset in EITHER case -- both mean the
+        # insight is genuinely persisted -- but NEVER if this raises
+        # (propagates uncaught, halting the cycle before any commit; a
+        # retry re-attempts the identical insight from the SAME
+        # checkpointed response).
         reflection_text = response.get("reflection", "").strip()
         if reflection_text:
-            if is_new:
-                # reflection_trades IS the closed-trade set this reflection
-                # was actually drawn from -- its length is the real sample
-                # size, not a guess.
-                record_insight(reflection_text, sample_size=len(reflection_trades or []),
-                               run_id=run_key, cycle_id=cycle_id)
+            inserted = record_insight(reflection_text, sample_size=len(reflection_trades or []),
+                                      run_id=run_key, cycle_id=cycle_id)
+            if inserted:
                 activity.append(("weekly_reflection", reflection_text[:900], None))
             working.cycles_since_reflection = 0
         else:
@@ -2367,13 +2432,28 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         summary["decisions"].append(line)
         activity.append(("order_queued", line, decision_id))
 
-    if is_new:
+    # -- best-effort observability, deferred (locked architectural
+    # decision, 2026-08-28 third pass) -----------------------------------
+    # Every ESSENTIAL step above (exits, reflection insight, decision
+    # journaling/queuing, risk enforcement) has already completed by this
+    # point -- this closure only captures what's needed to write the
+    # portfolio snapshot and activity narration, and does NOT run yet.
+    # The caller (main()) MUST call it only after the atomic local
+    # portfolio-state commit and checkpoint clear for THIS cycle have
+    # already succeeded, and MUST catch any exception from it without
+    # halting, retrying, or replaying the cycle -- see run_day's own
+    # docstring and main()'s call site.
+    def do_observability() -> None:
+        record_snapshot_once(run_id=run_key, cycle_id=cycle_id,
+                             usage=summary["usage"], pacer=pacer, **snapshot_kwargs)
         log_activity(activity, run_id=run_key, cycle_id=cycle_id)
-    return working, summary
+
+    return working, summary, do_observability
 
 
-def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict]]", day_label: str = "",
-                       run_id: str | None = None, pacer: "QuotaPacer | None" = None):
+def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict, Callable[[], None]]]", day_label: str = "",
+                       run_id: str | None = None, pacer: "QuotaPacer | None" = None,
+                       fail_logger: "Callable[..., None]" = log_cycle_failure):
     """Isolated control-flow wrapper -- the one piece of "a failed cycle
     must not advance the simulated date" that's actually unit-testable
     without Docker/Neon. Runs one cycle; on any exception, prints why and
@@ -2382,6 +2462,12 @@ def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict]]", day_l
     advance anything itself -- "remove catch-and-continue behavior that
     silently skips failed trading days" means the caller decides to stop,
     not paper over the failure and move to the next day.
+
+    fail_logger: defaults to the REAL log_cycle_failure (production, real
+    Docker/Neon I/O) -- callers that want to unit-test this function's
+    control flow WITHOUT touching Docker/Neon (2026-08-28 correctness
+    pass, third pass, item 3) inject a fake here instead of relying on
+    deleting the pollution afterward.
     """
     try:
         return run_day_fn(), False
@@ -2397,7 +2483,7 @@ def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict]]", day_l
         # above (e.g. the failure itself was a lost Docker/Neon connection,
         # in which case this write will also fail, harmlessly).
         try:
-            log_cycle_failure(
+            fail_logger(
                 day_label, f"{type(exc).__name__}: {exc}", run_id,
                 usage=getattr(exc, "usage", None), pacer=pacer,
             )
@@ -2506,7 +2592,7 @@ def main() -> None:
         )
         if halted:
             break
-        portfolio, summary = result
+        portfolio, summary, do_observability = result
 
         if "skipped" in summary:
             print(f"  skipped: {summary['skipped']}")
@@ -2542,6 +2628,22 @@ def main() -> None:
         # the clear and this write force a retry to call Hermes fresh for
         # a cycle that already had a saved intent.
         _clear_checkpoint()
+
+        # -- best-effort observability, ONLY now (locked architectural
+        # decision, 2026-08-28 third pass) -----------------------------
+        # Essential work is durably committed and the checkpoint is
+        # cleared above -- a failure writing the snapshot/activity rows
+        # must never halt the run, retry this cycle, or replay a Hermes
+        # call. A crash here (or between here and the next cycle) may
+        # leave this day's dashboard information missing; that is the
+        # explicitly accepted tradeoff -- it can never create a duplicate
+        # trade or repeat a Hermes call, since both are already committed.
+        try:
+            do_observability()
+        except Exception as exc:
+            print(f"  OBSERVABILITY FAILED (snapshot/activity) for day_index={day_index}: "
+                  f"{type(exc).__name__}: {exc} -- essential work already committed, continuing")
+
         cursor += timedelta(days=1)
 
     final = portfolio.equity_curve[-1]

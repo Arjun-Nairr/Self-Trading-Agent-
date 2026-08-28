@@ -59,8 +59,54 @@ async def test_decision_collision_detects_every_field():
         await pool.execute("DELETE FROM trades WHERE decision_id = $1", decision_id)
 
 
+async def test_identical_retry_with_real_run_id_is_a_no_op():
+    """2026-08-28 correctness pass (third pass, item 1): Neon returns a
+    UUID column (run_id) as a uuid.UUID object while the backtest harness
+    always supplies a plain string -- comparing them directly in
+    _decision_field_mismatches used to fail every genuine identical retry
+    that carried a real run_id with a false 'run_id' mismatch. This is
+    the actual regression: a real non-null string run_id, an identical
+    retry (must be a no-op), and a genuinely changed run_id (must still
+    be rejected -- normalization must not weaken the real check)."""
+    run_id = str(uuid.uuid4())
+    kwargs = dict(
+        ticker="TEST.NS", action="BUY", intended_quantity=5,
+        intended_notional=500.0, order_type="MARKET",
+        confidence=3, primary_signal="technical", technical_basis="rsi",
+        expected_reward_risk=2.0, invalidation_condition="run_id normalization test",
+        decision_id=str(uuid.uuid4()), run_id=run_id,
+    )
+    decision = await _record_decision(**kwargs)
+    decision_id = decision["decision_id"]
+    print(f"created pending decision {decision_id} with run_id={run_id}")
+
+    try:
+        # The exact same payload, including the SAME string run_id --
+        # must be a true no-op, not a false 'run_id' mismatch.
+        again = await _record_decision(**kwargs)
+        assert str(again["decision_id"]) == str(decision_id)
+        assert str(again["run_id"]) == run_id
+        print("  ok  an identical retry with a real non-null run_id is a no-op "
+              "(UUID-vs-string comparison no longer false-positives)")
+
+        # A GENUINELY different run_id under the same decision_id must
+        # still be rejected -- normalization must never weaken this check.
+        different_run_id = str(uuid.uuid4())
+        try:
+            await _record_decision(**dict(kwargs, run_id=different_run_id))
+            raise AssertionError("expected a collision error for a genuinely changed run_id")
+        except ValueError as exc:
+            assert "run_id" in str(exc), f"error for changed run_id did not name it: {exc}"
+            print("  ok  a genuinely different run_id under the same decision_id "
+                  "still fails loudly, naming it")
+    finally:
+        pool = await get_pool()
+        await pool.execute("DELETE FROM trades WHERE decision_id = $1", decision_id)
+
+
 async def main():
     await test_decision_collision_detects_every_field()
+    await test_identical_retry_with_real_run_id_is_a_no_op()
 
     decision = await _record_decision(
         ticker="TEST.NS", action="BUY", intended_quantity=1,

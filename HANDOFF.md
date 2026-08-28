@@ -273,6 +273,91 @@ approval to start the run.
 
 ---
 
+## 2026-08-28 correctness pass (third pass) — repaired guarantees
+
+**Locked architectural decision — essential vs. best-effort:** cycle data
+now splits into two classes. **Essential** (must halt safely and retry
+deterministically): the checkpointed Hermes response, portfolio state and
+pending orders, trade decisions and execution results, reflections/
+insights (they feed future prompts), and every risk-enforcement check --
+all completed inside `run_day` before it ever returns. **Best-effort
+observability** (must never halt or replay trading): portfolio snapshots,
+activity narration, and the dashboard stats derived from them -- deferred
+into a `do_observability` closure `run_day` returns, which the caller
+(`main()`) invokes ONLY after the atomic local-state commit and
+checkpoint clear for that cycle have already succeeded, inside a
+try/except that reports a failure without halting, retrying, or
+replaying. A crash after the commit but before observability may leave
+missing dashboard information (explicitly accepted); it can never create
+a duplicate trade or repeat a Hermes call. `record_snapshot_once`'s
+`is_new` no longer gates decisions, reflections, or activity.
+
+**Four repairs:**
+1. **Fixed identical backtest retry collisions.** Neon returns UUID
+   columns (`run_id`) as `uuid.UUID` objects; the harness supplies plain
+   strings. `_decision_field_mismatches` compared them directly, so an
+   identical retry with a real `run_id` always false-failed as a
+   `run_id` mismatch. Fixed via `_uuid_equal` (None-safe string
+   normalization) in `trade-journal-mcp/server.py`. Proof:
+   `test_identical_retry_with_real_run_id_is_a_no_op` (real Neon) --
+   identical retry is a no-op, a genuinely different `run_id` still
+   fails loudly.
+2. **Corrected sequential 09:45 BUY accounting.** After an accepted
+   queued BUY, `simulate_trading_day`'s own internal sequencing used to
+   track it via the UNSLIPPED open and mark it at its earlier 09:30
+   close for a SECOND queued BUY's risk check -- both could inflate
+   equity. `_slipped_buy_price` now mirrors execution-sim-mcp's real
+   MARKET-fill formula exactly (5bps + bar-range clamp) for both the
+   risk check AND the internal fill/cash bookkeeping; a freshly-entered
+   position is marked at its own real fill price, never an unrelated
+   09:30 close. Proof: `test_sequential_945_buys_see_the_first_fills_real_state`
+   -- a second BUY that would incorrectly PASS under the old inflated
+   state is correctly REJECTED (§2b) under the real one.
+3. **Isolated unit tests from real Neon/Docker.** `_run_cycle_or_halt`
+   now takes an injectable `fail_logger` (defaults to the real
+   `log_cycle_failure` in production); the test suite injects a fake, so
+   running it locally can no longer create real `cycle_failed` Neon rows
+   -- prevented structurally, not cleaned up after. Proof:
+   `test_run_cycle_or_halt_halts_without_touching_cursor_semantics`
+   asserts the FAKE logger (not the production one) received the exact
+   failure event.
+4. **Added a real lifecycle regression test.** `test_real_lifecycle_checkpoint_commit_then_best_effort_observability`
+   exercises the ACTUAL orchestration boundary (`run_day`,
+   `_load_checkpoint`/`_save_checkpoint`/`_clear_checkpoint`,
+   `_atomic_write_json`) with only the true I/O functions mocked --
+   proves attempt 1 calls fake Hermes once and checkpoints; an essential
+   journal failure halts before state advancement; a retry reuses the
+   checkpoint with no second Hermes call and an idempotent (same
+   `decision_id`) essential re-write; the atomic commit succeeds and the
+   checkpoint clears only after; and a post-commit snapshot/activity
+   failure is caught without halting, rolling back, or replaying.
+
+**Explicitly deferred (documented, not implemented):** restricting live
+Hermes's large Maverick tool surface; removing the separate
+execution-simulator container; consolidating Google News RSS and Alpaca
+news; removing snapshot/activity tables; reworking duplicated
+daily-price fetching; SEC fundamentals, dynamic screening,
+company-research states, or evaluator agents; any risk-rule or strategy
+change.
+
+**Exact verification results (2026-08-28):** all touched Python files
+compile clean. `backtest-harness/test_execution_semantics.py` (100
+checks, including the 4 new/rewritten regressions above), `test_anonymize.py`,
+`test_quota_pacer.py`, `risk-checker/test_risk_checker.py`,
+`trade-journal-mcp/test_decision_fields.py`, `test_idempotency.py`
+(extended), `test_run_isolation.py` (real Neon, self-cleaning) -- all
+PASS. Confirmed no test invoked a real Hermes call (item 3's fix,
+verified with the trade-journal container both up and down). Training
+state (`backtest_state.json`) did not advance -- still cursor
+`2026-02-17`, zero trading days. No checkpoint file remains. All
+backtest Neon tables confirmed empty before and after (found and
+cleaned 1 stray `cycle_failed` row generated by a local test run made
+BEFORE item 3's fix landed -- exactly the class of pollution item 3
+prevents going forward). `git status` otherwise clean -- only the four
+files this pass touched.
+
+---
+
 ## Known limitations that genuinely remain
 
 - **Live bracket orders** — `alpaca-mcp`'s `place_order` submits one

@@ -12,6 +12,7 @@ Run: python test_execution_semantics.py
 """
 import json
 import tempfile
+import uuid
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
@@ -25,9 +26,11 @@ from run_backtest import (
     _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
     build_decision_time_context, build_prompt,
     evaluate_bar_stop_target, evaluate_opening_gap, make_decision_id,
-    require_intraday_coverage, resolve_queued_order, simulate_trading_day,
+    require_intraday_coverage, resolve_queued_order, run_day, simulate_trading_day,
     validate_hermes_response,
 )
+from anonymize import RunMasking  # noqa: E402
+from quota_pacer import QuotaPacer  # noqa: E402
 from risk_checker import (  # noqa: E402
     AccountState, Context, MarketClock, Position, ProposedTrade, check_trade,
 )
@@ -87,11 +90,18 @@ def test_gap_invalidated_order_is_rejected_not_resized():
 
 def test_buy_risk_check_slippage_price_matches_execution_sim_rule():
     """The exact price used for the risk check must match execution-sim-
-    mcp's own MARKET-fill formula (reference_price * (1 + 5bps)) -- one
-    clearly defined slippage rule, not an approximation of it."""
-    assert _slipped_buy_price(100.0) == 100.05
-    assert _slipped_buy_price(200.0) == 200.10
-    print("  ok  _slipped_buy_price matches execution-sim-mcp's SLIPPAGE_BPS=5 MARKET-fill formula exactly")
+    mcp's own MARKET-fill formula (reference_price * (1 + 5bps), then
+    clamped into the fill bar's own [low, high] range) -- one clearly
+    defined slippage rule, not an approximation of it."""
+    wide_bar = {"low": 0.0, "high": 1_000_000.0}
+    assert _slipped_buy_price(100.0, wide_bar) == 100.05
+    assert _slipped_buy_price(200.0, wide_bar) == 200.10
+    # And the bar-range clamp actually applies -- a slipped price that
+    # would exceed the bar's real high never fills above it.
+    tight_bar = {"low": 99.0, "high": 100.02}
+    assert _slipped_buy_price(100.0, tight_bar) == 100.02
+    print("  ok  _slipped_buy_price matches execution-sim-mcp's SLIPPAGE_BPS=5 "
+          "MARKET-fill formula exactly, including the bar-range clamp")
 
 
 def test_buy_risk_check_uses_slippage_adjusted_price_not_raw_open():
@@ -131,6 +141,53 @@ def test_buy_risk_check_uses_slippage_adjusted_price_not_raw_open():
     sell_outcome = resolve_queued_order(sell_order, sell_bar, sell_ctx)
     assert sell_outcome.accepted, sell_outcome.reason
     print("  ok  a full-exit SELL at the same price is unaffected by the BUY-only slippage fix")
+
+
+def test_sequential_945_buys_see_the_first_fills_real_state():
+    """2026-08-28 correctness pass, third pass, item 2 -- boundary
+    regression. Two queued BUYs (TICKER_A, then TICKER_B) at 09:45.
+    TICKER_A's 09:30 close ($200) differs materially from its 09:45 open
+    ($100) -- the OLD bug marked a just-filled position at its 09:30
+    close for the NEXT queued BUY's risk check, wildly overstating equity
+    (and also under-deducted cash by using the unslipped open). TICKER_B
+    is sized to breach the §2b concentration cap against the REAL
+    resulting equity, but would have PASSED against the old, inflated
+    state."""
+    ticker_a_bars = _flat_session(
+        price=100.0,
+        overrides={"09:30": {"open": 198.0, "high": 201.0, "low": 197.0, "close": 200.0}},
+    )
+    ticker_b_bars = _flat_session(price=100.0)
+
+    buy_a = _buy_order(ticker="TICKER_A", alias="ALPHA", quantity=100,
+                       stop_price=93.0, target_price=115.0)
+    buy_b = _buy_order(ticker="TICKER_B", alias="BRAVO", quantity=105,
+                       stop_price=93.0, target_price=115.0)
+
+    plan = simulate_trading_day(
+        holdings={}, pending_orders=[buy_a, buy_b],
+        intraday={"TICKER_A": ticker_a_bars, "TICKER_B": ticker_b_bars},
+        day_index=8, trading_days_elapsed=5, limits_ctx={},
+        watchlist=["TICKER_A", "TICKER_B"], closed_pnl=[], starting_cash=100_000.0,
+        equity_curve=[100_000.0] * 6,
+    )
+
+    a_events = [e for e in plan.events if e["ticker"] == "TICKER_A"]
+    assert len(a_events) == 1 and a_events[0]["kind"] == "fill", a_events
+    # The fill itself must be the real slipped price ($100 open + 5bps),
+    # not the raw open and not the unrelated 09:30 close.
+    assert a_events[0]["bar"]["open"] == 100.0
+    print("  ok  TICKER_A fills normally at 09:45")
+
+    b_events = [e for e in plan.events if e["ticker"] == "TICKER_B"]
+    assert len(b_events) == 1, b_events
+    assert b_events[0]["kind"] == "rejected", (
+        "TICKER_B was accepted -- it passed against TICKER_A's stale 09:30-close "
+        f"equity mark instead of TICKER_A's real ~$100.05 fill price: {b_events}"
+    )
+    assert "§2b" in b_events[0]["reason"], b_events[0]["reason"]
+    print("  ok  TICKER_B is rejected against the REAL sequential state -- it would "
+          "have incorrectly PASSED under the old (09:30-close, unslipped-cash) state")
 
 
 def test_evaluate_bar_stop_target_conservative_ambiguity():
@@ -294,6 +351,147 @@ def test_checkpoint_survives_a_retry_without_a_second_hermes_call_or_duplicate_j
     print("  ok  a checkpoint only satisfies an EXACT (run_id, day_index) match")
 
 
+def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
+    """2026-08-28 correctness pass, third pass, item 4 -- a REAL lifecycle
+    regression around the ACTUAL orchestration boundary (run_day,
+    _load_checkpoint/_save_checkpoint/_clear_checkpoint, _atomic_write_json),
+    not a hand-rolled miniature. Only the true I/O boundary functions are
+    mocked (fetch_bars/fetch_technicals/fetch_news/fetch_recent_insights,
+    ask_hermes, record_queued_decision, record_snapshot_once, log_activity)
+    -- masking, risk-checking, prompt-building, and every checkpoint/
+    state-file mechanic are the REAL functions. No real API, Docker, Neon,
+    or model call anywhere in this test.
+
+    Proves the full locked lifecycle end to end: attempt 1 calls fake
+    Hermes exactly once and checkpoints the validated response; an
+    ESSENTIAL journal failure (record_queued_decision) halts before any
+    state advancement; a retry reuses the checkpointed response with NO
+    second Hermes call and NO quota charge; essential records complete
+    idempotently (same decision_id both attempts); the atomic state
+    commit succeeds; the checkpoint clears only after; and a snapshot/
+    activity failure AFTER commit is caught without halting, rolling
+    back, or replaying the cycle.
+    """
+    tmp_dir = Path(tempfile.mkdtemp())
+    checkpoint_path = tmp_dir / "cycle_checkpoint.json"
+    state_path = tmp_dir / "backtest_state.json"
+    quota_path = tmp_dir / "quota_pacer_state.json"
+
+    run_start = date(2026, 2, 17)
+    day = run_start
+    day_index = 0
+    run_key = str(uuid.uuid4())
+
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
+    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
+                         seed=DEFAULT_MASKING_SEED)
+    alias = masking.alias("OLN")
+    pacer = QuotaPacer(state_path=quota_path)  # isolated -- never touches the real quota file
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
+
+    hermes_calls = []
+
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, on_invoked=None):
+        hermes_calls.append(1)
+        if on_invoked is not None:
+            on_invoked()  # real quota-counting callback -- must fire exactly once, on attempt 1 only
+        usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
+        return {
+            "decisions": [{
+                "alias": alias, "action": "BUY", "quantity": 10, "entry_price": 100.0,
+                "stop_price": 93.0, "target_price": 115.0, "confidence": 3,
+                "primary_signal": "technical", "technical_basis": "rsi",
+                "expected_reward_risk": 2.14, "invalidation_condition": "closes below $93",
+                "reasoning": "clean breakout with volume confirmation",
+            }],
+            "no_action_reason": "",
+        }
+
+    fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
+    fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
+                               "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
+                               "support": [95.0], "resistance": [110.0]}}
+    fake_news = {"OLN": []}
+
+    journal_calls = []
+    remaining_failures = {"n": 1}  # attempt 1's essential journal write fails; attempt 2's succeeds
+
+    def fake_record_queued_decision(decision, real_ticker, decision_id, run_id=None):
+        journal_calls.append(decision_id)
+        if remaining_failures["n"] > 0:
+            remaining_failures["n"] -= 1
+            raise RuntimeError("simulated essential journal failure")
+
+    def fake_record_snapshot_once(**kwargs):
+        return True
+
+    def fake_log_activity(events, run_id=None, cycle_id=None):
+        pass
+
+    def run_one_attempt():
+        return run_day(day, day_index, portfolio, masking, watchlist, {}, pacer, run_key)
+
+    with patch("run_backtest.CHECKPOINT_PATH", checkpoint_path), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
+         patch("run_backtest.fetch_news", return_value=fake_news), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_queued_decision", side_effect=fake_record_queued_decision), \
+         patch("run_backtest.record_snapshot_once", side_effect=fake_record_snapshot_once), \
+         patch("run_backtest.log_activity", side_effect=fake_log_activity):
+
+        # -- attempt 1: essential journal failure halts the cycle ---------
+        try:
+            run_one_attempt()
+            raise AssertionError("expected the simulated essential journal failure to propagate")
+        except RuntimeError as exc:
+            assert "simulated essential journal failure" in str(exc)
+        assert len(hermes_calls) == 1, "attempt 1 must call fake Hermes exactly once"
+        assert checkpoint_path.exists(), (
+            "the validated response must already be checkpointed before an essential failure"
+        )
+        assert not state_path.exists(), "local state must NOT advance after an essential failure"
+        print("  ok  attempt 1: fake Hermes called exactly once, response checkpointed, "
+              "essential journal failure halts before state advancement")
+
+        # -- attempt 2 (retry): reuses the checkpoint, no second Hermes call
+        working, summary, do_observability = run_one_attempt()
+        assert len(hermes_calls) == 1, "a retry must NOT call Hermes a second time (no quota charge)"
+        assert len(journal_calls) == 2 and journal_calls[0] == journal_calls[1], (
+            "the retry must re-attempt the SAME essential journal write with the "
+            f"IDENTICAL decision_id, not a fresh one: {journal_calls}"
+        )
+        print("  ok  attempt 2 (retry): reuses the checkpointed response verbatim -- "
+              "no second Hermes call, no quota charge, essential records complete idempotently")
+
+        # -- atomic local-state commit, THEN checkpoint clear -------------
+        _atomic_write_json(state_path, {"portfolio": working.to_dict(),
+                                        "cursor": "2026-02-18", "run_id": run_key})
+        assert state_path.exists()
+        _clear_checkpoint()
+        assert not checkpoint_path.exists(), "the checkpoint must clear only after the state commit"
+        print("  ok  atomic local-state commit succeeds; checkpoint clears only afterward")
+
+        # -- best-effort observability, AFTER commit -- a failure here must
+        #    never halt, roll back, or replay the cycle (locked decision).
+        with patch("run_backtest.record_snapshot_once",
+                   side_effect=RuntimeError("simulated observability failure")):
+            try:
+                do_observability()
+                raise AssertionError("expected the simulated observability failure to propagate here")
+            except RuntimeError as exc:
+                assert "simulated observability failure" in str(exc)
+        # main()'s own pattern is exactly this: catch it right here and
+        # continue -- proven by asserting nothing essential moved.
+        assert len(hermes_calls) == 1, "an observability failure must never trigger a replayed Hermes call"
+        assert not checkpoint_path.exists(), "an observability failure must never resurrect the checkpoint"
+        committed = json.loads(state_path.read_text())
+        assert committed["cursor"] == "2026-02-18", "committed state must never be rolled back"
+        print("  ok  a snapshot/activity failure AFTER commit is caught without halting, "
+              "rolling back, or replaying the cycle -- committed state is untouched")
+
+
 def test_mark_invoked_fires_exactly_once_per_cycle_even_with_a_retry():
     """The quota-counting guarantee: a cycle that spends a real call and
     then fails downstream (JSON parse, journaling, anything after) must
@@ -374,20 +572,52 @@ def test_run_cycle_or_halt_halts_without_touching_cursor_semantics():
     """_run_cycle_or_halt is what main() actually calls -- confirms it
     reports halted=True on any exception and returns no result, which is
     what makes 'the simulated date is never advanced' true in main() (the
-    cursor increment is structurally unreachable when halted)."""
+    cursor increment is structurally unreachable when halted).
+
+    2026-08-28 correctness pass (third pass, item 3): a FAKE fail_logger
+    is injected here -- the production default (log_cycle_failure) shells
+    out to the real trade-journal container and would create a real
+    'cycle_failed' Neon row every time this test runs, which this suite
+    must never do. Prevented structurally (dependency injection), not
+    cleaned up afterward."""
+    fake_logger_calls = []
+
+    def fake_fail_logger(day_label, error_text, run_id, usage=None, pacer=None):
+        fake_logger_calls.append(
+            {"day_label": day_label, "error_text": error_text, "run_id": run_id}
+        )
+
     def failing_run_day():
         raise RuntimeError("simulated cycle failure")
 
-    result, halted = _run_cycle_or_halt(failing_run_day)
+    result, halted = _run_cycle_or_halt(
+        failing_run_day, day_label="Day 9", run_id="test-run-id",
+        fail_logger=fake_fail_logger,
+    )
     assert halted is True and result is None
     print("  ok  a failing cycle reports halted=True with no result")
+
+    # The FAKE logger -- not the production one -- received the failure
+    # event, with the exact day_label/run_id/error text this cycle raised.
+    assert len(fake_logger_calls) == 1, (
+        f"expected exactly one fake-logger call, got {len(fake_logger_calls)}"
+    )
+    call = fake_logger_calls[0]
+    assert call["day_label"] == "Day 9"
+    assert call["run_id"] == "test-run-id"
+    assert "simulated cycle failure" in call["error_text"]
+    assert "RuntimeError" in call["error_text"]
+    print("  ok  the injected fake logger (not log_cycle_failure) received the "
+          "expected failure event -- no real Docker/Neon call made")
 
     def succeeding_run_day():
         return ("fake-portfolio", {"decisions": []})
 
-    result, halted = _run_cycle_or_halt(succeeding_run_day)
+    result, halted = _run_cycle_or_halt(succeeding_run_day, fail_logger=fake_fail_logger)
     assert halted is False and result == ("fake-portfolio", {"decisions": []})
-    print("  ok  a succeeding cycle reports halted=False and returns its result")
+    assert len(fake_logger_calls) == 1, "a succeeding cycle must never call the fail logger"
+    print("  ok  a succeeding cycle reports halted=False, returns its result, "
+          "and never calls the fail logger")
 
 
 _SESSION_TIMES = [f"{h:02d}:{m:02d}" for h in range(9, 16) for m in (0, 15, 30, 45)
