@@ -37,7 +37,21 @@ _pool: Optional[asyncpg.Pool] = None
 async def get_pool() -> asyncpg.Pool:
     global _pool
     if _pool is None:
-        _pool = await asyncpg.create_pool(os.environ["NEON_DATABASE_URL"], min_size=1, max_size=5)
+        # statement_cache_size=0: NEON_DATABASE_URL is a Neon POOLED
+        # (PgBouncer transaction-mode) endpoint (`-pooler` in the hostname).
+        # asyncpg's default per-connection prepared-statement cache is
+        # incompatible with transaction pooling -- a statement prepared on
+        # one pooled backend can be reused against a different backend
+        # after any DDL (e.g. this project's own migrations), surfacing as
+        # asyncpg.exceptions.InvalidCachedStatementError on a query that
+        # never itself changed. Found live 2026-08-28 running this
+        # project's own idempotency test right after a schema migration.
+        # See https://github.com/MagicStack/asyncpg/issues/750 -- the
+        # documented fix is disabling the client-side cache, not retrying.
+        _pool = await asyncpg.create_pool(
+            os.environ["NEON_DATABASE_URL"], min_size=1, max_size=5,
+            statement_cache_size=0,
+        )
     return _pool
 
 
@@ -119,6 +133,8 @@ async def _record_decision(
     strategy_notes: str | None = None,
     data_timestamps: dict[str, Any] | None = None,
     decision_id: str | None = None,
+    stop_price: float | None = None,
+    target_price: float | None = None,
 ) -> dict[str, Any]:
     """decision_id: optional caller-supplied id. Live Hermes never passes
     one (always gets a fresh uuid4, unchanged behavior). The backtest
@@ -141,8 +157,9 @@ async def _record_decision(
                              intended_notional, order_type, limit_price,
                              confidence, primary_signal, technical_basis,
                              expected_reward_risk, invalidation_condition,
-                             strategy_notes, data_timestamps)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                             strategy_notes, data_timestamps, stop_price,
+                             target_price)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         ON CONFLICT (decision_id) DO NOTHING
         RETURNING *
         """,
@@ -150,6 +167,7 @@ async def _record_decision(
         order_type, limit_price, confidence, primary_signal, technical_basis,
         expected_reward_risk, invalidation_condition, strategy_notes,
         json.dumps(data_timestamps) if data_timestamps else None,
+        stop_price, target_price,
     )
     if row is None:
         # A caller-supplied decision_id that already exists -- a retry of
@@ -167,6 +185,15 @@ async def _record_portfolio_snapshot(
     drawdown_pct: float | None = None,
     day_label: str | None = None,
     open_positions: int = 0,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cache_read_tokens: int | None = None,
+    reasoning_tokens: int | None = None,
+    total_tokens: int | None = None,
+    api_calls: int | None = None,
+    hermes_calls_used: int | None = None,
+    weekly_budget: int | None = None,
+    open_positions_detail: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if mode not in ("backtest", "live"):
         raise ValueError(f"mode must be 'backtest' or 'live', got {mode!r}")
@@ -174,11 +201,17 @@ async def _record_portfolio_snapshot(
     row = await pool.fetchrow(
         """
         INSERT INTO portfolio_snapshots (mode, equity, cash, exposure_pct,
-                                          drawdown_pct, day_label, open_positions)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+                                          drawdown_pct, day_label, open_positions,
+                                          input_tokens, output_tokens, cache_read_tokens,
+                                          reasoning_tokens, total_tokens, api_calls,
+                                          hermes_calls_used, weekly_budget, open_positions_detail)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
         RETURNING *
         """,
         mode, equity, cash, exposure_pct, drawdown_pct, day_label, open_positions,
+        input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, total_tokens,
+        api_calls, hermes_calls_used, weekly_budget,
+        json.dumps(open_positions_detail) if open_positions_detail is not None else None,
     )
     return dict(row)
 
@@ -235,13 +268,16 @@ async def _get_trade_history(
 
 
 async def _log_insight(
-    cycle_type: str, insight_text: str, sample_size: int | None = None
+    cycle_type: str, insight_text: str, mode: str,
+    sample_size: int | None = None,
 ) -> dict[str, Any]:
+    if mode not in ("backtest", "live"):
+        raise ValueError(f"mode must be 'backtest' or 'live', got {mode!r}")
     pool = await get_pool()
     row = await pool.fetchrow(
-        "INSERT INTO insight_log (cycle_type, insight_text, sample_size) "
-        "VALUES ($1, $2, $3) RETURNING *",
-        cycle_type, insight_text, sample_size,
+        "INSERT INTO insight_log (cycle_type, insight_text, sample_size, mode) "
+        "VALUES ($1, $2, $3, $4) RETURNING *",
+        cycle_type, insight_text, sample_size, mode,
     )
     return dict(row)
 
@@ -297,6 +333,7 @@ async def record_decision(
     expected_reward_risk: float, invalidation_condition: str,
     limit_price: float | None = None, technical_basis: str | None = None,
     strategy_notes: str | None = None, data_timestamps: dict[str, Any] | None = None,
+    stop_price: float | None = None, target_price: float | None = None,
 ) -> dict[str, Any]:
     """Persist an intended trade before attempting execution. Returns the row
     including a fresh decision_id — pass that same id to record_execution_result.
@@ -321,11 +358,16 @@ async def record_decision(
     'other' (for primary_signal or technical_basis) is a legitimate answer,
     never a shortcut -- if you use it, strategy_notes MUST explain what it
     actually was, or the call is rejected. Put any reasoning beyond the
-    structured fields in strategy_notes -- it stays free-form on purpose."""
+    structured fields in strategy_notes -- it stays free-form on purpose.
+
+    stop_price/target_price: the real levels set for this trade (RULES.md
+    §6a/§6b) -- pass them on a BUY so the dashboard can show a still-open
+    position's real stop/target, not just its entry price."""
     return _jsonable(await _record_decision(
         ticker, action, intended_quantity, intended_notional, order_type,
         confidence, primary_signal, expected_reward_risk, invalidation_condition,
         limit_price, technical_basis, strategy_notes, data_timestamps,
+        stop_price=stop_price, target_price=target_price,
     ))
 
 
@@ -363,8 +405,12 @@ async def get_trade_history(
 @mcp.tool()
 async def log_insight(cycle_type: str, insight_text: str) -> dict[str, Any]:
     """Record reflective prose during a decision or weekly_reflection cycle,
-    before drafting any proposed_skills/ change."""
-    return _jsonable(await _log_insight(cycle_type, insight_text))
+    before drafting any proposed_skills/ change.
+
+    You only ever call this tool from a live cycle (per AGENTS.md, backtest
+    cycles never call their own tools) — mode is tagged 'live' automatically,
+    same as log_activity, without you needing to pass anything."""
+    return _jsonable(await _log_insight(cycle_type, insight_text, mode="live"))
 
 
 @mcp.tool()
@@ -405,15 +451,31 @@ async def record_portfolio_snapshot(
     mode: str, equity: float, cash: float, exposure_pct: float | None = None,
     drawdown_pct: float | None = None, day_label: str | None = None,
     open_positions: int = 0,
+    input_tokens: int | None = None, output_tokens: int | None = None,
+    cache_read_tokens: int | None = None, reasoning_tokens: int | None = None,
+    total_tokens: int | None = None, api_calls: int | None = None,
+    hermes_calls_used: int | None = None, weekly_budget: int | None = None,
+    open_positions_detail: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Record equity/exposure at the end of one cycle. mode: 'backtest' or
     'live'. Call this once per cycle, after marking positions to market —
     it's the only source of equity-over-time data the dashboard has, since
     portfolio state otherwise only ever lived in the harness's local state
     file. day_label: the masked "Day N" string for backtest cycles (so a
-    snapshot cross-references what Hermes itself saw); omit for live."""
+    snapshot cross-references what Hermes itself saw); omit for live.
+
+    The token/quota fields are optional real usage for THIS cycle (from
+    Hermes' own --usage-file report) and the real quota_pacer.py count as of
+    this cycle -- pass them when known so the dashboard reads real numbers
+    instead of estimating. open_positions_detail: per-position dicts
+    (ticker, quantity, entry_price, current_price, stop_price, target_price,
+    days_held, unrealized_pl, unrealized_pl_pct) for a live open-positions
+    view without a separate broker/journal round trip."""
     return _jsonable(await _record_portfolio_snapshot(
         mode, equity, cash, exposure_pct, drawdown_pct, day_label, open_positions,
+        input_tokens, output_tokens, cache_read_tokens, reasoning_tokens,
+        total_tokens, api_calls, hermes_calls_used, weekly_budget,
+        open_positions_detail,
     ))
 
 

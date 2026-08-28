@@ -248,9 +248,17 @@ This is `AGENTS.md`'s live-mode cycle, in order. The **backtest** mode follows t
 - Next-day queued execution with full real intraday chronology (opening gap → time-stop → queued SELL → 09:45 queued BUY floor → bar-by-bar walk to close) — `run_backtest.py`'s `simulate_trading_day`
 - Fixed 10-ticker watchlist, screened from the S&P MidCap 400 (`watchlist/watchlist.json`, `screen_watchlist.py`)
 - Persistent, idempotent trade journal in Neon (`trade-journal-mcp`)
-- Weekly Hermes-call quota pacing (`quota_pacer.py`) and real per-cycle token usage logging
+- Weekly Hermes-call quota pacing (`quota_pacer.py`) and real per-cycle
+  token usage, persisted to Neon on `portfolio_snapshots` (2026-08-28 —
+  previously computed and console-printed only, not stored anywhere the
+  dashboard could read)
 - Reflection loop, triggered every 5th backtest cycle, sample-size-weighted, barred from loosening hard limits
-- Read-only public dashboard (`dashboard/index.html`)
+- Read-only dashboard (`dashboard/index.html`) — served locally only via
+  `docker compose up -d dashboard` at `http://127.0.0.1:8842` (2026-08-28;
+  bound to loopback, not publicly deployed — GitHub Pages was never live
+  for this page, and isn't the goal: this is a private learning project,
+  and the anonymous Neon role it reads through has no auth beyond
+  SELECT-only, a documented, accepted exposure, not a bug)
 - `execution-sim-mcp`, backtest-only fill simulator
 - `maverick-mcp`'s `get_stock_fundamentals` (Yahoo-based) exists in vendored code but is **not called** by any current cycle logic, live or backtest
 

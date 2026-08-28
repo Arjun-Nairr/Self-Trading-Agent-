@@ -494,3 +494,299 @@ code rather than carried forward from the prior version. The old private
 study artifact (an earlier Claude Artifact, "The Hermes Ledger") was
 retired — see that regeneration's own summary for details, not duplicated
 here.
+
+---
+
+## Dashboard correctness + pre-training baseline reset (2026-08-28)
+
+**Locked model decision, reconfirmed, untouched:** `openai-codex` /
+`gpt-5.4-mini` / medium reasoning. A separate research pass this same day
+confirmed `opencode-go` + `deepseek-v4-flash` is real and documented, but
+`NousResearch/hermes-agent#61461` (open) reports the exact combination
+hanging on a real timeout, so the switch was **abandoned** before any
+config change — Codex auth (`auth.json`) was never touched.
+
+### 1. Re-audit findings (before any edit)
+
+Traced every dashboard value back to its real source, per file:
+
+- **Quota was wrong by construction.** The dashboard counted
+  `portfolio_snapshots` rows in a rolling 7-day window as a stand-in for
+  weekly Hermes usage — a second, independent counter that could silently
+  disagree with `quota_pacer.py`'s own real ISO-week count (which counts a
+  cycle the instant Hermes is *invoked*, including one that later fails or
+  retries — see `run_backtest.py`'s `mark_invoked`).
+- **Real per-cycle token usage was computed and printed to the console,
+  never persisted anywhere.** `_call_hermes`'s `--usage-file` report
+  (input/output/cache/reasoning tokens, api_calls) only ever reached
+  `run_usage`'s final print line.
+- **`insight_log` had no mode column at all** — a training reflection and a
+  live one would have been indistinguishable the moment live cron exists.
+- **Stop/target were never persisted.** `risk_checker.py` computes and
+  enforces them on every BUY, but `trades` had no columns for them — an
+  open position's real stop/target only ever lived in the harness's
+  in-memory `Holding` (backtest) or the live call's own arguments, both
+  gone once the process exits.
+- **Failed cycles left no trace anywhere queryable.** `_run_cycle_or_halt`
+  printed and halted but wrote nothing to Neon.
+- **`trades` query capped at 200 rows** — provably too low: even a
+  conservative upper bound (10 watchlist tickers × ~125 real trading days,
+  one decision max per ticker per day) is 1,250 possible rows.
+- **Dashboard language recommended loosening `RULES.md`** in three places
+  (target-distance flag in the summary, "first candidate for tuning" on
+  blocked-rule counts, a §6b-blaming note on exit reasons) — against
+  `RULES.md`'s own "Hermes may never loosen a constraint."
+- **The Live dashboard's one pending decision was real, not a display bug**
+  — a manual AAPL integration-test order from 2026-08-14, `execution_mode:
+  'alpaca'`, status stuck `'pending'` with a real `broker_order_id`.
+
+### 2. Runtime verification (real checks, this project's isolated stack only)
+
+- **Isolation:** every container on this machine (`docker ps -a`) belongs
+  to this project; no other Hermes instance shares a mount, container, or
+  Neon database.
+- **Hermes:** `hermes status` confirmed `gpt-5.4-mini` / `OpenAI Codex`,
+  logged in; a minimal `hermes -z` request round-tripped real JSON.
+- **Neon writer:** real `SELECT 1` succeeded over `NEON_DATABASE_URL`.
+- **Neon anonymous Data API:** all four tables (`trades`, `agent_activity`,
+  `portfolio_snapshots`, `insight_log`) returned real rows for the
+  anonymous role — the same path the dashboard's browser JS uses.
+- **Alpaca paper account:** `ACTIVE`, `trading_blocked: false`,
+  `account_blocked: false`, equity $100,000, no open positions, no orders
+  placed during this check.
+- **Maverick historical technicals:** real point-in-time OLN bar,
+  2026-03-01, via the exact `yfinance` call path `run_backtest.py` uses.
+- **Alpaca historical news:** real call path confirmed working (WMG/SFM
+  returned real Benzinga articles for a 2026-06 window; OLN/PLNT returned
+  zero for the same window — a real absence, not a broken call).
+- **Google News RSS:** real live headlines returned for a test query.
+
+### 3. AAPL stale test record — resolved against real broker state
+
+Alpaca's own order lookup (`get_order_status`, source of truth) reported
+that order as `canceled` on the broker side, never filled. Journaled the
+real outcome via `record_execution_result` (status `rejected`,
+`rejection_reason` naming the real broker status and this resolution's
+date) — no fill was fabricated, no row was deleted.
+
+### 4. Schema migration (additive only, applied live to Neon)
+
+```sql
+ALTER TABLE trades ADD COLUMN stop_price NUMERIC(14,2);
+ALTER TABLE trades ADD COLUMN target_price NUMERIC(14,2);
+ALTER TABLE insight_log ADD COLUMN mode TEXT CHECK (mode IN ('backtest','live'));
+-- backfilled: every pre-migration insight_log row is 'backtest' (no live
+-- cron has ever run — verified, not assumed)
+ALTER TABLE portfolio_snapshots ADD COLUMN input_tokens INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN output_tokens INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN cache_read_tokens INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN reasoning_tokens INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN total_tokens INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN api_calls INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN hermes_calls_used INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN weekly_budget INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN open_positions_detail JSONB;
+```
+
+No table dropped, no existing column changed, no grant/RLS touched (new
+columns on an already-granted table need no new grant). `schema.sql`
+carries this as an idempotent migration block for the next fresh database.
+
+**Real bug found and fixed as a direct result of this migration:**
+`NEON_DATABASE_URL` is a Neon **pooled** (PgBouncer transaction-mode)
+endpoint. asyncpg's default prepared-statement cache is documented as
+incompatible with transaction pooling — any DDL (including this one)
+invalidates a cached plan on a query that never itself changed, surfacing
+as `asyncpg.exceptions.InvalidCachedStatementError` on the *next* call,
+persistently, not just once. Fixed by setting `statement_cache_size=0` on
+`trade-journal-mcp/server.py`'s pool (`get_pool`) — the documented fix
+(see asyncpg#750), not a retry loop. This was a **latent bug that predates
+this task** and would have struck on any future migration; found here,
+fixed here, verified via `test_idempotency.py` before and after.
+
+### 5. Code changes
+
+- **`trade-journal-mcp/server.py`:** `stop_price`/`target_price` on
+  `record_decision`; `mode` required on `_log_insight` (`log_insight` tool
+  auto-tags `'live'`, matching `log_activity`'s existing pattern);
+  token/quota/`open_positions_detail` fields on `record_portfolio_snapshot`;
+  the `statement_cache_size=0` fix above.
+- **`backtest-harness/run_backtest.py`:** `record_trade` now persists real
+  stop/target; `record_insight` tags `mode="backtest"`; `record_snapshot`
+  now also writes real per-cycle usage (from `ask_hermes`'s totals), the
+  real pacer count (`pacer.used_this_week()`/`pacer.budget` at write time —
+  not re-derived), and a real per-position detail list (ticker, entry,
+  current mark, stop, target, days held, unrealized P&L) computed from the
+  same intraday marks used for that cycle's own equity figure. The
+  snapshot write itself moved to right after `ask_hermes` (same values,
+  computed at the original point) purely so the real usage numbers land in
+  the same row instead of a second write. `_run_cycle_or_halt` now
+  best-effort logs a `cycle_failed` activity row on halt (day label +
+  exception), wrapped so a logging failure can never mask the real one.
+- **`dashboard/index.html`:** quota now reads the latest snapshot's real
+  `hermes_calls_used`/`weekly_budget` (no independent counting); new
+  "Model Usage & Quota" section (input/output/reasoning/cache-read/total
+  tokens, avg tokens/cycle, retry count via `api_calls > 1`, failed-cycle
+  count via an exact-count PostgREST query); `trades` query raised
+  200 → 2,000 with the provable-bound derivation in a comment; `insight_log`
+  now filtered by `mode`; open positions now show current mark, value,
+  unrealized P&L $/%, stop, target, days held (joined from the latest
+  snapshot's `open_positions_detail`, falling back to the trade row's own
+  `stop_price`/`target_price` where available); added Realized P&L,
+  Unrealized P&L, Max Drawdown, Last Successful Cycle, Last Failed Attempt;
+  removed all three rule-loosening suggestions, replaced with neutral
+  observation-only language and explicit sample sizes.
+- **`docker-compose.yml`:** new `dashboard` service — the existing static
+  frontend, unchanged, served via `python:3.12-slim`'s stdlib
+  `http.server`, bound to **`127.0.0.1:8842` only** (not `0.0.0.0`), no
+  build, no framework, `restart: unless-stopped`.
+
+### 6. Tests
+
+- All pre-existing pure suites still pass, unchanged behavior:
+  `risk-checker/test_risk_checker.py` (22 assertions),
+  `backtest-harness/test_execution_semantics.py` +
+  `test_anonymize.py` + `test_quota_pacer.py` (37 pytest cases),
+  `trade-journal-mcp/test_decision_fields.py`,
+  `trade-journal-mcp/test_idempotency.py` (real Neon, real idempotency
+  proof), `alpaca-mcp/test_status_mapping.py` + `test_account_math.py`,
+  `execution-sim-mcp/test_fill_logic.py`,
+  `backtest-harness/test_execution_path.py` (real containers, real Neon
+  round-trip).
+- **New:** `trade-journal-mcp/test_dashboard_fields.py` — proves
+  stop_price/target_price round-trip on a decision, `mode` is required and
+  enforced on an insight, and usage/quota/`open_positions_detail` round-trip
+  on a snapshot. Self-cleans its own rows.
+- **Real browser verification** (local Docker dashboard, not a mockup):
+  Training view, Live view, mode switching, auto-refresh, empty states,
+  populated states, mobile-width layout — all with zero console errors.
+  The Live view correctly now shows the resolved AAPL decision as
+  `REJECTED`.
+
+### 7. Local dashboard access
+
+```bash
+docker compose up -d dashboard
+```
+`http://127.0.0.1:8842` — bound to loopback only, confirmed via
+`docker port hermes-trading-agent-dashboard` (`127.0.0.1:8842`, not
+`0.0.0.0`). Not publicly deployed; GitHub Pages 404 is unaddressed by
+design (private learning project). **Documented, unaddressed exposure:**
+the anonymous Neon Data API role is SELECT-only but has no per-request
+auth beyond that — anyone who has the endpoint URL (visible in this file's
+own page source) can read the same journal rows this dashboard reads.
+Out of scope for this task per its own instructions; flagged, not fixed.
+
+### 8. Pre-training baseline reset
+
+**Backup (private, outside git — confirmed via `git check-ignore`) at**
+`C:\Users\<user>\.hermes-trading-agent\backups\`:
+- `pretraining_backup_2026-08-28.json` — full row export before deletion
+- `backtest_state_pre_reset_2026-08-28.json` — the harness's local state
+  before reset
+- `quota_pacer_state_2026-08-28.json` — the pacer's local state (untouched
+  by the reset — copied only as an extra rollback point)
+
+**Row counts deleted** (all backtest-tagged, verified before deletion that
+the filter cannot touch the live/Alpaca row):
+
+| Table | Filter | Rows deleted |
+|---|---|---|
+| `agent_activity` | `mode = 'backtest'` | 22 |
+| `portfolio_snapshots` | `mode = 'backtest'` | 7 |
+| `insight_log` | `mode = 'backtest'` | 1 |
+| `trades` | `execution_mode = 'backtest'` | 0 (no trade ever filled in the discarded run) |
+
+**Confirmed preserved, unmodified:** the live/Alpaca AAPL row (still
+present, `execution_mode: 'alpaca'`), schema, `config.yaml`, `.env`,
+Hermes/Codex auth, every other Hermes project on this machine, real Alpaca
+broker history, and `quota_pacer_state.json`'s real count — **not** reset
+to zero (`{"2026-W34": 34}` untouched; the harness naturally started a new
+`"2026-W35"` key for this real calendar week, which is correct ISO-week
+behavior, not a reset).
+
+**`backtest_state.json` reset to:** cash $100,000, equity $100,000, no
+holdings, no closed trades, no pending orders, `equity_curve` reseeded flat
+at 6× $100,000 (matching `Portfolio`'s own dataclass default — needed so
+the risk checker doesn't fail-closed on weekly P&L for the first 5 cycles
+of the real run, exactly as the existing code comment explains), cursor
+reset to `2026-02-17` (the existing configured window start, unchanged).
+Verified by loading it through the real `Portfolio.from_dict` path before
+using it, not just inspected by eye.
+
+**Also cleaned (found, not part of the requested scope):** 3 leftover
+`execution_mode: 'simulated'`, ticker `TEST.NS` rows I created myself while
+debugging the pgbouncer statement-cache bug above, and one accidental real
+`cycle_failed` activity row written when `test_execution_semantics.py`'s
+own failure-simulation test unexpectedly reached the live `docker compose
+exec` path (Docker happened to be running during that pytest run). Neither
+belonged to the discarded backtest run; both deleted directly, by decision
+id / description match, once identified.
+
+### 9. Controlled smoke test (≤ 3 cycles, from the clean baseline)
+
+```
+$ python run_backtest.py --days 3
+```
+
+| Cycle | Real trades | Cursor after | Snapshot written | Failed |
+|---|---|---|---|---|
+| Day 1 (2026-02-17) | BUY ALGM x250 queued | 2026-02-18 | ✅ (21,062–23,669 real tokens, see below) | no |
+| Day 2 (2026-02-18) | Day 1's queue rejected on fill (§6a: stop above entry); new BUY ALGM x500 queued | 2026-02-19 | ✅ | no |
+| Day 3 (2026-02-19) | Day 2's queue rejected on fill (§2b: 18.71% > 10% cap; §6a: stop 2.03% < 5% floor) | 2026-02-20 | ✅ | no |
+
+Every check the task required, verified against real Neon after every
+cycle (not just the console output):
+
+- Cursor advanced **exactly once per cycle** (`2026-02-17 → 2026-02-20`,
+  3 real trading days, no skip/double-advance).
+- Portfolio state and Neon agree: 3 `portfolio_snapshots` rows
+  (`mode='backtest'`), each `equity`/`cash` = $100,000 (no trade ever
+  filled — both queued BUYs were correctly rejected by the risk checker on
+  resolution, a real and legitimate outcome, not a bug).
+- `agent_activity`: 12 real rows (3 `cycle_start`, 5 `reasoning`,
+  2 `order_queued`, 2 `order_rejected`) — matches the console output
+  exactly.
+- Real quota usage incremented correctly: `hermes_calls_used` 1 → 2 → 3 on
+  the snapshot rows, matching `quota_pacer_state.json`'s real
+  `{"2026-W35": 3}` (a genuinely new ISO week from the prior `"2026-W34":
+  34`, not a reset).
+- Token usage persisted **and matches the console line exactly**: 22,798 /
+  23,669 / 21,062 tokens; 22,510 avg/cycle shown identically in both the
+  console and the dashboard.
+- No failed cycles (0 `cycle_failed` rows) — nothing to verify there this
+  run, but the mechanism itself is proven real (see §8's note above).
+- Dashboard reconciled against the source data directly (not just visually
+  read) — Training view showed the exact same numbers, activity narration,
+  and quota/token figures Neon holds.
+
+**No inconsistency found. Did not continue into the full six-month run —
+stopped at 3 cycles per instruction, reporting back here.**
+
+### 10. Rollback
+
+- **Dashboard/schema/harness code:** `git diff` / `git checkout --` the
+  5 modified files listed in "Files changed" below; the migration is
+  additive-only and safe to leave in place even if the code changes are
+  reverted (unused columns, not a breaking change).
+- **Neon data:** restore from
+  `C:\Users\<user>\.hermes-trading-agent\backups\pretraining_backup_2026-08-28.json`
+  (full row content for the 30 deleted rows) by re-inserting.
+- **Local state:** restore `backtest_state.json` from
+  `backtest_state_pre_reset_2026-08-28.json` in the same backups directory
+  to resume the discarded Day-1–9 run instead of the fresh baseline.
+- **Quota:** untouched either way — no rollback needed.
+
+### Remaining limitations / compatibility risks
+
+- `open_positions_detail`'s "current price" is the last **regular-session
+  15-minute bar's close** at end of day (same mark `equity` itself uses),
+  not a true intraday tick — consistent with how the rest of the harness
+  already marks positions, not a new approximation.
+- Dashboard's `TRADES_LIMIT = 2000` is a provable upper bound, not a
+  measured one — revisit if the real watchlist or window size changes.
+- Neon's anonymous-role exposure (§7) remains open by design per this
+  task's own scope.
+- The pgbouncer statement-cache fix (§4) only covers `trade-journal-mcp`;
+  any other service that later talks to the same pooled endpoint through
+  `asyncpg` (none currently do) would need the same fix.

@@ -196,6 +196,11 @@
   </section>
 
   <section>
+    <div class="section-label">Model Usage &amp; Quota</div>
+    <div class="stats" id="usage-stats"></div>
+  </section>
+
+  <section>
     <div class="section-label">Activity — What Hermes Is Doing</div>
     <div id="feed" class="feed"></div>
   </section>
@@ -241,11 +246,14 @@ const AUTH_URL = "https://ep-falling-thunder-b1mr6i56.neonauth.c-5.eu-central-1.
 const DATA_API_URL = "https://ep-falling-thunder-b1mr6i56.apirest.c-5.eu-central-1.aws.neon.tech/neondb/rest/v1";
 const REFRESH_MS = 15000;
 const STARTING_EQUITY = 100000;
-// Mirrors quota_pacer.DEFAULT_WEEKLY_BUDGET and the backtest window in
-// run_backtest.py. Same mirroring caveat as risk_checker's RiskLimits:
-// change it there, change it here.
-const WEEKLY_QUOTA = 175;
 const WINDOW_DAYS = 179;  // 2026-02-17 -> 2026-08-14
+// Provable upper bound on trade ROWS (not positions) for the full planned
+// baseline: at most one decision (BUY or SELL) per watchlist ticker per
+// trading day (RULES.md §9.1 -- never average down, one open lot per
+// ticker), 10 tickers, ~125 real trading days in the window. 10*125=1250;
+// 2000 leaves real margin without building pagination for a bound this
+// small. A limit, not a real observed count -- see run_backtest.py.
+const TRADES_LIMIT = 2000;
 
 // One Neon database throughout; mode is a column value, not a separate
 // connection. These are the values each table uses for the same concept.
@@ -270,6 +278,18 @@ async function q(table, params = "") {
   const res = await fetch(`${DATA_API_URL}/${table}${params}`, { headers: { Authorization: `Bearer ${token}` } });
   if (!res.ok) throw new Error(`${table}: ${res.status}`);
   return res.json();
+}
+// Exact row count without fetching rows -- PostgREST's Content-Range header
+// (Prefer: count=exact), for a count that can legitimately exceed a page
+// limit (e.g. total failed cycles) without inventing a second counting path.
+async function qCount(table, params = "") {
+  const token = await getAnonToken();
+  const res = await fetch(`${DATA_API_URL}/${table}${params}&limit=1`, {
+    headers: { Authorization: `Bearer ${token}`, Prefer: "count=exact" },
+  });
+  if (!res.ok) throw new Error(`${table}: ${res.status}`);
+  const range = res.headers.get("content-range");  // "0-0/123"
+  return range ? parseInt(range.split("/")[1], 10) || 0 : 0;
 }
 
 const money = n => (n == null) ? "—" : "$" + Number(n).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
@@ -302,13 +322,11 @@ function pairTrades(trades) {
   return { closed, open };
 }
 
-function renderSummary(trades, snaps, activity) {
+function renderSummary(trades, snaps, activity, failedCount) {
   const { closed, open } = pairTrades(trades);
   const cycles = snaps.length;
   const wins = closed.filter(c => c.pnl > 0).length;
   const blocked = activity.filter(a => a.event_type === "risk_check" && a.description.startsWith("BLOCKED")).length;
-  const exits = closed.map(c => (c.exit.strategy_notes || "").replace("Mechanical exit: ", ""));
-  const targets = exits.filter(e => e.includes("target")).length;
 
   if (!cycles && !trades.length) {
     el("summary").innerHTML = `<span class="kv-key">No ${currentMode === "backtest" ? "training" : "live"} data recorded yet. This view populates as soon as the first cycle runs.</span>`;
@@ -317,21 +335,22 @@ function renderSummary(trades, snaps, activity) {
   const parts = [];
   parts.push(`<strong>${cycles}</strong> cycle${cycles===1?"":"s"} recorded`);
   parts.push(`<strong>${closed.length + open.length}</strong> position${closed.length+open.length===1?"":"s"} taken (<strong>${open.length}</strong> still open)`);
-  if (closed.length) parts.push(`<strong>${wins}/${closed.length}</strong> closed profitably`);
+  // Observation only, no sample-size-blind win/loss framing and no
+  // recommendation to loosen anything -- see RULES.md's own "Hermes may
+  // never loosen a constraint" and this task's "neutral analysis" scope.
+  if (closed.length) parts.push(`<strong>${wins}/${closed.length}</strong> closed positions were profitable`);
   if (blocked) parts.push(`<strong>${blocked}</strong> decision${blocked===1?"":"s"} blocked by the risk checker`);
+  if (failedCount) parts.push(`<strong>${failedCount}</strong> failed cycle${failedCount===1?"":"s"} recorded`);
 
-  let flag = "";
-  if (closed.length >= 2 && targets === 0) {
-    flag = `<br><span class="flag">▲ ${closed.length} exits so far and none reached its profit target — every position closed on a stop or a time stop. Worth checking whether §6b's 2:1 requirement is placing targets further away than these names actually travel.</span>`;
-  }
-  el("summary").innerHTML = parts.join(" · ") + "." + flag;
+  el("summary").innerHTML = parts.join(" · ") + ".";
 }
 
 function statCell(label, value, cls = "") {
   return `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${cls}">${value}</div></div>`;
 }
 
-function renderStats(snap, openCount, closed) {
+function renderStats(snaps, openCount, closed, lastFailedRow) {
+  const snap = snaps[0];
   const wins = closed.filter(c => c.pnl > 0).length;
   const winRate = closed.length ? `${Math.round(wins/closed.length*100)}%` : "—";
   if (!snap) {
@@ -339,14 +358,25 @@ function renderStats(snap, openCount, closed) {
     return;
   }
   const dd = Number(snap.drawdown_pct ?? 0);
+  const maxDd = Math.min(0, ...snaps.map(s => Number(s.drawdown_pct ?? 0)));
   const totalRet = (Number(snap.equity) / STARTING_EQUITY - 1) * 100;
+  const realizedPnl = closed.reduce((a, c) => a + c.pnl, 0);
+  const unrealizedPnl = (snap.open_positions_detail || [])
+    .reduce((a, p) => a + Number(p.unrealized_pl ?? 0), 0);
   const cells = [
-    currentMode === "backtest" ? statCell("Sim Day", esc(snap.day_label || "—")) : statCell("Cash", money(snap.cash)),
+    statCell("Cash", money(snap.cash)),
     statCell("Equity", money(snap.equity)),
+    ...(currentMode === "backtest" ? [statCell("Sim Day", esc(snap.day_label || "—"))] : []),
     statCell("Total Return", pctSigned(totalRet), totalRet >= 0 ? "pos" : "neg"),
+    statCell("Realized P&L", money(realizedPnl), realizedPnl >= 0 ? "pos" : "neg"),
+    statCell("Unrealized P&L", money(unrealizedPnl), unrealizedPnl >= 0 ? "pos" : "neg"),
     statCell("Exposure", pctPlain(snap.exposure_pct)),
     statCell("Drawdown", pctPlain(dd), dd < 0 ? "neg" : ""),
-    statCell("Win Rate", `${winRate}${closed.length?` (${closed.length})`:""}`),
+    statCell("Max Drawdown", pctPlain(maxDd), maxDd < 0 ? "neg" : ""),
+    statCell("Open / Closed", `${openCount} / ${closed.length}`),
+    statCell("Win Rate", `${winRate}${closed.length?` (n=${closed.length})`:""}`),
+    statCell("Last Successful Cycle", time(snap.created_at)),
+    statCell("Last Failed Attempt", lastFailedRow ? time(lastFailedRow.created_at) : "none recorded"),
   ];
   el("stats").innerHTML = cells.join("");
 }
@@ -360,11 +390,17 @@ function renderBars(snaps) {
   const dayNum = latest?.day_label ? parseInt(latest.day_label.replace(/\D/g, ""), 10) || 0 : 0;
   const dayPct = Math.min(100, dayNum / WINDOW_DAYS * 100);
 
-  // One snapshot is written per cycle, so counting this week's snapshots IS
-  // the quota pacer's cycle count -- no extra field needed to surface it.
-  const weekAgo = Date.now() - 7 * 864e5;
-  const used = snaps.filter(s => new Date(s.created_at).getTime() > weekAgo).length;
-  const quotaPct = Math.min(100, used / WEEKLY_QUOTA * 100);
+  // Single source of truth: quota_pacer.py's own real count and budget, as
+  // of the latest cycle, mirrored onto that snapshot row by run_backtest.py
+  // (record_snapshot). NOT re-derived here -- a second independent count
+  // (e.g. "snapshots in the last 7 days") can silently disagree with the
+  // pacer's real ISO-week accounting (which also counts failed/retried
+  // invocations the moment Hermes is actually called, not after a cycle
+  // fully succeeds -- see run_backtest.py's mark_invoked).
+  const used = latest?.hermes_calls_used;
+  const budget = latest?.weekly_budget;
+  const quotaKnown = used != null && budget != null;
+  const quotaPct = quotaKnown ? Math.min(100, used / budget * 100) : 0;
 
   el("bars").innerHTML = `
     <div class="bar-cell">
@@ -372,9 +408,36 @@ function renderBars(snaps) {
       <div class="bar-track"><div class="bar-fill" style="width:${dayPct}%"></div></div>
     </div>
     <div class="bar-cell">
-      <div class="bar-head"><span>Weekly quota</span><span><b>${used}</b> / ${WEEKLY_QUOTA} cycles</span></div>
+      <div class="bar-head"><span>Weekly quota</span><span><b>${quotaKnown ? used : "—"}</b> / ${quotaKnown ? budget : "—"} cycles</span></div>
       <div class="bar-track"><div class="bar-fill ${quotaPct>75?"warn":""}" style="width:${quotaPct}%"></div></div>
     </div>`;
+}
+
+function renderUsageStats(snaps, failedCount) {
+  const latest = snaps[0];
+  if (!latest || latest.total_tokens == null) {
+    el("usage-stats").innerHTML = `<div class="stat" style="grid-column:1/-1"><div class="empty">No usage data recorded yet for this mode.</div></div>`;
+    return;
+  }
+  const withUsage = snaps.filter(s => s.total_tokens != null);
+  const avgTokens = withUsage.length
+    ? Math.round(withUsage.reduce((a, s) => a + Number(s.total_tokens), 0) / withUsage.length)
+    : null;
+  // A cycle retried (its one allowed JSON-parse retry, see run_backtest.py's
+  // ask_hermes) whenever it made more than one real call.
+  const retries = withUsage.reduce((a, s) => a + Math.max(0, (Number(s.api_calls) || 1) - 1), 0);
+  const cells = [
+    statCell("Provider / Model", "openai-codex / gpt-5.4-mini"),
+    statCell("Input Tokens", Number(latest.input_tokens ?? 0).toLocaleString()),
+    statCell("Output Tokens", Number(latest.output_tokens ?? 0).toLocaleString()),
+    statCell("Reasoning Tokens", Number(latest.reasoning_tokens ?? 0).toLocaleString()),
+    statCell("Cache-Read Tokens", Number(latest.cache_read_tokens ?? 0).toLocaleString()),
+    statCell("Total Tokens (latest)", Number(latest.total_tokens ?? 0).toLocaleString()),
+    statCell("Avg Tokens / Cycle", avgTokens != null ? avgTokens.toLocaleString() : "—"),
+    statCell("Retry Count", retries),
+    statCell("Failed-Cycle Count", failedCount ?? 0),
+  ];
+  el("usage-stats").innerHTML = cells.join("");
 }
 
 function renderFeed(rows) {
@@ -485,23 +548,43 @@ function renderAnalysis(trades, activity) {
 
   el("analysis").innerHTML = `
     <div class="trio-cell"><div class="trio-title">Exit reasons</div>${exitRows}
-      <div class="note">Targets never hitting is evidence §6b's 2:1 minimum sets them beyond these names' real range.</div></div>
+      <div class="note">Observed distribution of how closed positions actually exited. Sample size: ${closed.length}.</div></div>
     <div class="trio-cell"><div class="trio-title">Blocked by rule</div>${ruleRows}
-      <div class="note">The most frequent blocker is the first candidate for tuning.</div></div>
+      <div class="note">Observed count of risk-checker blocks by RULES.md section. Not a recommendation to change any rule.</div></div>
     <div class="trio-cell"><div class="trio-title">Confidence calibration</div>${confRows}
-      <div class="note">If high confidence doesn't win more often, the rating carries no information.</div></div>`;
+      <div class="note">Observed win rate by stated confidence, shown with its sample size (n).</div></div>`;
 }
 
 function renderPositions(trades, snaps) {
   const { open } = pairTrades(trades);
   if (!open.length) { el("positions").innerHTML = `<div class="empty">No open positions.</div>`; return; }
+  // Real per-position detail (current mark, stop, target, days held,
+  // unrealized P&L) as computed by the harness at the latest snapshot --
+  // not re-derived here. Falls back to entry-only fields (still real, just
+  // less complete) if a position was opened before this column existed, or
+  // the ticker doesn't appear in the latest snapshot's detail for some
+  // other reason -- never invented.
+  const detailByTicker = {};
+  for (const p of (snaps[0]?.open_positions_detail || [])) detailByTicker[p.ticker] = p;
+
   el("positions").innerHTML = `<table>
-    <thead><tr><th>Ticker</th><th>Qty</th><th>Entry</th><th>Notional</th><th>Confidence</th><th>Opened</th></tr></thead>
-    <tbody>${open.map(t => `<tr>
+    <thead><tr><th>Ticker</th><th>Qty</th><th>Entry</th><th>Current</th><th>Value</th>
+      <th>Unrealized P&L</th><th>Stop</th><th>Target</th><th>Days Held</th><th>Confidence</th></tr></thead>
+    <tbody>${open.map(t => {
+      const d = detailByTicker[t.ticker];
+      const current = d ? Number(d.current_price) : Number(t.fill_price);
+      const value = current * t.fill_quantity;
+      const upl = d ? Number(d.unrealized_pl) : null;
+      const uplPct = d ? Number(d.unrealized_pl_pct) : null;
+      return `<tr>
       <td class="ticker">${esc(t.ticker)}</td><td>${t.fill_quantity}</td>
-      <td>${money(t.fill_price)}</td><td>${money(t.fill_price * t.fill_quantity)}</td>
-      <td>${"●".repeat(t.confidence||0)}${"○".repeat(5-(t.confidence||0))}</td>
-      <td>${time(t.created_at)}</td></tr>`).join("")}</tbody></table>`;
+      <td>${money(t.fill_price)}</td><td>${money(current)}</td><td>${money(value)}</td>
+      <td class="${upl==null?"":upl>=0?"pos":"neg"}">${upl==null?"—":`${upl>=0?"+":""}${money(upl)} (${pctSigned(uplPct)})`}</td>
+      <td>${d ? money(d.stop_price) : (t.stop_price != null ? money(t.stop_price) : "—")}</td>
+      <td>${d ? money(d.target_price) : (t.target_price != null ? money(t.target_price) : "—")}</td>
+      <td>${d ? d.days_held : "—"}</td>
+      <td>${"●".repeat(t.confidence||0)}${"○".repeat(5-(t.confidence||0))}</td></tr>`;
+    }).join("")}</tbody></table>`;
 }
 
 function renderClosed(trades) {
@@ -564,17 +647,20 @@ async function refresh(withSkeletons = false) {
   el("status-line").innerHTML = `<span class="dot busy"></span>${currentMode.toUpperCase()} · querying neon…`;
 
   try {
-    const [trades, activity, snaps, insights] = await Promise.all([
-      q("trades", `?execution_mode=eq.${m.trades}&order=created_at.desc&limit=200`),
+    const [trades, activity, snaps, insights, failedCount, lastFailed] = await Promise.all([
+      q("trades", `?execution_mode=eq.${m.trades}&order=created_at.desc&limit=${TRADES_LIMIT}`),
       q("agent_activity", `?mode=eq.${m.activity}&order=created_at.desc&limit=80`),
       q("portfolio_snapshots", `?mode=eq.${m.snapshots}&order=created_at.desc&limit=300`),
-      q("insight_log", "?order=created_at.desc&limit=20"),
+      q("insight_log", `?mode=eq.${m.activity}&order=created_at.desc&limit=20`),
+      qCount("agent_activity", `?mode=eq.${m.activity}&event_type=eq.cycle_failed`),
+      q("agent_activity", `?mode=eq.${m.activity}&event_type=eq.cycle_failed&order=created_at.desc&limit=1`),
     ]);
     const { closed, open } = pairTrades(trades);
 
-    renderSummary(trades, snaps, activity);
-    renderStats(snaps[0], open.length, closed);
+    renderSummary(trades, snaps, activity, failedCount);
+    renderStats(snaps, open.length, closed, lastFailed[0]);
     renderBars(snaps);
+    renderUsageStats(snaps, failedCount);
     renderFeed(activity);
     renderChart(snaps);
     renderAnalysis(trades, activity);

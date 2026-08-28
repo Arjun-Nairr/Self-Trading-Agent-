@@ -877,6 +877,8 @@ async def main():
         expected_reward_risk={float(decision.get("expected_reward_risk", 2.0))},
         invalidation_condition={decision.get("invalidation_condition", "n/a")!r},
         strategy_notes={decision.get("reasoning", "")[:900]!r},
+        stop_price={decision.get("stop_price")!r},
+        target_price={decision.get("target_price")!r},
     )
     await _record_execution_result(
         d["decision_id"], status={fill["status"]!r},
@@ -972,11 +974,23 @@ asyncio.run(main())
 
 def record_snapshot(day_label: str, equity: float, cash: float,
                     exposure_pct: float, drawdown_pct: float,
-                    open_positions: int) -> None:
+                    open_positions: int, usage: dict | None = None,
+                    pacer: "QuotaPacer | None" = None,
+                    positions_detail: list[dict] | None = None) -> None:
     """Write once per cycle, after marking positions to market. This is the
     only source of equity-over-time data the dashboard has -- the harness
     otherwise only ever tracks its portfolio in the local state file, which
-    a browser reading Neon has no way to see."""
+    a browser reading Neon has no way to see.
+
+    usage: this cycle's real --usage-file totals (see ask_hermes). pacer:
+    the live QuotaPacer, used to read the real used_this_week()/budget at
+    write time -- the dashboard's single source of truth for quota,
+    matching this project's own pacer rather than a second estimate.
+    positions_detail: per-open-position dicts as the harness itself sees
+    them this cycle (ticker/qty/entry/current/stop/target/days_held/P&L)."""
+    usage = usage or {}
+    quota_used = pacer.used_this_week() if pacer is not None else None
+    quota_budget = pacer.budget if pacer is not None else None
     script = f'''
 import asyncio
 from server import _record_portfolio_snapshot
@@ -986,6 +1000,15 @@ async def main():
         mode="backtest", equity={equity!r}, cash={cash!r},
         exposure_pct={exposure_pct!r}, drawdown_pct={drawdown_pct!r},
         day_label={day_label!r}, open_positions={open_positions},
+        input_tokens={usage.get("input_tokens")!r},
+        output_tokens={usage.get("output_tokens")!r},
+        cache_read_tokens={usage.get("cache_read_tokens")!r},
+        reasoning_tokens={usage.get("reasoning_tokens")!r},
+        total_tokens={usage.get("total_tokens")!r},
+        api_calls={usage.get("api_calls")!r},
+        hermes_calls_used={quota_used!r},
+        weekly_budget={quota_budget!r},
+        open_positions_detail={positions_detail!r},
     )
 
 asyncio.run(main())
@@ -1026,7 +1049,7 @@ import asyncio
 from server import _log_insight
 
 async def main():
-    await _log_insight("weekly_reflection", {text!r}, sample_size={sample_size})
+    await _log_insight("weekly_reflection", {text!r}, mode="backtest", sample_size={sample_size})
 
 asyncio.run(main())
 '''
@@ -1446,11 +1469,38 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     }
     equity = working.equity(closing_prices)
     working.equity_curve.append(equity)
-    record_snapshot(
+
+    # Per-open-position detail for the dashboard, computed from the exact
+    # marks/state used for equity above -- not a second, possibly-drifting
+    # source. Snapshot write itself is deferred to below (after ask_hermes)
+    # purely so this cycle's real token usage can go in the SAME row instead
+    # of a second write; the values captured here don't change between here
+    # and there.
+    snapshot_positions_detail = [
+        {
+            "ticker": t,
+            "quantity": h.quantity,
+            "entry_price": h.entry_price,
+            "current_price": closing_prices.get(t, {}).get("close", h.entry_price),
+            "stop_price": h.stop_price,
+            "target_price": h.target_price,
+            "days_held": day_index - h.entry_day,
+            "unrealized_pl": (
+                closing_prices.get(t, {}).get("close", h.entry_price) - h.entry_price
+            ) * h.quantity,
+            "unrealized_pl_pct": (
+                (closing_prices.get(t, {}).get("close", h.entry_price) / h.entry_price - 1) * 100
+                if h.entry_price else 0.0
+            ),
+        }
+        for t, h in working.holdings.items()
+    ]
+    snapshot_kwargs = dict(
         day_label=masking.day_index(day), equity=equity, cash=working.cash,
         exposure_pct=working.invested(closing_prices) / equity * 100 if equity else 0.0,
         drawdown_pct=working.drawdown_pct(),
         open_positions=len(working.holdings),
+        positions_detail=snapshot_positions_detail,
     )
 
     # -- STEP C: gather + mask today's data for Hermes to reason on -------
@@ -1524,6 +1574,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             invoked["done"] = True
 
     response = ask_hermes(prompt, summary["usage"], on_invoked=mark_invoked)
+    record_snapshot(usage=summary["usage"], pacer=pacer, **snapshot_kwargs)
     summary["no_action_reason"] = response.get("no_action_reason", "")
     if summary["no_action_reason"]:
         activity.append(("reasoning", summary["no_action_reason"][:900], None))
@@ -1588,7 +1639,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     return working, summary
 
 
-def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict]]"):
+def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict]]", day_label: str = ""):
     """Isolated control-flow wrapper -- the one piece of "a failed cycle
     must not advance the simulated date" that's actually unit-testable
     without Docker/Neon. Runs one cycle; on any exception, prints why and
@@ -1605,6 +1656,14 @@ def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict]]"):
               f"{type(exc).__name__}: {exc}")
         print("  Re-run the harness to retry this same day; any trade already "
               "journaled before the failure is safe to retry (idempotent).")
+        # Best-effort dashboard visibility ("Last failed attempt") -- never
+        # let a logging failure mask the real exception above (e.g. the
+        # failure itself was a lost Docker/Neon connection, in which case
+        # this write will also fail, harmlessly).
+        try:
+            log_activity([("cycle_failed", f"{day_label}: {type(exc).__name__}: {exc}"[:900], None)])
+        except Exception:
+            pass
         return None, True
 
 
@@ -1671,7 +1730,8 @@ def main() -> None:
         # counted at invocation time regardless of the failure -- see
         # run_day's mark_invoked).
         result, halted = _run_cycle_or_halt(
-            lambda: run_day(cursor, day_index, portfolio, masking, watchlist, {}, pacer, run_key)
+            lambda: run_day(cursor, day_index, portfolio, masking, watchlist, {}, pacer, run_key),
+            day_label=masking.day_index(cursor),
         )
         if halted:
             break

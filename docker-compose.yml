@@ -139,6 +139,28 @@ services:
       - ./risk-checker/risk_checker.py:/app/risk_checker.py:ro
       - ./watchlist/watchlist.json:/app/watchlist.json:ro
 
+  # dashboard — the existing static frontend (dashboard/index.html),
+  # unchanged, served locally so it doesn't depend on GitHub Pages (which
+  # currently 404s -- this project has no public deploy for it, and isn't
+  # getting one: this is a private learning project, and the anonymous Neon
+  # role the page reads through exposes selected journal rows to anyone who
+  # has the endpoint URL -- see README/HANDOFF. Bound to 127.0.0.1 ONLY
+  # (not 0.0.0.0) so nothing outside this machine can reach it -- no build,
+  # no framework, just python's stdlib http.server over the existing file.
+  dashboard:
+    image: python:3.12-slim
+    container_name: hermes-trading-agent-dashboard
+    restart: unless-stopped
+    working_dir: /srv
+    volumes:
+      - ./dashboard:/srv:ro
+    ports:
+      - "127.0.0.1:8842:8000"
+    command: ["python", "-m", "http.server", "8000", "--bind", "0.0.0.0"]
+    # ^ binds 0.0.0.0 INSIDE the container (normal -- it's an isolated
+    # network namespace); the 127.0.0.1 above is what actually restricts
+    # real host-network reachability to this machine only.
+
 networks:
   net-maverick:
     driver: bridge

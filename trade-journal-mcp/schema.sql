@@ -61,6 +61,14 @@ CREATE TABLE IF NOT EXISTS trades (
     -- lets a later reflection check whether the predicted failure mode
     -- matched the trade's actual exit reason.
     invalidation_condition TEXT,
+    -- RULES.md §6a/§6b: the real stop/target set at decision time. Was
+    -- computed and enforced by the risk checker on every BUY but never
+    -- actually persisted anywhere -- an open position's stop/target only
+    -- ever lived in the harness's in-memory Holding / the live risk
+    -- checker's call args, both gone once the process exits. Nullable:
+    -- unused on SELL rows and on pre-migration rows.
+    stop_price           NUMERIC(14, 2),
+    target_price         NUMERIC(14, 2),
     -- §6c: source-of-truth timestamps for whatever data justified this
     -- decision (technical/sentiment feed timestamps), not just created_at.
     data_timestamps     JSONB,
@@ -76,6 +84,13 @@ CREATE TABLE IF NOT EXISTS insight_log (
     id            BIGSERIAL PRIMARY KEY,
     cycle_type    TEXT NOT NULL CHECK (cycle_type IN ('decision', 'weekly_reflection')),
     insight_text  TEXT NOT NULL,
+    -- Same contamination risk as agent_activity.mode, fixed the same way,
+    -- just later: without this, a backtest reflection and a live
+    -- reflection are indistinguishable once live cron exists, so a
+    -- training-run insight would silently appear in the Live dashboard
+    -- view. Nullable: pre-dates this column; backfilled for existing rows
+    -- (see migration below) rather than left ambiguous.
+    mode          TEXT CHECK (mode IN ('backtest', 'live')),
     -- How many CLOSED trades existed when this was written. Insights are
     -- fed back into every later prompt, and without this a conclusion
     -- drawn from 2 trades reads with exactly the same authority as one
@@ -134,6 +149,32 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     -- Live: null -- created_at alone is the real timeline there.
     day_label       TEXT,
     open_positions  INTEGER NOT NULL DEFAULT 0,
+    -- Real per-cycle Hermes usage, from --usage-file (run_backtest.py's
+    -- _call_hermes) -- previously computed and printed to the console only,
+    -- never persisted, so the dashboard had no real source and resorted to
+    -- estimating usage by counting snapshot rows instead. api_calls > 1
+    -- means a JSON-parse retry happened this cycle (ask_hermes's one retry).
+    input_tokens      INTEGER,
+    output_tokens     INTEGER,
+    cache_read_tokens INTEGER,
+    reasoning_tokens  INTEGER,
+    total_tokens      INTEGER,
+    api_calls         INTEGER,
+    -- The real quota_pacer.py numbers as of this cycle (pacer.used_this_week()
+    -- / pacer.budget) -- the single source of truth for quota, mirrored here
+    -- so the dashboard (Neon-only, no access to the host's local
+    -- quota_pacer_state.json) can display the real count instead of
+    -- re-deriving its own from unrelated data.
+    hermes_calls_used INTEGER,
+    weekly_budget     INTEGER,
+    -- Per-open-position detail (ticker, quantity, entry/current price,
+    -- stop, target, days_held, unrealized P&L) as the harness itself sees
+    -- it that cycle -- the harness already computes all of this for
+    -- Hermes' own prompt (positions_view) but never wrote it anywhere a
+    -- browser could read. JSONB rather than new position-level table/rows:
+    -- one full snapshot per cycle matches how this table already works,
+    -- and open positions rarely exceed RULES.md §3's cap of 8.
+    open_positions_detail JSONB,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -165,3 +206,30 @@ CREATE POLICY anonymous_read_trades ON trades FOR SELECT TO anonymous USING (tru
 CREATE POLICY anonymous_read_insight_log ON insight_log FOR SELECT TO anonymous USING (true);
 CREATE POLICY anonymous_read_agent_activity ON agent_activity FOR SELECT TO anonymous USING (true);
 CREATE POLICY anonymous_read_portfolio_snapshots ON portfolio_snapshots FOR SELECT TO anonymous USING (true);
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-08-28) -- dashboard-correctness pass. CREATE TABLE IF NOT
+-- EXISTS above only runs on a fresh database; the live Neon database already
+-- has these tables, so the new columns are added here explicitly, once,
+-- idempotently (ADD COLUMN IF NOT EXISTS is safe to re-run). Existing
+-- columns/rows/grants are untouched -- additive only.
+-- ---------------------------------------------------------------------------
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS stop_price NUMERIC(14, 2);
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS target_price NUMERIC(14, 2);
+
+ALTER TABLE insight_log ADD COLUMN IF NOT EXISTS mode TEXT CHECK (mode IN ('backtest', 'live'));
+-- Backfill: every insight_log row that predates this column was written by
+-- the backtest harness (no live cron has ever run -- see HANDOFF.md,
+-- "Current in-progress state"/PROJECT_FRESH_START.md's "not yet built" live
+-- loop). Verified against real project history before running, not assumed.
+UPDATE insight_log SET mode = 'backtest' WHERE mode IS NULL;
+
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS input_tokens INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS output_tokens INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS reasoning_tokens INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS total_tokens INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS api_calls INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS hermes_calls_used INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS weekly_budget INTEGER;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS open_positions_detail JSONB;
