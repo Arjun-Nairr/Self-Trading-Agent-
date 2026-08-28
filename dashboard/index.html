@@ -253,7 +253,14 @@ const WINDOW_DAYS = 179;  // 2026-02-17 -> 2026-08-14
 // ticker), 10 tickers, ~125 real trading days in the window. 10*125=1250;
 // 2000 leaves real margin without building pagination for a bound this
 // small. A limit, not a real observed count -- see run_backtest.py.
-const TRADES_LIMIT = 2000;
+//
+// 2026-08-28 correction: that 2,000 bound was WRONG. It assumed at most
+// one trade row per ticker per day, true only for discretionary decisions
+// -- a mechanical exit (stop/target/time-stop) can ALSO journal a row for
+// the same ticker on the same day a discretionary order resolves,
+// meaning 2 rows/ticker/day is real. Rather than re-derive a wider bound
+// that could STILL be wrong, this now paginates until a real empty page
+// -- see qAll -- which is correct regardless of true volume.
 
 // One Neon database throughout; mode is a column value, not a separate
 // connection. These are the values each table uses for the same concept.
@@ -291,6 +298,26 @@ async function qCount(table, params = "") {
   const range = res.headers.get("content-range");  // "0-0/123"
   return range ? parseInt(range.split("/")[1], 10) || 0 : 0;
 }
+// Full result set via PostgREST offset pagination -- fetches pages until a
+// page comes back short of pageSize, so it's correct regardless of true
+// row count (see the TRADES_LIMIT note above for why a fixed cap isn't).
+// `params` must not already include limit/offset.
+async function qAll(table, params, pageSize = 1000) {
+  const token = await getAnonToken();
+  let all = [], offset = 0;
+  while (true) {
+    const res = await fetch(
+      `${DATA_API_URL}/${table}${params}&limit=${pageSize}&offset=${offset}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!res.ok) throw new Error(`${table}: ${res.status}`);
+    const page = await res.json();
+    all = all.concat(page);
+    if (page.length < pageSize) break;
+    offset += pageSize;
+  }
+  return all;
+}
 
 const money = n => (n == null) ? "—" : "$" + Number(n).toLocaleString(undefined, {minimumFractionDigits:2, maximumFractionDigits:2});
 const pctSigned = n => (n == null) ? "—" : (n >= 0 ? "+" : "") + Number(n).toFixed(2) + "%";
@@ -322,11 +349,24 @@ function pairTrades(trades) {
   return { closed, open };
 }
 
+// Standardized match for "this activity row is a real risk-check
+// rejection" -- risk_check (decision-time) and order_rejected (execution-
+// time) are the two event types a rejection is ever logged under; a
+// literal "BLOCKED" prefix never actually appears in a stored description
+// (that string is console-only -- see run_backtest.py's main()) and the
+// old filter never matched a single real row. Requires a §-reference so a
+// coincidental match (an order_rejected row for a broker-side reason with
+// no rule number) isn't miscounted as a RULES.md block.
+function isBlockedRow(a) {
+  return (a.event_type === "risk_check" || a.event_type === "order_rejected")
+    && /§\d/.test(a.description);
+}
+
 function renderSummary(trades, snaps, activity, failedCount) {
   const { closed, open } = pairTrades(trades);
   const cycles = snaps.length;
   const wins = closed.filter(c => c.pnl > 0).length;
-  const blocked = activity.filter(a => a.event_type === "risk_check" && a.description.startsWith("BLOCKED")).length;
+  const blocked = activity.filter(isBlockedRow).length;
 
   if (!cycles && !trades.length) {
     el("summary").innerHTML = `<span class="kv-key">No ${currentMode === "backtest" ? "training" : "live"} data recorded yet. This view populates as soon as the first cycle runs.</span>`;
@@ -510,7 +550,7 @@ function renderChart(snaps) {
     <span>Points <b>${vals.length}</b></span>`;
 }
 
-function renderAnalysis(trades, activity) {
+function renderAnalysis(trades, blockedActivity) {
   const { closed } = pairTrades(trades);
 
   // 1. Exit reasons -- directly answers whether targets are ever reached.
@@ -523,11 +563,13 @@ function renderAnalysis(trades, activity) {
     .map(([k,v]) => `<div class="kv"><span class="kv-key">${esc(k)}</span><span class="kv-val">${v}</span></div>`).join("")
     || `<div class="note">No closed trades yet.</div>`;
 
-  // 2. Which RULES.md sections block most often -- tells you which rule to
-  //    tune first, rather than guessing.
+  // 2. Which RULES.md sections block most often -- an observed count, not
+  //    a tuning recommendation (see RULES.md's own "never loosen a
+  //    constraint"). `activity` here is the COMPLETE whole-run blocked
+  //    dataset (qAll, not the 80-row recent feed) -- see refresh().
   const rules = {};
-  for (const a of activity) {
-    if (a.event_type !== "risk_check" || !a.description.startsWith("BLOCKED")) continue;
+  for (const a of blockedActivity) {
+    if (!isBlockedRow(a)) continue;
     for (const m of a.description.matchAll(/§[0-9]+[a-z]?/g)) rules[m[0]] = (rules[m[0]] || 0) + 1;
   }
   const ruleRows = Object.entries(rules).sort((a,b) => b[1]-a[1])
@@ -647,13 +689,28 @@ async function refresh(withSkeletons = false) {
   el("status-line").innerHTML = `<span class="dot busy"></span>${currentMode.toUpperCase()} · querying neon…`;
 
   try {
-    const [trades, activity, snaps, insights, failedCount, lastFailed] = await Promise.all([
-      q("trades", `?execution_mode=eq.${m.trades}&order=created_at.desc&limit=${TRADES_LIMIT}`),
-      q("agent_activity", `?mode=eq.${m.activity}&order=created_at.desc&limit=80`),
-      q("portfolio_snapshots", `?mode=eq.${m.snapshots}&order=created_at.desc&limit=300`),
-      q("insight_log", `?mode=eq.${m.activity}&order=created_at.desc&limit=20`),
-      qCount("agent_activity", `?mode=eq.${m.activity}&event_type=eq.cycle_failed`),
-      q("agent_activity", `?mode=eq.${m.activity}&event_type=eq.cycle_failed&order=created_at.desc&limit=1`),
+    // Phase 1: which run is "current"? The latest snapshot's run_id --
+    // live rows never have one (runFilter stays empty, unfiltered, which
+    // is correct: live has no run concept). Determined FIRST so every
+    // other query below can be scoped to it in one round trip, rather
+    // than fetching everything and hoping it happens to belong to one run.
+    const latest = await q("portfolio_snapshots", `?mode=eq.${m.snapshots}&order=created_at.desc&limit=1`);
+    const currentRunId = latest[0]?.run_id ?? null;
+    const runFilter = currentRunId ? `&run_id=eq.${currentRunId}` : "";
+
+    const [trades, activity, snaps, blockedActivity, insights, failedCount, lastFailed] = await Promise.all([
+      qAll("trades", `?execution_mode=eq.${m.trades}${runFilter}&order=created_at.desc`),
+      q("agent_activity", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=80`),
+      qAll("portfolio_snapshots", `?mode=eq.${m.snapshots}${runFilter}&order=created_at.desc`),
+      // Separate, COMPLETE dataset for the "blocked by rule" whole-run
+      // stat -- the 80-row feed above is a recent live tail, not a
+      // faithful whole-run total, and must never be presented as one.
+      // risk_check (decision-time) + order_rejected (execution-time) are
+      // the two event types a real rejection is ever logged under.
+      qAll("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=in.(risk_check,order_rejected)`),
+      q("insight_log", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=20`),
+      qCount("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed`),
+      q("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed&order=created_at.desc&limit=1`),
     ]);
     const { closed, open } = pairTrades(trades);
 
@@ -663,7 +720,7 @@ async function refresh(withSkeletons = false) {
     renderUsageStats(snaps, failedCount);
     renderFeed(activity);
     renderChart(snaps);
-    renderAnalysis(trades, activity);
+    renderAnalysis(trades, blockedActivity);
     renderPositions(trades, snaps);
     renderClosed(trades);
     renderDecisions(trades);

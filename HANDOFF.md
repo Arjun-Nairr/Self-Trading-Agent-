@@ -28,9 +28,17 @@ This file is the condensed, decision-focused version.
 
 ## Architecture, condensed
 
-- One LLM agent (`gateway`, currently **GPT-5.4-mini via ChatGPT Codex,
-  medium reasoning** — *never deliberately chosen, just the tool's
-  shipped default, still an open question*) plus five isolated tool
+- One LLM agent (`gateway`, **GPT-5.4-mini via ChatGPT Codex (`openai-codex`
+  provider), medium reasoning — LOCKED for this training run, stated
+  unambiguously as of 2026-08-28.** Originally the tool's shipped default
+  rather than a deliberate choice, and a real alternative (OpenCode Go +
+  DeepSeek V4 Flash) was investigated and **abandoned**: both the provider
+  and model are genuinely supported, but `NousResearch/hermes-agent#61461`
+  (open, unresolved as of that investigation) reports the exact
+  `opencode-go` + `deepseek-v4-flash` combination hanging on a real
+  timeout. No config change was made; `auth.json`/`config.yaml` still show
+  only `openai-codex`/`gpt-5.4-mini`. Do not reopen this without new
+  upstream evidence the timeout is fixed.) plus five isolated tool
   containers (technicals, news, live execution, backtest fill sim, trade
   journal), hub-and-spoke — no tool can reach another tool.
 - **Backtest mode:** Hermes never calls a tool directly. A Python harness
@@ -42,35 +50,58 @@ This file is the condensed, decision-focused version.
   pure-function module shared by both live and backtest paths, fail-closed
   on any unknown value.
 - **Neon Postgres** is the single source of truth (one DB, `mode` column
-  distinguishes backtest/live). A public dashboard reads it read-only via
-  Neon's Data API; Hermes writes through a separate full-credential path.
+  distinguishes backtest/live). A **local-only** dashboard
+  (`docker compose up -d dashboard`, `http://127.0.0.1:8842`, bound to
+  loopback — never publicly deployed, see §7 of the 2026-08-28 dashboard-
+  correctness section below) reads it read-only via Neon's Data API;
+  Hermes writes through a separate full-credential path.
 
 ---
 
-## Current state (as of 2026-08-21)
+## Current state — read this first (as of 2026-08-28, final pre-training pass)
 
-- Backtest cursor: Day 8 of the tuning window (2026-02-17 → 2026-08-14,
-  ~123 real trading-day cycles total). 7 cycles run so far under the
-  current (fixed) code, all no-trade.
-- Weekly quota: 34/175 used. Budget raised today from an untested 32 to
-  175 after confirming real ChatGPT Plus headroom — still a guess, just a
-  less blind one. Real measured cost: **~21.5k tokens/cycle**, included in
-  the subscription (not metered per-token).
-- Reflection loop fired for real for the first time on Day 7 — logged a
-  coherent, process-focused insight, correctly avoided naming a masked
-  alias.
-- Four real pre-training bugs found and fixed today: a masking leak (7/10
-  watchlist company names were leaking through real headline text
-  unmasked), a SELL-decision execution bug (never yet triggered live, but
-  would have corrupted the portfolio the first time it did), unrealistic
-  MARKET fills (could execute at a price that never traded that day), and
-  a mis-derived time stop (10 calendar days ≈ 7 trading days, not 10).
-  Neon was wiped and the run restarted clean so nothing currently in the
-  database predates these fixes.
+**This is the only section in this file describing the actual present
+state.** Every other section below is dated history, kept because the
+reasoning in it is still useful — but its own "current state" language
+(a cursor, a quota count, a bug list) was true only on the date in its own
+heading. If this section and an older one ever disagree, this one is
+right.
+
+- **Model: locked.** `openai-codex` / `gpt-5.4-mini` / medium reasoning.
+  OpenCode Go + DeepSeek V4 Flash was investigated and abandoned (real,
+  documented support; an open upstream timeout bug for that exact
+  combination — `NousResearch/hermes-agent#61461`). No config change was
+  made. Do not reopen without new upstream evidence.
+- **Baseline: freshly reset, clean.** `backtest_state.json`: $100,000
+  cash/equity, no holdings, no closed trades, no pending orders, cursor
+  `2026-02-17` (the configured window start), equity curve reseeded flat
+  at 6× $100,000. A fresh `run_id` is generated on the next invocation
+  (the reset state file has none stored).
+- **Smoke-tested, not yet run for real.** A 3-cycle smoke test (Day
+  1–3, its own fresh `run_id`) ran clean after the reset above and was
+  then **also wiped** as disposable smoke-test data — see "Final baseline
+  cleanup" below. The six-month run has **not** been started.
+- **Quota:** real `quota_pacer.py` count, untouched throughout every
+  reset/cleanup in this file (resets touch Neon and local *portfolio*
+  state only, never the pacer) — check
+  `backtest-harness/quota_pacer_state.json` for the live figure; do not
+  trust any number printed in an older dated section below.
+- **Dashboard:** local-only, `docker compose up -d dashboard` →
+  `http://127.0.0.1:8842`, bound to loopback. Not, and has never been,
+  publicly deployed.
+- **Docker images: pinned by digest**, not `:latest`/floating tags — see
+  the 2026-08-28 "final pre-training correctness pass" section for the
+  exact digests and why.
+- **Blocking issues: none identified.** All repairs below (2026-08-21
+  through 2026-08-28) passed their own tests; the stack is training-ready
+  pending only a human decision to start the real run.
 
 ---
 
 ## Phase 0 backtest-integrity repair (2026-08-21, second pass)
+
+*(Historical — "Current state" in this section's own text describes
+2026-08-21, not today. See the section above for what's actually current.)*
 
 A narrowly-scoped follow-up repair, separate from the four bugs fixed
 earlier the same day (masking leak, SELL execution, MARKET fills, time
@@ -237,8 +268,13 @@ Explicitly out of scope for this repair, still open:
   mode. If a live cron process died, an open position would sit
   unprotected.
 - **Partial fills.** Neither the live nor backtest path currently models
-  a partial fill (fewer shares than requested) — every fill is
-  all-or-nothing.
+  an involuntary BROKER partial fill (the venue fills fewer shares than
+  requested) — every fill is all-or-nothing. Distinct from the one-lot
+  model (RULES.md §9.1): as of 2026-08-28, a *discretionary* partial SELL
+  (the agent itself proposing to sell only part of a position) is rejected
+  outright by `risk_checker.py`, at both decision time and execution time
+  — see the 2026-08-28 pre-training pass section below. This bullet is
+  about the broker's own fill granularity, an unrelated, still-open gap.
 - **Circuit-breaker latching.** RULES.md §4's daily/weekly breakers are
   re-evaluated fresh every cycle from the broker's live P&L figures, not
   latched — a breaker that trips and then the P&L figure recovers
@@ -262,6 +298,9 @@ Explicitly out of scope for this repair, still open:
 ---
 
 ## Intraday chronology follow-up (2026-08-25)
+
+*(Historical — see "Current state" near the top of this file for what's
+actually current today.)*
 
 Completes the no-lookahead repair. The day-T+1 execution from the earlier
 Phase 0 pass still had three real problems: a queued BUY filled at the
@@ -498,6 +537,11 @@ here.
 ---
 
 ## Dashboard correctness + pre-training baseline reset (2026-08-28)
+
+*(Historical — superseded by "Final pre-training correctness pass" below,
+done later the same day. That section's own baseline reset is the one
+that's actually current; this one's Day 1-3 smoke-test data was itself
+wiped by the later pass. See "Current state" near the top of this file.)*
 
 **Locked model decision, reconfirmed, untouched:** `openai-codex` /
 `gpt-5.4-mini` / medium reasoning. A separate research pass this same day
@@ -783,10 +827,406 @@ stopped at 3 cycles per instruction, reporting back here.**
   15-minute bar's close** at end of day (same mark `equity` itself uses),
   not a true intraday tick — consistent with how the rest of the harness
   already marks positions, not a new approximation.
-- Dashboard's `TRADES_LIMIT = 2000` is a provable upper bound, not a
-  measured one — revisit if the real watchlist or window size changes.
+- ~~Dashboard's `TRADES_LIMIT = 2000` is a provable upper bound~~ —
+  **corrected in the pass below**: that bound was actually wrong (it
+  assumed ≤1 trade row per ticker per day; a mechanical exit and a
+  discretionary resolution can both journal the same ticker the same day).
+  Replaced with real pagination (`qAll`) — see below.
 - Neon's anonymous-role exposure (§7) remains open by design per this
   task's own scope.
 - The pgbouncer statement-cache fix (§4) only covers `trade-journal-mcp`;
   any other service that later talks to the same pooled endpoint through
   `asyncpg` (none currently do) would need the same fix.
+
+---
+
+## Final pre-training correctness pass (2026-08-28, second pass same day)
+
+A second, independent instruction set, run after the dashboard-correctness
+pass above (same day) — every finding below was **independently traced
+against the actual code before being implemented**, not taken on faith
+from the task description. All twelve findings were confirmed real; none
+were rejected as incorrect.
+
+### 1. Semantic response validation (new)
+
+Confirmed: `ask_hermes` previously only proved a reply **parses** as JSON
+(`json_from`) — nothing validated its *shape*. A syntactically valid but
+semantically empty/wrong reply (no `decisions` key, a BUY with
+`primary_signal="sentiment"`, a self-reported `expected_reward_risk` that
+contradicted the trade's own stop/target math, a reflection day with no
+reflection) sailed straight through, either misbehaving downstream or
+blowing up a full simulated day later inside `record_trade`'s own field
+validation — after a real quota slot was already spent.
+
+Added `validate_hermes_response`/`ResponseValidationError`
+(`run_backtest.py`, pure, no I/O): validates top-level structure, an
+honest `no_action_reason` when `decisions` is empty, every applicable
+per-decision field (alias, action, positive-integer quantity, finite
+positive prices, confidence 1-5, technical basis, non-blank
+invalidation/reasoning), RULES.md §5a on BUY, and **cross-checks the
+self-reported reward:risk against the actual entry/stop/target math**
+(generous tolerance — catches a badly wrong self-report, not cent
+rounding; the real §6b gate is `risk_checker.py`'s own, separate and
+unconditional). A reflection day now requires a non-blank `reflection`.
+Wired into `ask_hermes` with the **same** one-retry-then-fail-closed
+contract the JSON-parse check already had — a second failure (parse OR
+validation) propagates uncaught, halting the cycle exactly like before.
+
+Also fixed the real bug this surfaced: the reflection cadence
+(`cycles_since_reflection`) was being **reset to 0 even when the
+reflection text came back blank** — silently skipping a retry for another
+5 cycles. Now only resets on a genuinely non-blank reflection (defense in
+depth; validation above should make a blank one impossible in practice).
+
+### 2. Queue-time journaling + rejected-decision persistence (new)
+
+Confirmed: nothing was journaled for a discretionary decision until (and
+unless) it filled the next day. A decision **rejected** at resolution left
+**no `trades` row at all** — only a free-text activity line with no
+`decision_id` to link back to.
+
+`QueuedOrder` gained a `decision_id` field, generated the instant a
+decision passes both validation gates (kind `"queued_proposal"`) and
+journaled immediately via the new `record_queued_decision` (status stays
+`'pending'`, the table's own default). The next trading day's resolution
+now **updates that same row** — `resolve_trade_fill` on a fill,
+`resolve_trade_rejection` on a rejection or a superseded order (treated as
+a rejection with an honest reason, never a dangling `'pending'` row or a
+fabricated fill). `order_queued`/`order_rejected`/`exit` activity lines
+now carry the real `decision_id`, linking risk-check and execution
+activity back to the one continuous decision row it belongs to.
+
+`_record_decision` (`trade-journal-mcp/server.py`) now **fails loudly** on
+a `decision_id` collision with a **different** payload (ticker/action/
+quantity/order_type mismatch) instead of silently returning the stale
+existing row — this should never happen for a genuine retry (deterministic
+ids are derived from the event's own identity); if it ever does, something
+is wrong with id derivation itself, and silently returning a different
+trade's data would be far worse than an error.
+
+### 3. Decision-time risk validation (new)
+
+Confirmed: only light structural checks ran before queueing (alias
+resolves, action valid, positive quantity, BUY has stop/target) —
+deliberately, with the real risk-checker check deferred to fill time. A
+badly-sized or badly-stopped proposal could sit queued overnight, costing
+a full day and a quota slot before ever being rejected.
+
+Added a genuine decision-time pass: `check_trade` (risk_checker.py) gained
+a `validate_timing: bool = True` parameter — `False` skips **only** the
+§7 market-hours block (the real fill instant isn't known yet at proposal
+time); every other rule (§1, §2, §3, §4, §6, §9) still runs in full. New
+`build_decision_time_context` (pure) builds a `Context` from *today's*
+known state (equity/cash/positions/streak) as a good-faith proxy — **never
+a faked market clock** (`is_open`/minute fields are placeholder values
+that are never read when `validate_timing=False`). This is advisory/pre-
+flight, not a duplicate authority: `resolve_queued_order`'s existing
+execution-time call (`validate_timing=True`, the default, unchanged)
+remains the sole authority against the real next-day price. Proven for
+real in the final smoke test below: a DINO BUY passed decision-time
+validation on Day 1 using Day 1's price, then was correctly **rejected**
+on Day 2 at the real (gapped) price — exactly the intended two-layer
+behavior, not a false pass.
+
+### 4. Held-position evidence (new)
+
+Confirmed: `fetch_technicals`/`fetch_news` were only called for *unheld*
+candidate tickers each cycle — a currently-held position's technicals and
+news were never refreshed after entry, so AGENTS.md §6d's thesis-
+invalidation check ("has the signal that justified the entry reversed, or
+has genuinely adverse news landed") had no fresh per-cycle evidence to
+reason from.
+
+Both fetches now cover held tickers too (one combined call each, not two —
+fewer real docker-exec round trips), masked and leak-checked through the
+**same** `masking.assert_clean(positions_view)` call that already covered
+`positions_view`. `build_prompt`'s OPEN POSITIONS section now renders each
+held position's fresh RSI/MACD/trend/outlook and up to 3 recent headlines,
+mirroring the CANDIDATES section's own rendering. A fetch error for a held
+ticker omits the enrichment for that position only (`tech: None`) — the
+base entry/current/stop/target line is never dropped, nothing fabricated.
+
+### 5. Run/cycle identity + idempotency (new)
+
+Confirmed: `run_key` (`f"{start}|{seed}"`) fed `make_decision_id`, but
+`--reset` only deleted the local state file — a fresh run with identical
+`--start`/`--seed` (the defaults) would derive the **identical**
+`decision_id` space as a prior, discarded run. Separately, `trades` had no
+`run_id` at all, and `agent_activity`/`portfolio_snapshots`/`insight_log`
+had **zero** idempotency protection — a retried day (state-file write
+failed after Neon writes already landed) could duplicate narration/
+snapshot/reflection rows (a real, previously-accepted "cosmetic" gap this
+task put back in scope).
+
+`main()` now generates a fresh `run_id` (uuid4) on `--reset`/first run,
+persists it in `backtest_state.json`, and reuses it on resume — `run_key`
+IS this `run_id` now, so a reset can never reuse an id space. Migration
+added `run_id UUID` to `trades`/`agent_activity`/`portfolio_snapshots`/
+`insight_log`, and a **deterministic** `cycle_id` (`uuid5(run_id,
+day_index)`) with a real **database-level UNIQUE constraint** on
+`portfolio_snapshots.cycle_id` and `insight_log.cycle_id` (NULLs — always
+true for live — don't conflict with each other, so live is unaffected).
+`record_snapshot_once` is `INSERT ... ON CONFLICT (cycle_id) DO NOTHING
+RETURNING *`; whether a row actually came back is what `run_day` uses to
+decide whether this cycle's activity narration and reflection insight are
+genuinely new (write them) or already fully recorded by an earlier attempt
+(skip — no duplication). Reflection retrieval (`fetch_recent_insights`,
+`fetch_recent_closed_trades`) is now filtered to `mode='backtest'` AND the
+current `run_id`, closing the exact contamination risk flagged (and
+previously accepted as open) in this file's own "Deferred known issues."
+
+### 6. Cycle/snapshot truthfulness (fixed, see item 5 mechanism above)
+
+`record_snapshot_once`'s cycle_id-conflict gate **is** the mechanism: a
+snapshot is never "successful" until this cycle's full processing reaches
+that point and the INSERT is a genuine new row. Failed attempts get a
+**separate**, always-written marker (`log_cycle_failure`, new) — never
+gated behind the same-cycle conflict check, since a failed attempt is
+exactly what should stay visible on every attempt, not be deduplicated
+away. It carries the real, current `quota_pacer.py` count (always
+available) and this cycle's real token usage **when available** (an
+exception raised out of `ask_hermes` is tagged with `.usage` before
+propagating — the single most usage-relevant failure point; a failure
+later in the function still gets the real quota count, just not that
+specific token total). The dashboard's "Last Successful Cycle,"
+"Last Failed Attempt," failed-cycle count, quota, and usage all read this
+real state directly — see item 9.
+
+### 7. One-lot model — full-position SELL enforcement (fixed)
+
+Confirmed: `risk_checker.py` never enforced RULES.md §9.1 as a *partial-
+SELL* rule (only "no averaging down" on the BUY side); `simulate_trading_
+day`'s queued-SELL stage had a real partial-fill-crediting branch (`min
+(order.quantity, holding.quantity)`, a 2026-08-25 bug fix keeping it
+correct, not removing it).
+
+Added a real §9.1 check to `risk_checker._check_exit`: `0 < quantity <
+held` is rejected outright, at **both** decision time and execution time
+(same `check_trade` call, both places). With that guarantee upstream, the
+now-unreachable partial-credit branch in `simulate_trading_day` was
+**replaced with an assertion** (`order.quantity == holding.quantity`) —
+loud if either check ever regresses, never silent partial-crediting.
+`test_partial_sell_credits_only_the_sold_shares` (tested the now-removed
+branch) was rewritten as `test_partial_sell_rejected_full_exit_still_
+works` (proves the new rejection, and that a full-quantity exit still
+fills normally). **Involuntary broker partial fills remain a separate,
+unmodelled live-mode limitation** — see "Deferred known issues" — this is
+about the AGENT's own proposal, not the broker's fill granularity.
+
+### 8. Reflection retrieval correctness (fixed)
+
+Confirmed and fixed alongside item 5: `fetch_recent_insights` had **no
+mode filter at all**; `fetch_recent_closed_trades` grouped by ticker
+before slicing to the most recent N, so the final slice was "the last N
+in ticker-iteration order," not truly the N most recently closed
+positions globally by exit time. Both filtered to `mode='backtest'` +
+current `run_id`; the trade-pairing sort now uses each SELL row's own
+`updated_at` (the real resolution time), sorted globally across every
+ticker, before taking the most recent `limit`.
+
+**Verified, not a bug:** rejected decisions being treated as filled
+positions was checked and found **already correct** — both
+`fetch_recent_closed_trades` (harness) and the dashboard's `pairTrades`
+(JS) already gate on `status === "filled"` before pairing; not touched.
+
+### 9. Dashboard completeness (fixed)
+
+Confirmed and fixed: `TRADES_LIMIT = 2000` was a genuinely **wrong**
+bound (assumed ≤1 trade row/ticker/day; a mechanical exit and a
+discretionary resolution can both journal the same ticker the same real
+day) — replaced with real offset pagination (`qAll`, fetches until a page
+comes back short). The "blocked by rule" stat's filter
+(`description.startsWith("BLOCKED")`) **never matched a single real row**
+— that literal string only ever existed in the harness's own console
+print, never in a stored `description` — confirmed live (0 matches before
+the fix, correct non-zero counts after). Standardized on `event_type ===
+"risk_check" || "order_rejected"` plus a `§` reference
+(`isBlockedRow`), fed by a **separate, complete** (paginated) dataset —
+the 80-row activity feed stays a recent live tail, never presented as a
+whole-run total. Every query (`trades`, `agent_activity`, blocked-rule
+data, `portfolio_snapshots`, `insight_log`, failed-cycle count/row) is now
+scoped to the **current run** — determined once per refresh from the
+latest snapshot's `run_id`, applied as `&run_id=eq....` everywhere (a
+`null` run_id — live mode, or pre-migration legacy rows — applies no
+filter, degrading correctly). `127.0.0.1:8842` binding preserved,
+unchanged.
+
+### 10. Deterministic risk validation hardened (fixed)
+
+Confirmed: a `NaN` compares `False` against every `>`/`<` check in
+`risk_checker.py` — silently **passing** a check that should have
+blocked; zero/negative equity divided by zero or produced nonsensical
+negative percentages that could also silently pass; unknown §7 timing
+(`minutes_since_open=None`) while `is_open=True` was silently **skipped**,
+not treated as blocking.
+
+Added explicit `math.isfinite()` + sign guards (return-early, before any
+division) for equity, cash, entry_price, stop_price, target_price, and
+quantity — all fail CLOSED, never a crash, never a silent pass. §7's
+timing check now fails closed on an unknown minute value while the market
+is reported open (previously just skipped) — gated behind the new
+`validate_timing` flag so item 3's legitimate "timing not known yet"
+decision-time case is unaffected. All existing risk-checker tests pass
+unchanged (proves zero behavior change on valid inputs); 4 new test
+blocks added.
+
+### 11. Runtime reproducibility frozen (new)
+
+Confirmed: `gateway` used `nousresearch/hermes-agent:latest` — a moving
+tag. `docker compose pull`/rebuild at any point could silently swap in a
+newer Hermes release (the real one on record, v0.20.6, is six patches
+ahead of the installed v0.20.0) mid-training, with no diff to review.
+
+Pinned by digest, to the **currently installed, currently verified**
+image:
+
+```
+gateway:    nousresearch/hermes-agent@sha256:7052fcafb84acaf0d93f78510a51c344ca2041d4ba7dda9dca67660f817309c4
+            (= Hermes Agent v0.20.0 (2026.8.3), confirmed via `hermes version` before AND after the pin)
+dashboard + every project Dockerfile's base (including vendored maverick-mcp/Dockerfile):
+            python@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65
+            (= python:3.12-slim, the currently pulled/cached digest)
+```
+
+**Confirmed identical after rebuild** (not just pinned and assumed): full
+`docker compose build` + `up -d` on the pinned digests, then re-ran
+`hermes version` (identical: v0.20.0 2026.8.3), a minimal `hermes -z`
+request (identical real JSON round-trip), and the entire pure + real
+integration test suite (identical pass counts, zero behavior change).
+
+### 12. Documentation reconciled
+
+- `RULES.md`'s header corrected: it **is** mounted read-only into
+  `gateway` (verified against `docker-compose.yml`, which already had
+  this mount — the file's own self-description was simply never updated)
+  and **is** the locked baseline law for this training run, not an
+  unmounted draft. **No numerical rule changed.** §5a's heading/opening
+  ("recommended change") corrected to state the sentiment-veto rule is
+  implemented and enforced in three independent places, not merely
+  proposed.
+- This file's own top: added the "Current state — read this first"
+  section above; every older dated section marked historical, pointing
+  back to it, so old state can't masquerade as current.
+- `PROJECT_FRESH_START.md`: model-lock/OpenCode-abandonment wording
+  matched to `HANDOFF.md`'s; "partial fills" clarified to distinguish the
+  still-open broker-fill-granularity gap from the now-closed one-lot
+  partial-SELL gap; "held-position thesis inputs" and "run isolation"
+  moved out of "Deferred known issues" into a new "Fixed as of 2026-08-28"
+  note (both genuinely fixed by items 4/5 above); self-test Q14's answer
+  updated to match.
+
+### Tests
+
+**New/updated pure tests, all passing** (`risk-checker/test_risk_checker.py`
+— 22 existing + 4 new blocks; `backtest-harness/test_execution_semantics.py`
+— rewrote the partial-sell test, added 10 new test functions covering
+response validation (7 functions), decision-time risk context (2), and
+held-position prompt rendering (1); 46→57 assertions total across the pure
+suite (pytest: 47 collected, up from 37)).
+
+**New real-Neon tests:** `trade-journal-mcp/test_run_isolation.py` — proves
+a decision_id collision with a different payload fails loudly (and an
+identical-payload retry is still a safe no-op), and that `portfolio_
+snapshots`/`insight_log` are idempotent per `cycle_id` (a retry returns
+`None`, no duplicate row; a different `cycle_id` always writes).
+
+**All pre-existing suites re-verified passing, unchanged behavior, run
+against the pinned/rebuilt stack (item 11):**
+`risk-checker/test_risk_checker.py`, `backtest-harness/
+test_execution_semantics.py` + `test_anonymize.py` + `test_quota_pacer.py`
+(pytest, 47 total), `trade-journal-mcp/test_decision_fields.py` +
+`test_idempotency.py` + `test_dashboard_fields.py`, `backtest-harness/
+test_execution_path.py` (real containers, real Neon round-trip).
+
+**Real browser verification** (local Docker dashboard): Training and Live
+views, mode switching, zero console errors, both against legacy
+(pre-migration, `run_id IS NULL`) data and against the fresh smoke-test
+run's real `run_id`-scoped data — confirmed the scoping actually changes
+what's displayed (2 blocked + 5 failed before the reset, correctly 1
+blocked + 0 failed after, matching only the fresh run's real content).
+
+**Hermes configuration/auth confirmed unchanged** throughout: `hermes
+status` before and after this entire pass shows `gpt-5.4-mini` /
+`OpenAI Codex`, logged in, `auth.json` untouched.
+
+**3 real Hermes smoke cycles run** (the maximum allowed) — see "Final
+baseline cleanup" below for the result.
+
+### Backups (private, outside git — confirmed via `git check-ignore`)
+
+At `C:\Users\<user>\.hermes-trading-agent\backups\`:
+- `final_pretraining_backup_2026-08-28.json` — full row export (17
+  activity rows [12 from the earlier smoke test + 5 stray `cycle_failed`
+  markers this pass's own test runs wrote, once identified as such, not
+  part of any real run], 3 snapshot rows) before this pass's final
+  deletion
+- `backtest_state_pre_final_reset_2026-08-28.json`,
+  `quota_pacer_state_pre_final_reset_2026-08-28.json` — local state
+  before this pass's final reset
+
+### Final baseline cleanup
+
+Backed up (above), then deleted all `mode='backtest'`/`execution_mode=
+'backtest'` rows (17 activity, 3 snapshots, 0 insights, 0 trades — the
+smoke run never filled a real trade). Confirmed before deletion the
+filter could not touch the live/Alpaca AAPL row (still present,
+unmodified, `status: 'rejected'`, resolved earlier the same day).
+`backtest_state.json` reset identically to the earlier pass's baseline
+(verified again through the real `Portfolio.from_dict` path). Genuine
+quota-pacer history **untouched** — `2026-W34: 34` (prior week) preserved
+exactly, `2026-W35` is this real week's real count.
+
+**Then ran the required 3-cycle smoke test from that clean baseline,**
+generating this run's real, final `run_id`:
+
+| Cycle | Result | Real proof of items 2+3 working together |
+|---|---|---|
+| Day 1 (2026-02-17) | BUY DINO x100 queued | Passed decision-time validation (item 3) using Day 1's price; journaled `'pending'` immediately (item 2) |
+| Day 2 (2026-02-18) | Same decision rejected on resolution — `§6a: stop must sit below the entry price for a long` | The SAME `decision_id` updated to `status='rejected'` with the real reason (item 2) — the real Day-2 price gap is exactly what decision-time validation, by design, could not have known on Day 1 |
+| Day 3 (2026-02-19) | No trade — "no clean long setup" | — |
+
+Verified directly against Neon (not just console output): 3 distinct
+`cycle_id`s on `portfolio_snapshots` (no duplicates), all three tagged
+with the same real `run_id`, real token usage matching console exactly
+(21,741 / 21,274 / 20,538), real quota incrementing 4→5→6 (continuing
+correctly from this same real week's prior count), zero `cycle_failed`
+rows this run, and the one `trades` row (DINO) showing its full
+proposal-to-rejection lifecycle under one `decision_id` with real
+`stop_price`/`target_price` persisted. **This smoke-test run's own data
+was then also wiped** as disposable (backed up first, same procedure) —
+the baseline is clean again as of "Current state" at the top of this file.
+
+**Did not begin the six-month run.** Reporting back per instruction.
+
+### Rollback
+
+- **Code:** `git diff`/`git checkout --` the files listed in the commit
+  below; the schema migration (idempotent `ADD COLUMN`/`ADD CONSTRAINT`)
+  is safe to leave in place even if code is reverted — unused columns, not
+  a breaking change.
+- **Neon data:** restore from `final_pretraining_backup_2026-08-28.json`
+  (this pass) or `pretraining_backup_2026-08-28.json` (the earlier pass,
+  same day) by re-inserting the backed-up rows.
+- **Local state:** restore from the matching `backtest_state_pre_*` file
+  in the same backups directory.
+- **Images:** un-pin by reverting `docker-compose.yml`/the Dockerfiles, or
+  pin to a different digest deliberately — never silently.
+- **Quota:** untouched by any of the above — no rollback needed.
+
+### Remaining limitations / compatibility risks
+
+- Decision-time risk validation (item 3) is advisory, by design — a
+  proposal that passes it can still be correctly rejected at execution
+  time against the real next-day price (proven, not just claimed, by the
+  DINO smoke-test case above). This is the intended two-layer design, not
+  a gap.
+- `log_cycle_failure`'s token-usage tagging only covers the single most
+  common real failure point (`ask_hermes` itself) — a failure later in
+  `run_day` (e.g. a Neon write) still gets the real, current quota count,
+  just not that specific cycle's token total. Judged acceptable: quota is
+  the number the task calls out as always-required; tokens are explicitly
+  "when available."
+- Neon's anonymous-role exposure and the pgbouncer statement-cache fix's
+  narrow scope (both noted in the earlier pass above) remain open,
+  unchanged by this pass.

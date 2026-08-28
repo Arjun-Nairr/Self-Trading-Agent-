@@ -31,7 +31,7 @@ Hermes can propose; it cannot approve its own trade. That enforcement layer is d
 | Term | What it actually is |
 |---|---|
 | **Hermes** | The persona/identity: `SOUL.md` (temperament) + `AGENTS.md` (procedure). This is *what it's told to be and do*, not the software running it. |
-| **The model** | The actual LLM answering each prompt — currently **GPT-5.4-mini**, reached via OpenAI's Codex/ChatGPT backend (`config.yaml`, verified live: `model.default: gpt-5.4-mini`, `model.provider: openai-codex`, `auth.json` shows exactly one configured provider, `openai-codex`). This was never deliberately chosen — it's the tool's shipped default (see `HANDOFF.md`). It is swappable in principle; nothing in this project's own code depends on it being GPT-5.4-mini specifically.
+| **The model** | The actual LLM answering each prompt — **GPT-5.4-mini**, reached via OpenAI's Codex/ChatGPT backend (`config.yaml`, verified live: `model.default: gpt-5.4-mini`, `model.provider: openai-codex`, `auth.json` shows exactly one configured provider, `openai-codex`). Originally the tool's shipped default rather than a deliberate choice — but as of 2026-08-28 **locked unambiguously for this training run**: an alternative (OpenCode Go + DeepSeek V4 Flash) was investigated and real, but **abandoned** over an open, unresolved upstream timeout bug for that exact combination (`NousResearch/hermes-agent#61461`) — see `HANDOFF.md`'s 2026-08-28 sections.
 | **MCP tools** | Small standalone services (Docker containers) exposing a handful of functions the model can call — `maverick-mcp`, `google-news-rss-mcp`, `alpaca-mcp`, `trade-journal-mcp`, `execution-sim-mcp`. "MCP" = Model Context Protocol, the standard these tools speak (see Glossary). |
 | **The harness** | `backtest-harness/run_backtest.py` — a plain Python script (not an AI, not a tool) that drives the *simulated* version of the whole cycle. During a backtest, Hermes has **zero** tool access at all — the harness does every fetch, mask, execute, and journal write itself, and only hands Hermes a text prompt to reason over (`run_backtest.py` module docstring; `AGENTS.md` "When you are backtesting"). |
 
@@ -261,11 +261,13 @@ This is `AGENTS.md`'s live-mode cycle, in order. The **backtest** mode follows t
   SELECT-only, a documented, accepted exposure, not a bug)
 - `execution-sim-mcp`, backtest-only fill simulator
 - `maverick-mcp`'s `get_stock_fundamentals` (Yahoo-based) exists in vendored code but is **not called** by any current cycle logic, live or backtest
+- Fresh point-in-time technicals/news for currently-HELD positions every cycle, not just candidates (2026-08-28) — masked, leak-checked, rendered into the prompt so §6d's thesis-invalidation check has real evidence
+- Semantic validation of every Hermes reply before it's acted on, decision-time risk pre-validation before queueing, run/cycle identity (`run_id`/`cycle_id`) across every table, and a one-lot model enforced against partial discretionary SELLs (2026-08-28) — see `HANDOFF.md`'s "final pre-training correctness pass" section
 
 ### Decided but not implemented
 *(Real decisions, not yet built.)*
 
-- **DeepSeek V4 Flash on high reasoning, via OpenCode Go** — confirmed not currently configured (`config.yaml`/`auth.json` show only `openai-codex`/`gpt-5.4-mini`)
+- ~~DeepSeek V4 Flash on high reasoning, via OpenCode Go~~ — **investigated and abandoned (2026-08-28)**, not merely undone: `opencode-go`/`deepseek-v4-flash` are real and documented, but `NousResearch/hermes-agent#61461` (open) reports the exact combination hanging on a real timeout. `config.yaml`/`auth.json` still show only `openai-codex`/`gpt-5.4-mini`, now locked for this run — see `HANDOFF.md`.
 - **SEC EDGAR as the authoritative financial-statement/debt source** — nothing SEC/EDGAR/XBRL-related exists in the repo today
 - **No chart-image or visual pattern analysis** — not present, and not planned
 - **Existing numerical technical indicators remain** (RSI/MACD/support-resistance/trend stay exactly as they are)
@@ -287,12 +289,15 @@ This is `AGENTS.md`'s live-mode cycle, in order. The **backtest** mode follows t
 *(Real, open items — from direct repo/`HANDOFF.md` verification.)*
 
 - **Live bracket orders** — `alpaca-mcp`'s `place_order` submits one order, no OCO/bracket; nothing rests a stop at the broker in live mode
-- **Partial fills** — neither live nor backtest models a partial fill; every fill is all-or-nothing
+- **Broker partial fills** — neither live nor backtest models an involuntary broker partial fill (venue fills fewer shares than requested); every fill is all-or-nothing. Distinct from the one-lot model (RULES.md §9.1): as of 2026-08-28 a *discretionary* partial SELL is rejected outright by `risk_checker.py` at both decision and execution time — this bullet is about the broker's own fill granularity, unrelated and still open.
 - **Circuit-breaker latching** — breakers are re-evaluated fresh every cycle from live P&L, not latched for the rest of a halted period
-- **Run isolation** — aliases reseed per backtest run, but `insight_log` persists across runs in Neon; a name-specific insight (which the reflection prompt explicitly forbids writing) would silently mean something different after a reseed if that instruction were ever violated
-- **Held-position thesis inputs** — technicals/news are only fetched for *candidate* (unheld) tickers each cycle, not currently-held ones, so §6d's "has the thesis broken" check has no fresh per-cycle data to reason from
 - **Survivorship bias** — the watchlist was screened using data from inside the exact window being backtested; tuning-window P&L should be read as noise, not signal
 - **No benchmark series** — no S&P MidCap 400 comparison line is wired into results yet
+
+**Fixed as of 2026-08-28 (moved out of this list — no longer open):**
+
+- ~~Run isolation~~ — `trades`/`agent_activity`/`portfolio_snapshots`/`insight_log` all now carry a real `run_id` (a fresh uuid4 per reset/fresh run, persisted in `backtest_state.json`, reused across a resume); reflection retrieval (`fetch_recent_insights`/`fetch_recent_closed_trades`) and the dashboard both filter to the current run's `run_id`, so a discarded prior run's rows can no longer silently feed into a live one's reflections or display.
+- ~~Held-position thesis inputs~~ — fresh point-in-time technicals AND news are now fetched for currently-held tickers every cycle (not only unheld candidates), masked, leak-checked, and rendered into the prompt's OPEN POSITIONS section — §6d's "has the signal that justified the entry reversed" check now has real per-cycle evidence to reason from, not just entry/current-price numbers.
 
 ---
 
@@ -409,7 +414,7 @@ Try to answer these from memory of this file before checking the answers.
 11. **The broker wins.** Stated explicitly in `AGENTS.md` Step 0/2.
 12. **The trade is blocked** — fail-closed, an unevaluable check is never treated as passing.
 13. **Only by hand** — `screen_watchlist.py` is run manually; nothing re-screens it automatically.
-14. Any of: held-position thesis inputs, live bracket orders, partial fills, circuit-breaker latching, run isolation, survivorship bias, no benchmark series (see §8's Deferred list).
+14. Any of: live bracket orders, broker partial fills, circuit-breaker latching, survivorship bias, no benchmark series (see §8's Deferred list). Held-position thesis inputs and run isolation were both real gaps here until 2026-08-28, when both were fixed — see §8's "Fixed" note.
 15. **False** — explicitly stated in §5 and §10: no multi-day dossier or `WATCHING → READY` process exists today.
 
 </details>

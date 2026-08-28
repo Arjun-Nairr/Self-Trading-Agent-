@@ -1,17 +1,25 @@
-# RULES.md — DRAFT v2, not final
+# RULES.md — the locked baseline law for this training run
 
-**Status: full draft, numbers proposed but not locked.** Every number below
-carries its own justification and a confidence tag:
+**Status (corrected 2026-08-28 — this file's own prior header was stale):**
+this file **is mounted read-only** into the `gateway` container
+(`docker-compose.yml`: `./RULES.md:/opt/data/workspace/RULES.md:ro`) and
+**is** the locked, not-agent-writable rules layer described below — not an
+unmounted draft. A bad reflection cycle cannot quietly edit it: the mount
+itself, not just intent, is what enforces that. Every number in this file
+is the real, currently-binding limit for the upcoming six-month training
+run. **No numerical rule in this file changed as part of that correction —
+only this status framing did.**
+
+Each number still carries its own justification and a confidence tag, and
+the `[JUDGMENT]`-tagged ones in §10 remain genuinely open questions worth a
+second opinion once real results exist — "locked" means Hermes cannot
+loosen them on its own (AGENTS.md's reflection boundary), not that a human
+reviewing real results can't revise one deliberately:
 
 - `[GROUNDED]` — matches a real, published, externally-enforced standard.
 - `[DERIVED]` — calculated from another rule here; the math is shown.
 - `[JUDGMENT]` — a reasoned choice, but no external source. **These are the
-  ones most worth checking against real-world rules before locking.**
-
-This file is meant to become the **locked, not-agent-writable** rules layer
-(per the original plan document's §4, not this file's own §4) — mounted
-read-only once finalized, so a bad reflection cycle can't quietly edit it.
-Not mounted yet; still a plain draft.
+  ones most worth checking against real-world rules — see §10.**
 
 Everything is expressed as a **% of account equity**, never dollars, so
 nothing breaks when the account size changes.
@@ -183,12 +191,17 @@ An entry requires **all** of the following:
 6. Sentiment does not veto (below).
 7. No circuit breaker is active, and both §2b and §3 caps still allow it.
 
-### 5a. Sentiment is a VETO, never a trigger — recommended change
+### 5a. Sentiment is a VETO, never a trigger
 
 The original plan required technicals **and** sentiment to *agree* before
-entering. **I recommend replacing that with an asymmetric rule:**
-technicals may trigger an entry; sentiment may only **block** one. Positive
-sentiment alone can never cause a trade.
+entering. **This file replaces that with an asymmetric rule, implemented
+and enforced in code, not merely proposed:** technicals may trigger an
+entry; sentiment may only **block** one. Positive sentiment alone can
+never cause a trade. Enforced independently in three places — the
+decision-time semantic validator (`run_backtest.py`), the trade-journal's
+own field validation (`trade-journal-mcp/server.py`), and this file's own
+authority over `AGENTS.md`'s recorded reasoning — so this can never
+silently regress in only one of them.
 
 Three reasons:
 

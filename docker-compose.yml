@@ -21,7 +21,19 @@
 #
 services:
   gateway:
-    image: nousresearch/hermes-agent:latest
+    # Pinned by digest (2026-08-28) -- Hermes Agent v0.20.0 (2026.8.3), the
+    # exact image confirmed working end to end with the locked
+    # openai-codex / gpt-5.4-mini configuration throughout this project
+    # (see HANDOFF.md). `:latest` is a MOVING tag -- any future `docker
+    # compose pull`/rebuild could silently swap in a newer Hermes release
+    # (the real one on record is v0.20.6, six patches ahead) mid-training,
+    # with no diff to review and no way to know reproducibility broke
+    # until something behaves differently. Digest-pinning makes a rebuild
+    # from this file reproduce the EXACT same image bytes, always. To
+    # deliberately upgrade later: pull the new tag, confirm it behaves
+    # identically (this project's own smoke-test discipline), then update
+    # this digest as its own reviewed change -- never silently.
+    image: nousresearch/hermes-agent@sha256:7052fcafb84acaf0d93f78510a51c344ca2041d4ba7dda9dca67660f817309c4
     container_name: hermes-trading-agent
     restart: unless-stopped
     networks:
@@ -148,7 +160,10 @@ services:
   # (not 0.0.0.0) so nothing outside this machine can reach it -- no build,
   # no framework, just python's stdlib http.server over the existing file.
   dashboard:
-    image: python:3.12-slim
+    # Pinned by digest (2026-08-28) -- see gateway's comment above for why;
+    # same currently-installed python:3.12-slim digest as every project
+    # Dockerfile's FROM line, for one consistent base across the stack.
+    image: python@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65
     container_name: hermes-trading-agent-dashboard
     restart: unless-stopped
     working_dir: /srv

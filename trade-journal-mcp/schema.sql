@@ -72,6 +72,15 @@ CREATE TABLE IF NOT EXISTS trades (
     -- §6c: source-of-truth timestamps for whatever data justified this
     -- decision (technical/sentiment feed timestamps), not just created_at.
     data_timestamps     JSONB,
+    -- Which backtest run this row belongs to (NULL for live -- a run is a
+    -- backtest-only concept). Filtering, not identity: decision_id is
+    -- already the real idempotency key. Lets the dashboard and reflection
+    -- retrieval show only the CURRENT/selected run's trades instead of
+    -- also surfacing a discarded prior run's rows that share the same Neon
+    -- database. A fresh uuid4 per run (run_backtest.py), persisted in
+    -- backtest_state.json so a resumed (not reset) run keeps writing under
+    -- the same id.
+    run_id              UUID,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -99,6 +108,16 @@ CREATE TABLE IF NOT EXISTS insight_log (
     -- and then repeated forever. Shown alongside the insight so its weight
     -- is visible rather than assumed. Nullable: pre-dates this column.
     sample_size   INTEGER,
+    -- Same run-filtering purpose as trades.run_id -- NULL for live.
+    run_id        UUID,
+    -- Deterministic uuid5(run_id, day_index) for a backtest reflection;
+    -- NULL for live (no cycle concept there). UNIQUE (Postgres allows
+    -- unlimited NULLs in a UNIQUE constraint, so live rows are unaffected)
+    -- so retrying an already-completed cycle can never double-write the
+    -- same reflection -- at most one insight is ever written per cycle by
+    -- construction (run_backtest.py's is_reflection_day branch), so this
+    -- is a real invariant, not an arbitrary constraint.
+    cycle_id      UUID UNIQUE,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -123,6 +142,22 @@ CREATE TABLE IF NOT EXISTS agent_activity (
     -- there is no other way to separate backtest narration from live
     -- narration once live cron exists and both start writing here.
     mode          TEXT CHECK (mode IN ('backtest', 'live')),
+    -- Run/cycle filtering, same purpose as trades.run_id/insight_log.cycle_id
+    -- above. Not unique here -- many activity rows legitimately share one
+    -- cycle_id (cycle_start, reasoning, order_queued, ...). Duplicate
+    -- narration on a retried-but-already-succeeded cycle is prevented at
+    -- the call site instead (run_backtest.py only re-narrates when the
+    -- cycle's snapshot INSERT was genuinely new -- see record_snapshot_once).
+    -- total_tokens/hermes_calls_used: real usage as of a FAILED cycle
+    -- attempt (event_type='cycle_failed') -- a failed attempt still burns
+    -- real tokens/quota and the dashboard must show that real state, not
+    -- just an error string with no numbers behind it. NULL on every other
+    -- event_type; not overloading trades/portfolio_snapshots' meaning with
+    -- a fake equity row for something that never actually completed.
+    run_id        UUID,
+    cycle_id      UUID,
+    total_tokens  INTEGER,
+    hermes_calls_used INTEGER,
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -175,6 +210,17 @@ CREATE TABLE IF NOT EXISTS portfolio_snapshots (
     -- one full snapshot per cycle matches how this table already works,
     -- and open positions rarely exceed RULES.md §3's cap of 8.
     open_positions_detail JSONB,
+    -- Run/cycle identity -- NULL for live. cycle_id is deterministic
+    -- (uuid5(run_id, day_index), run_backtest.py) and UNIQUE: exactly one
+    -- successful snapshot can ever exist per (run, simulated day),
+    -- enforced by the database, not just by the harness's own control
+    -- flow. This is what makes "retrying a failed day cannot duplicate a
+    -- successful snapshot" a real guarantee rather than a hope -- the
+    -- INSERT itself is `ON CONFLICT (cycle_id) DO NOTHING`, and whether a
+    -- row actually came back is what run_backtest.py uses to decide
+    -- whether to also (re-)write that cycle's activity narration/insight.
+    run_id          UUID,
+    cycle_id        UUID UNIQUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -233,3 +279,31 @@ ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS api_calls INTEGER;
 ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS hermes_calls_used INTEGER;
 ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS weekly_budget INTEGER;
 ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS open_positions_detail JSONB;
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-08-28, second pass) -- final pre-training correctness
+-- pass: run/cycle identity + idempotency, queue-time journaling, decision-
+-- time risk visibility. Additive only, same idempotent ADD COLUMN pattern
+-- as above.
+-- ---------------------------------------------------------------------------
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS run_id UUID;
+
+ALTER TABLE insight_log ADD COLUMN IF NOT EXISTS run_id UUID;
+ALTER TABLE insight_log ADD COLUMN IF NOT EXISTS cycle_id UUID;
+DO $$ BEGIN
+    ALTER TABLE insight_log ADD CONSTRAINT insight_log_cycle_id_key UNIQUE (cycle_id);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+ALTER TABLE agent_activity ADD COLUMN IF NOT EXISTS run_id UUID;
+ALTER TABLE agent_activity ADD COLUMN IF NOT EXISTS cycle_id UUID;
+ALTER TABLE agent_activity ADD COLUMN IF NOT EXISTS total_tokens INTEGER;
+ALTER TABLE agent_activity ADD COLUMN IF NOT EXISTS hermes_calls_used INTEGER;
+
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS run_id UUID;
+ALTER TABLE portfolio_snapshots ADD COLUMN IF NOT EXISTS cycle_id UUID;
+DO $$ BEGIN
+    ALTER TABLE portfolio_snapshots ADD CONSTRAINT portfolio_snapshots_cycle_id_key UNIQUE (cycle_id);
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id);
+CREATE INDEX IF NOT EXISTS idx_agent_activity_run_cycle ON agent_activity(run_id, cycle_id);

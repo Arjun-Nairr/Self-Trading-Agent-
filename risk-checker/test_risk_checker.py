@@ -242,6 +242,75 @@ def main():
     assert len(verdict.violations) >= 4, verdict.violations
     print(f"  ok      multiple violations all reported ({len(verdict.violations)} at once)")
 
+    # -- 2026-08-28 pre-training pass: one-lot model, fail-closed on bad
+    #    numbers, and decision-time vs. execution-time timing separation --
+    held90 = [Position(ticker="AAPL", quantity=90, market_value=9_000.0)]
+
+    # §9.1: a partial discretionary SELL is rejected outright -- only a
+    # full-quantity exit is allowed. Equal-or-more (a full or over-sized
+    # exit) is unaffected by this rule (over-selling is still §1).
+    verdict = check_trade(
+        _trade(action="SELL", quantity=30, stop_price=None, target_price=None),
+        _ctx(positions=held90),
+    )
+    assert not verdict.allowed and any("§9.1" in v for v in verdict.violations)
+    verdict = check_trade(
+        _trade(action="SELL", quantity=90, stop_price=None, target_price=None),
+        _ctx(positions=held90),
+    )
+    assert verdict.allowed, f"a full exit must still be allowed: {verdict.violations}"
+    print("  ok      §9.1 partial discretionary SELL rejected; full exit still allowed")
+
+    # Non-finite / non-positive equity, cash, entry_price, stop_price, and
+    # target_price must all fail CLOSED -- not silently pass (a NaN
+    # compares False against every > / < check) and not crash through a
+    # ZeroDivisionError.
+    nan, inf = float("nan"), float("inf")
+    for bad_equity in (0.0, -100.0, nan, inf):
+        v = check_trade(_trade(), _ctx(account={"equity": bad_equity}))
+        assert not v.allowed, f"equity={bad_equity} should fail closed"
+    for bad_cash in (nan, inf, -inf):
+        v = check_trade(_trade(), _ctx(account={"cash": bad_cash}))
+        assert not v.allowed, f"cash={bad_cash} should fail closed"
+    for bad_price in (0.0, -50.0, nan, inf):
+        v = check_trade(_trade(entry_price=bad_price), _ctx())
+        assert not v.allowed, f"entry_price={bad_price} should fail closed"
+    for bad_stop in (0.0, -1.0, nan, inf):
+        v = check_trade(_trade(stop_price=bad_stop), _ctx())
+        assert not v.allowed, f"stop_price={bad_stop} should fail closed"
+    for bad_target in (0.0, -1.0, nan, inf):
+        v = check_trade(_trade(target_price=bad_target), _ctx())
+        assert not v.allowed, f"target_price={bad_target} should fail closed"
+    v = check_trade(_trade(quantity=nan), _ctx())
+    assert not v.allowed, "NaN quantity should fail closed"
+    print("  ok      non-finite/non-positive equity, cash, prices, and quantity all fail closed")
+
+    # Unknown §7 timing while the market is reported open fails closed
+    # (previously silently skipped the buffer check entirely).
+    v = check_trade(_trade(), _ctx(clock={"minutes_since_open": None, "minutes_until_close": None}))
+    assert not v.allowed and any("§7" in x for x in v.violations)
+    print("  ok      §7 unknown timing (market open, minutes unknown) fails closed")
+
+    # validate_timing=False (decision-time proposal validation): skips §7
+    # entirely -- a trade that would be blocked ONLY by §7 (closed market,
+    # inside a buffer, or unknown timing) is approved; every OTHER rule
+    # still applies in full, including on the exit path.
+    v = check_trade(_trade(), _ctx(clock={"is_open": False}), validate_timing=False)
+    assert v.allowed, f"validate_timing=False must skip §7 entirely: {v.violations}"
+    v = check_trade(_trade(), _ctx(clock={"minutes_since_open": 0}), validate_timing=False)
+    assert v.allowed, f"validate_timing=False must skip the open buffer: {v.violations}"
+    v = check_trade(
+        _trade(action="SELL", stop_price=None, target_price=None),
+        _ctx(positions=held90, clock={"is_open": False}), validate_timing=False,
+    )
+    assert v.allowed, f"validate_timing=False must skip §7 on exits too: {v.violations}"
+    # But a real violation of anything else is still caught with timing off.
+    v = check_trade(
+        _trade(ticker="TSLA"), _ctx(clock={"is_open": False}), validate_timing=False,
+    )
+    assert not v.allowed and any("§1" in x for x in v.violations)
+    print("  ok      validate_timing=False skips only §7, every other rule still enforced")
+
     print("PASS: risk checker enforces RULES.md and keeps exits open")
 
 

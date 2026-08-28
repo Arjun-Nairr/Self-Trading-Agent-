@@ -52,13 +52,14 @@ Usage:
 import argparse
 import copy
 import json
+import math
 import os
 import re
 import subprocess
 import sys
 import tempfile
 import uuid
-from dataclasses import dataclass, field, replace as dataclasses_replace
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 from typing import Callable
@@ -224,6 +225,15 @@ class QueuedOrder:
     against lookahead. `decision` carries the raw Hermes response dict
     (confidence, primary_signal, reasoning, ...) needed to journal the
     eventual fill honestly.
+
+    `decision_id` (2026-08-28 pre-training pass): generated and journaled
+    (status='pending') the INSTANT this order is queued -- see
+    record_queued_decision -- not only once it fills. The SAME id is
+    reused, never regenerated, when this order is resolved the next
+    trading day (resolve_trade_fill / resolve_trade_rejection), so the
+    journal has one continuous row per intended decision from proposal to
+    outcome, exactly as the risk-checker's own risk-check activity should
+    link back to it.
     """
     ticker: str
     alias: str
@@ -234,6 +244,7 @@ class QueuedOrder:
     entry_price: float                # Hermes' original guess -- audit only, never used to fill
     queued_day_index: int
     decision: dict
+    decision_id: str
 
 
 @dataclass
@@ -325,7 +336,16 @@ class Portfolio:
             # .get(): old state files predate these fields.
             cycles_since_reflection=d.get("cycles_since_reflection", 0),
             trading_days_elapsed=d.get("trading_days_elapsed", 0),
-            pending_orders=[QueuedOrder(**o) for o in d.get("pending_orders", [])],
+            # .get() on decision_id: old state files (pre 2026-08-28)
+            # predate queue-time journaling. "" is a safe placeholder here
+            # (never a real uuid5 output) -- any such leftover order was
+            # never journaled at queue time under the old code either, and
+            # will simply get a fresh decision_id path on its next
+            # resolution rather than crash on resume.
+            pending_orders=[
+                QueuedOrder(**{**o, "decision_id": o.get("decision_id", "")})
+                for o in d.get("pending_orders", [])
+            ],
         )
 
 
@@ -587,18 +607,26 @@ def simulate_trading_day(
             events.append({"stage": "queued_sell", "ticker": order.ticker, "kind": "rejected",
                            "reason": outcome.reason, "order": order})
             continue
-        # Bug fix (2026-08-25): a PARTIAL sell (order.quantity < holding.
-        # quantity) must credit cash for only the shares actually sold --
-        # crediting the whole position's value inflated running_cash (and
-        # therefore the 09:45 equity/cash context a later queued BUY gets
-        # risk-checked against) by the value of shares that were never
-        # sold and are still held.
-        executed_quantity = min(order.quantity, holding.quantity)
-        running_cash += executed_quantity * open_bar["open"]  # unslipped reference only
-        if order.quantity >= holding.quantity:
-            del remaining[order.ticker]
-        else:
-            remaining[order.ticker] = dataclasses_replace(holding, quantity=holding.quantity - order.quantity)
+        # One-lot model (RULES.md §9.1, 2026-08-28 pre-training pass, item
+        # 7): a discretionary SELL must close the WHOLE position. The risk
+        # checker (resolve_queued_order, just above) rejects a partial
+        # SELL outright -- both here at execution time AND at decision
+        # time before it was ever queued (run_day's decision-time risk
+        # check) -- so by the time a queued SELL reaches this point it is
+        # structurally guaranteed to be a full exit. Asserted, not
+        # silently handled with a partial-credit branch: a real regression
+        # in either check should surface immediately as a loud failure,
+        # not quietly resume crediting a partial fill. An involuntary
+        # BROKER partial fill (fewer shares filled than requested by
+        # Alpaca) is a separate, unmodelled LIVE-mode limitation -- see
+        # HANDOFF.md -- this assertion says nothing about that case.
+        assert order.quantity == holding.quantity, (
+            f"{order.ticker}: queued SELL quantity {order.quantity} != held "
+            f"{holding.quantity} -- the risk checker should have rejected "
+            "this partial SELL before it ever reached execution"
+        )
+        running_cash += order.quantity * open_bar["open"]  # unslipped reference only
+        del remaining[order.ticker]
         events.append({"stage": "queued_sell", "ticker": order.ticker, "kind": "fill",
                        "order": order, "bar": open_bar, "bar_time": "09:30"})
 
@@ -853,13 +881,23 @@ print(json.dumps(place_order(
     return json_from(run_in("execution-sim", script))
 
 
-def record_trade(decision: dict, real_ticker: str, fill: dict, decision_id: str) -> str:
+def record_trade(decision: dict, real_ticker: str, fill: dict, decision_id: str,
+                 run_id: str | None = None) -> str:
     """Journal the REAL ticker, never the alias — the mask exists to keep
     Hermes honest, not to obscure our own records.
 
     decision_id is now REQUIRED, deterministic (see make_decision_id), and
     supplied by the caller rather than generated server-side -- Phase 0
-    repair, so retrying a failed day cannot double-journal this trade."""
+    repair, so retrying a failed day cannot double-journal this trade.
+
+    Journals a decision AND its immediately-known outcome in one call --
+    correct for anything that decides and resolves in the same instant
+    (kept for test_execution_path.py's own direct coverage of that shape).
+    The QUEUED discretionary flow (decide today, resolve tomorrow) uses
+    the split record_queued_decision / resolve_trade_fill /
+    resolve_trade_rejection instead -- see run_day -- since a full day can
+    separate the two halves and each must be independently retryable.
+    """
     script = f'''
 import asyncio, json
 from server import _record_decision, _record_execution_result
@@ -879,6 +917,7 @@ async def main():
         strategy_notes={decision.get("reasoning", "")[:900]!r},
         stop_price={decision.get("stop_price")!r},
         target_price={decision.get("target_price")!r},
+        run_id={run_id!r},
     )
     await _record_execution_result(
         d["decision_id"], status={fill["status"]!r},
@@ -896,7 +935,92 @@ asyncio.run(main())
     return json_from(run_in("trade-journal", script))["decision_id"]
 
 
-def record_exit(real_ticker: str, quantity: int, exit_price: float, reason: str, decision_id: str) -> str:
+def record_queued_decision(decision: dict, real_ticker: str, decision_id: str,
+                           run_id: str | None = None) -> None:
+    """Journal a QUEUED discretionary decision the INSTANT it is queued --
+    status stays 'pending' (the trades table's own default) until the next
+    trading day resolves it (resolve_trade_fill / resolve_trade_rejection).
+
+    2026-08-28 pre-training pass: previously nothing was journaled for a
+    queued order until (and unless) it filled the next day -- a decision
+    that got REJECTED at resolution left no trades row at all, only a free-
+    text activity line, and the fill path re-derived the whole decision
+    from scratch with a DIFFERENT decision_id (kind="queued_fill") than
+    anything a decision-time risk-check activity line could have linked
+    to. Journaling here, with the id the caller already generated at
+    decision time, is what makes that link real."""
+    script = f'''
+import asyncio
+from server import _record_decision
+
+async def main():
+    await _record_decision(
+        decision_id={decision_id!r},
+        ticker={real_ticker!r}, action={decision["action"]!r},
+        intended_quantity={int(decision["quantity"])},
+        intended_notional={float(decision["quantity"]) * float(decision["entry_price"])},
+        order_type="MARKET",
+        confidence={int(decision.get("confidence", 3))},
+        primary_signal={decision.get("primary_signal", "technical")!r},
+        technical_basis={decision.get("technical_basis") or "multiple"!r},
+        expected_reward_risk={float(decision.get("expected_reward_risk", 2.0))},
+        invalidation_condition={decision.get("invalidation_condition", "n/a")!r},
+        strategy_notes={decision.get("reasoning", "")[:900]!r},
+        stop_price={decision.get("stop_price")!r},
+        target_price={decision.get("target_price")!r},
+        run_id={run_id!r},
+    )
+
+asyncio.run(main())
+'''
+    run_in("trade-journal", script)
+
+
+def resolve_trade_fill(decision_id: str, fill: dict) -> None:
+    """Resolve an already-journaled queued decision to its real fill --
+    the SAME decision_id record_queued_decision used, never a new one.
+    Idempotent the same way record_execution_result always has been: only
+    resolves a row still 'pending'."""
+    script = f'''
+import asyncio
+from server import _record_execution_result
+
+async def main():
+    await _record_execution_result(
+        {decision_id!r}, status={fill["status"]!r},
+        broker_order_id={fill.get("broker_order_id")!r},
+        fill_price={fill.get("fill_price")!r},
+        fill_quantity={fill.get("fill_quantity")!r},
+        execution_mode="backtest",
+    )
+
+asyncio.run(main())
+'''
+    run_in("trade-journal", script)
+
+
+def resolve_trade_rejection(decision_id: str, reason: str) -> None:
+    """Resolve an already-journaled queued decision to a REJECTION --
+    never fabricates fill_price/fill_quantity (both stay NULL, the
+    correct honest state for something that never actually filled)."""
+    script = f'''
+import asyncio
+from server import _record_execution_result
+
+async def main():
+    await _record_execution_result(
+        {decision_id!r}, status="rejected",
+        rejection_reason={reason[:900]!r},
+        execution_mode="backtest",
+    )
+
+asyncio.run(main())
+'''
+    run_in("trade-journal", script)
+
+
+def record_exit(real_ticker: str, quantity: int, exit_price: float, reason: str, decision_id: str,
+                run_id: str | None = None) -> str:
     """Journal a mechanical exit (stop/target/time-stop) as a real SELL row.
 
     Found missing by actually checking the dashboard against real data, not
@@ -927,6 +1051,7 @@ async def main():
         expected_reward_risk=1.0,
         invalidation_condition="n/a -- mechanical exit, not a discretionary decision",
         strategy_notes={f"Mechanical exit: {reason}"!r},
+        run_id={run_id!r},
     )
     await _record_execution_result(
         d["decision_id"], status="filled",
@@ -940,7 +1065,8 @@ asyncio.run(main())
     return json_from(run_in("trade-journal", script))["decision_id"]
 
 
-def log_activity(events: list[tuple[str, str, str | None]]) -> None:
+def log_activity(events: list[tuple[str, str, str | None]],
+                 run_id: str | None = None, cycle_id: str | None = None) -> None:
     """Narrate a cycle's real steps on Hermes' behalf.
 
     Backtest cycles never call log_activity themselves -- Hermes doesn't
@@ -952,6 +1078,11 @@ def log_activity(events: list[tuple[str, str, str | None]]) -> None:
     fold would just be blank. The harness knows every real step already;
     this narrates them the same way Hermes would live, in one batched call
     per cycle rather than one container exec per event.
+
+    run_id/cycle_id tag every row in the batch -- see record_snapshot_once's
+    docstring for why THIS function is only ever called once the cycle's
+    snapshot write is confirmed genuinely new (never on a retry of an
+    already-fully-recorded day).
     """
     if not events:
         return
@@ -965,38 +1096,76 @@ from server import _log_activity
 
 async def main():
     for event_type, description, decision_id in [{rows}]:
-        await _log_activity(event_type, description, decision_id, mode="backtest")
+        await _log_activity(event_type, description, decision_id, mode="backtest",
+                            run_id={run_id!r}, cycle_id={cycle_id!r})
 
 asyncio.run(main())
 '''
     run_in("trade-journal", script)
 
 
-def record_snapshot(day_label: str, equity: float, cash: float,
-                    exposure_pct: float, drawdown_pct: float,
-                    open_positions: int, usage: dict | None = None,
-                    pacer: "QuotaPacer | None" = None,
-                    positions_detail: list[dict] | None = None) -> None:
-    """Write once per cycle, after marking positions to market. This is the
-    only source of equity-over-time data the dashboard has -- the harness
-    otherwise only ever tracks its portfolio in the local state file, which
-    a browser reading Neon has no way to see.
+def log_cycle_failure(day_label: str, error_text: str, run_id: str | None,
+                      usage: dict | None, pacer: "QuotaPacer | None") -> None:
+    """Best-effort dashboard visibility for a FAILED cycle attempt --
+    called from _run_cycle_or_halt, separately from log_activity's batched
+    success-path narration (never gated behind the snapshot-conflict check
+    that protects successful-cycle rows from duplication, since a failed
+    attempt is exactly what should remain visible on every attempt, not be
+    deduplicated away).
 
-    usage: this cycle's real --usage-file totals (see ask_hermes). pacer:
-    the live QuotaPacer, used to read the real used_this_week()/budget at
-    write time -- the dashboard's single source of truth for quota,
-    matching this project's own pacer rather than a second estimate.
-    positions_detail: per-open-position dicts as the harness itself sees
-    them this cycle (ticker/qty/entry/current/stop/target/days_held/P&L)."""
+    usage/pacer, when available (a real _call_hermes may have already run
+    before whatever failed afterward -- JSON parse, semantic validation,
+    a journal write), are real numbers, not estimates: this cycle's actual
+    token spend and the pacer's actual current count at the moment of
+    failure, exactly the state the dashboard is required to show for a
+    failed attempt."""
+    usage = usage or {}
+    quota_used = pacer.used_this_week() if pacer is not None else None
+    script = f'''
+import asyncio
+from server import _log_activity
+
+async def main():
+    await _log_activity(
+        "cycle_failed", {f"{day_label}: {error_text}"[:900]!r}, None, mode="backtest",
+        run_id={run_id!r}, total_tokens={usage.get("total_tokens")!r},
+        hermes_calls_used={quota_used!r},
+    )
+
+asyncio.run(main())
+'''
+    run_in("trade-journal", script)
+
+
+def record_snapshot_once(day_label: str, equity: float, cash: float,
+                         exposure_pct: float, drawdown_pct: float,
+                         open_positions: int, run_id: str, cycle_id: str,
+                         usage: dict | None = None,
+                         pacer: "QuotaPacer | None" = None,
+                         positions_detail: list[dict] | None = None) -> bool:
+    """Write this cycle's snapshot -- AT MOST ONCE, ever, per (run_id,
+    day_index) -- and report whether this call was the one that actually
+    wrote it. This IS the cycle-success/idempotency mechanism (2026-08-28
+    pre-training pass): `cycle_id` is UNIQUE at the database level, the
+    INSERT is `ON CONFLICT (cycle_id) DO NOTHING RETURNING *`, and the
+    caller (run_day) only proceeds to write this cycle's activity
+    narration and reflection insight when this returns True -- a retry of
+    a day that ALREADY has a snapshot (the earlier attempt fully
+    succeeded, but something after it, e.g. the local state-file write,
+    failed) returns False and the caller correctly skips re-narrating.
+
+    usage/pacer: same real-usage/real-quota purpose as the prior
+    record_snapshot. positions_detail: per-open-position dicts as the
+    harness itself sees them this cycle."""
     usage = usage or {}
     quota_used = pacer.used_this_week() if pacer is not None else None
     quota_budget = pacer.budget if pacer is not None else None
     script = f'''
-import asyncio
+import asyncio, json
 from server import _record_portfolio_snapshot
 
 async def main():
-    await _record_portfolio_snapshot(
+    row = await _record_portfolio_snapshot(
         mode="backtest", equity={equity!r}, cash={cash!r},
         exposure_pct={exposure_pct!r}, drawdown_pct={drawdown_pct!r},
         day_label={day_label!r}, open_positions={open_positions},
@@ -1009,19 +1178,26 @@ async def main():
         hermes_calls_used={quota_used!r},
         weekly_budget={quota_budget!r},
         open_positions_detail={positions_detail!r},
+        run_id={run_id!r}, cycle_id={cycle_id!r},
     )
+    print(json.dumps({{"inserted": row is not None}}))
 
 asyncio.run(main())
 '''
-    run_in("trade-journal", script)
+    return json_from(run_in("trade-journal", script))["inserted"]
 
 
-def fetch_recent_insights(limit: int = 2) -> list[dict]:
+def fetch_recent_insights(limit: int = 2, run_id: str | None = None) -> list[dict]:
     """The feed-back half of reflection: past insight text, injected into
     EVERY prompt (not just reflection days) so learning actually changes
     later behaviour. Writing to insight_log without this would just be
     journaling into a void -- the whole point of "self-learning" is that
     cycle N+5 reasons differently because of what cycle N produced.
+
+    Filtered to mode='backtest' AND this run_id (2026-08-28 pre-training
+    pass) -- previously unfiltered, meaning a DISCARDED prior run's
+    reflections (or, once live cron exists, a live insight) could
+    silently feed into this run's prompts.
 
     Returns dicts, not bare strings, so the caller can show sample_size
     alongside the text -- an insight drawn from 2 trades reads with the
@@ -1032,7 +1208,10 @@ import asyncio, json
 from server import _get_insight_history
 
 async def main():
-    rows = await _get_insight_history(cycle_type="weekly_reflection", limit={limit})
+    rows = await _get_insight_history(
+        cycle_type="weekly_reflection", limit={limit},
+        mode="backtest", run_id={run_id!r},
+    )
     print(json.dumps(
         [{{"text": r["insight_text"], "sample_size": r["sample_size"]}} for r in rows],
         default=str,
@@ -1043,39 +1222,54 @@ asyncio.run(main())
     return json_from_list(run_in("trade-journal", script))
 
 
-def record_insight(text: str, sample_size: int) -> None:
+def record_insight(text: str, sample_size: int, run_id: str, cycle_id: str) -> bool:
+    """Returns whether this call actually wrote the insight (see
+    record_snapshot_once -- insight_log.cycle_id is UNIQUE the same way)."""
     script = f'''
-import asyncio
+import asyncio, json
 from server import _log_insight
 
 async def main():
-    await _log_insight("weekly_reflection", {text!r}, mode="backtest", sample_size={sample_size})
+    row = await _log_insight(
+        "weekly_reflection", {text!r}, mode="backtest", sample_size={sample_size},
+        run_id={run_id!r}, cycle_id={cycle_id!r},
+    )
+    print(json.dumps({{"inserted": row is not None}}))
 
 asyncio.run(main())
 '''
-    run_in("trade-journal", script)
+    return json_from(run_in("trade-journal", script))["inserted"]
 
 
-def fetch_recent_closed_trades(masking: "RunMasking", limit: int = 8) -> list[dict]:
+def fetch_recent_closed_trades(masking: "RunMasking", run_id: str, limit: int = 8) -> list[dict]:
     """Masked review material for a reflection cycle -- real tickers never
     leave this function. Pairs BUY/SELL by ticker (RULES.md §9.1 guarantees
     one open lot per ticker, so simple sequential pairing is exact, not an
     approximation -- same logic as the dashboard's pairTrades, in Python
     here since this runs harness-side, not in a browser).
+
+    2026-08-28 pre-training pass, two real fixes:
+      1. Filtered to THIS run_id (previously any past backtest run's
+         trades, including a discarded one, could feed into reflection).
+      2. Sorted by the exit's OWN timestamp (updated_at -- when the SELL
+         row was actually resolved to 'filled'), globally across every
+         ticker, before taking the most recent `limit` -- previously
+         grouped by ticker first, so the final slice was "the last N in
+         ticker-iteration order," not truly the N most recently closed
+         positions overall.
     """
     script = f'''
 import asyncio, json
 from server import _get_trade_history
 
 async def main():
-    rows = await _get_trade_history(limit=200)
-    rows = [r for r in rows if r.get("execution_mode") == "backtest"]
+    rows = await _get_trade_history(limit=200, execution_mode="backtest", run_id={run_id!r})
     print(json.dumps(rows, default=str))
 
 asyncio.run(main())
 '''
     rows = json_from_list(run_in("trade-journal", script))
-    rows.sort(key=lambda r: r["created_at"])  # oldest first, for correct pairing
+    rows.sort(key=lambda r: r["created_at"])  # oldest first, for correct BUY->SELL pairing
 
     by_ticker: dict[str, list[dict]] = {}
     for r in rows:
@@ -1098,9 +1292,13 @@ asyncio.run(main())
                     "exit_reason": (t.get("strategy_notes") or "").replace("Mechanical exit: ", ""),
                     "pnl": round(pnl, 2),
                     "won": pnl >= 0,
+                    # The SELL row's own resolution time -- what "most
+                    # recently closed" actually means, not insertion order.
+                    "_exit_time": t["updated_at"],
                 })
                 entry = None
-    return closed[-limit:]
+    closed.sort(key=lambda c: c["_exit_time"])  # oldest close first, globally
+    return [{k: v for k, v in c.items() if k != "_exit_time"} for c in closed[-limit:]]
 
 
 def json_from_list(text: str) -> list:
@@ -1108,6 +1306,166 @@ def json_from_list(text: str) -> list:
     if start == -1 or end == -1:
         raise ValueError(f"no JSON array found in:\n{text[:500]}")
     return json.loads(text[start : end + 1])
+
+
+# --------------------------------------------------------------------------
+# semantic response validation -- pure, no I/O (2026-08-28 pre-training pass)
+#
+# json_from() proves the reply PARSES as JSON; it says nothing about
+# whether the object actually has the shape a cycle can safely act on. A
+# syntactically valid but semantically empty/wrong reply (no "decisions"
+# key, a BUY with primary_signal="sentiment", a self-reported reward:risk
+# that doesn't match the trade's own stop/target math, a reflection day
+# with no reflection) used to sail straight through and either silently do
+# the wrong thing downstream or blow up much later (e.g. record_trade's
+# own field validation, a full day after the decision was queued and a
+# real quota slot already spent). This is the missing gate: validated
+# BEFORE a decision is ever queued, with the SAME one-retry-then-fail-
+# closed contract json_from already had for a parse failure -- see
+# ask_hermes.
+# --------------------------------------------------------------------------
+
+class ResponseValidationError(ValueError):
+    """A syntactically valid JSON reply that fails semantic validation."""
+
+
+def _finite_positive(x) -> bool:
+    return (
+        isinstance(x, (int, float)) and not isinstance(x, bool)
+        and math.isfinite(x) and x > 0
+    )
+
+
+_VALID_PRIMARY_SIGNALS = {"technical", "sentiment", "both", "other"}
+_VALID_TECHNICAL_BASES = {"rsi", "macd", "support_resistance", "trend", "multiple", "other"}
+
+
+def _validate_decision_shape(d: dict, i: int) -> None:
+    """One decision object from the 'decisions' list. Mirrors trade-
+    journal-mcp's own _validate_decision_fields (same rules -- BUY can
+    never be primary_signal='sentiment', 'other' needs an explanation) plus
+    the checks that module can't make: this is the ONLY point in the
+    pipeline that ever sees Hermes' own proposed stop/target/entry
+    together with its self-reported expected_reward_risk, so this is the
+    only place that can catch a self-report that doesn't match its own
+    trade's math."""
+    prefix = f"decision[{i}]"
+    if not isinstance(d, dict):
+        raise ResponseValidationError(f"{prefix}: not a JSON object")
+
+    alias = d.get("alias")
+    if not isinstance(alias, str) or not alias.strip():
+        raise ResponseValidationError(f"{prefix}: missing/blank alias")
+    tag = f"{prefix} ({alias})"
+
+    action = d.get("action")
+    if action not in ("BUY", "SELL"):
+        raise ResponseValidationError(f"{tag}: action must be BUY or SELL, got {action!r}")
+
+    quantity = d.get("quantity")
+    if (
+        not isinstance(quantity, (int, float)) or isinstance(quantity, bool)
+        or not math.isfinite(quantity) or quantity != int(quantity) or int(quantity) <= 0
+    ):
+        raise ResponseValidationError(f"{tag}: quantity must be a positive integer, got {quantity!r}")
+
+    if not _finite_positive(d.get("entry_price")):
+        raise ResponseValidationError(f"{tag}: entry_price must be a finite positive number, got {d.get('entry_price')!r}")
+
+    confidence = d.get("confidence")
+    if (
+        not isinstance(confidence, (int, float)) or isinstance(confidence, bool)
+        or not (1 <= confidence <= 5)
+    ):
+        raise ResponseValidationError(f"{tag}: confidence must be 1-5, got {confidence!r}")
+
+    primary_signal = d.get("primary_signal")
+    if primary_signal not in _VALID_PRIMARY_SIGNALS:
+        raise ResponseValidationError(f"{tag}: invalid primary_signal {primary_signal!r}")
+    # RULES.md §5a: sentiment may only VETO an entry, never trigger one.
+    if action == "BUY" and primary_signal == "sentiment":
+        raise ResponseValidationError(
+            f"{tag}: BUY cannot have primary_signal='sentiment' -- RULES.md §5a, "
+            "sentiment may only veto an entry, never trigger one"
+        )
+
+    technical_basis = d.get("technical_basis")
+    needs_basis = primary_signal in ("technical", "both")
+    if needs_basis and technical_basis not in _VALID_TECHNICAL_BASES:
+        raise ResponseValidationError(
+            f"{tag}: technical_basis required when primary_signal={primary_signal!r}, got {technical_basis!r}"
+        )
+
+    invalidation = d.get("invalidation_condition")
+    if not isinstance(invalidation, str) or not invalidation.strip():
+        raise ResponseValidationError(f"{tag}: invalidation_condition is required and cannot be blank")
+
+    reasoning = d.get("reasoning")
+    if not isinstance(reasoning, str) or not reasoning.strip():
+        raise ResponseValidationError(f"{tag}: reasoning is required and cannot be blank")
+
+    chose_other = primary_signal == "other" or technical_basis == "other"
+    if chose_other and not reasoning.strip():
+        raise ResponseValidationError(f"{tag}: 'other' requires an explanation in reasoning")
+
+    if action != "BUY":
+        return  # stop/target/R:R are entry-only concerns (RULES.md §6a/§6b)
+
+    entry = float(d["entry_price"])
+    if not _finite_positive(d.get("stop_price")):
+        raise ResponseValidationError(f"{tag}: stop_price must be a finite positive number, got {d.get('stop_price')!r}")
+    if not _finite_positive(d.get("target_price")):
+        raise ResponseValidationError(f"{tag}: target_price must be a finite positive number, got {d.get('target_price')!r}")
+    stop, target = float(d["stop_price"]), float(d["target_price"])
+    if stop >= entry:
+        raise ResponseValidationError(f"{tag}: stop_price must be below entry_price for a long")
+    if target <= entry:
+        raise ResponseValidationError(f"{tag}: target_price must be above entry_price for a long")
+
+    if not _finite_positive(d.get("expected_reward_risk")):
+        raise ResponseValidationError(
+            f"{tag}: expected_reward_risk must be a finite positive number, got {d.get('expected_reward_risk')!r}"
+        )
+    actual_rr = (target - entry) / (entry - stop)
+    reported_rr = float(d["expected_reward_risk"])
+    # Generous tolerance -- this only needs to catch a self-report that's
+    # badly wrong (bad arithmetic, a stale number left over from editing
+    # the trade), not cent-level rounding; the real §6b gate is
+    # risk_checker.py's own tolerance, enforced separately and always.
+    if abs(reported_rr - actual_rr) > max(0.25, actual_rr * 0.15):
+        raise ResponseValidationError(
+            f"{tag}: reported expected_reward_risk {reported_rr} does not match "
+            f"the actual entry/stop/target math ({actual_rr:.2f})"
+        )
+
+
+def validate_hermes_response(response, is_reflection_day: bool) -> None:
+    """Raises ResponseValidationError naming exactly what's wrong; callers
+    (ask_hermes) get one corrective retry, then fail closed -- same
+    contract as a JSON parse failure."""
+    if not isinstance(response, dict):
+        raise ResponseValidationError("response is not a JSON object")
+
+    decisions = response.get("decisions")
+    if not isinstance(decisions, list):
+        raise ResponseValidationError("response missing a 'decisions' list")
+
+    if not decisions:
+        reason = response.get("no_action_reason")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ResponseValidationError(
+                "an empty decisions list requires a non-blank, honest no_action_reason"
+            )
+
+    for i, d in enumerate(decisions):
+        _validate_decision_shape(d, i)
+
+    if is_reflection_day:
+        reflection = response.get("reflection")
+        if not isinstance(reflection, str) or not reflection.strip():
+            raise ResponseValidationError(
+                "a reflection-day reply requires a non-blank 'reflection' field"
+            )
 
 
 # --------------------------------------------------------------------------
@@ -1148,6 +1506,19 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
                 f"| now ${p['current_price']:.2f} | stop ${p['stop_price']:.2f} "
                 f"| target ${p['target_price']:.2f} | held {p['days_held']}d"
             )
+            # Fresh point-in-time technicals/news for THIS position -- what
+            # actually makes AGENTS.md §6d's thesis-invalidation check
+            # ("has the signal that justified the entry reversed, or has
+            # genuinely adverse news landed") answerable with real evidence
+            # instead of only the entry/current-price numbers above.
+            t = p.get("tech")
+            if t:
+                lines.append(
+                    f"      RSI {t['rsi']:.1f} ({t['rsi_signal']}) | MACD {t['macd_signal']} "
+                    f"| trend {t['trend']} | outlook {t['outlook']}"
+                )
+            for a in (p.get("news") or [])[:3]:
+                lines.append(f"      news ({a['age_days']}d ago): {a['headline'][:110]}")
     else:
         lines.append("  (none)")
     lines.append("")
@@ -1255,20 +1626,26 @@ def _call_hermes(prompt: str, on_invoked: "Callable[[], None] | None" = None) ->
     return result.stdout, usage
 
 
-def ask_hermes(prompt: str, usage_totals: dict, on_invoked: "Callable[[], None] | None" = None) -> dict:
-    """One retry on malformed JSON — a real failure mode, seen on the very
-    first live cycle (an unescaped quote inside the reasoning text broke the
-    whole object and cost the cycle).
+def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
+               on_invoked: "Callable[[], None] | None" = None) -> dict:
+    """One retry on a malformed OR semantically invalid reply — a real
+    failure mode, seen on the very first live cycle (an unescaped quote
+    inside the reasoning text broke the whole object and cost the cycle).
+    2026-08-28: extended to also cover semantic validation (see
+    validate_hermes_response) with the SAME one-retry-then-fail-closed
+    contract -- a reply that parses as JSON but is missing required fields,
+    proposes a BUY with primary_signal='sentiment', or omits a required
+    reflection is exactly as unusable as one that doesn't parse at all.
 
-    Retrying with the parse error quoted back is cheaper than losing the
+    Retrying with the specific error quoted back is cheaper than losing the
     cycle: a wasted cycle still costs a quota slot AND yields nothing, while
     the retry costs the same slot and usually succeeds. Capped at one — if
-    it cannot produce valid JSON twice, the cycle deserves to fail loudly
-    rather than silently drop a decision.
+    it cannot produce a valid reply twice, the cycle deserves to fail loudly
+    rather than silently drop or fabricate a decision.
 
     usage_totals accumulates across both the original call and a retry (a
     retry is a second real API call and a second real cost -- both must
-    count, not just the one that happened to parse).
+    count, not just the one that happened to validate).
 
     on_invoked: passed straight through to _call_hermes on both the
     original call and the retry -- the caller's callback must itself be
@@ -1286,22 +1663,29 @@ def ask_hermes(prompt: str, usage_totals: dict, on_invoked: "Callable[[], None] 
     raw, usage = _call_hermes(prompt, on_invoked)
     _accumulate(usage)
     try:
-        return json_from(raw)
+        response = json_from(raw)
+        validate_hermes_response(response, is_reflection_day)
+        return response
     except (ValueError, json.JSONDecodeError) as exc:
         retry = (
-            f"{prompt}\n\n---\nYour previous reply was not valid JSON "
-            f"({exc}). Return ONLY the JSON object. Keep every free-text "
-            "field to one short line with no quote characters, apostrophes, "
-            "or line breaks inside it."
+            f"{prompt}\n\n---\nYour previous reply was invalid ({exc}). "
+            "Return ONLY a corrected JSON object satisfying every "
+            "requirement above, including every required field on each "
+            "decision. Keep every free-text field to one short line with "
+            "no quote characters, apostrophes, or line breaks inside it."
         )
         raw2, usage2 = _call_hermes(retry, on_invoked)
         _accumulate(usage2)
-        return json_from(raw2)
+        # A second failure (parse OR validation) propagates uncaught --
+        # fail closed, exactly like the pre-existing JSON-only contract.
+        response2 = json_from(raw2)
+        validate_hermes_response(response2, is_reflection_day)
+        return response2
 
 
 def _execute_exit(working: "Portfolio", ticker: str, quantity: int, entry_price: float,
                   exit_price: float, reason: str, kind: str, run_key: str, day_index: int,
-                  summary: dict, activity: list) -> None:
+                  summary: dict, activity: list, run_id: str | None = None) -> None:
     """Real bookkeeping + journal write for a FULL-quantity mechanical exit
     (opening gap, time-stop, or an intraday-walk stop/target touch) --
     replays one "exit" event from simulate_trading_day's plan against
@@ -1318,8 +1702,45 @@ def _execute_exit(working: "Portfolio", ticker: str, quantity: int, entry_price:
     exit_id = record_exit(
         ticker, quantity, exit_price, reason,
         decision_id=make_decision_id(run_key, day_index, ticker, "SELL", kind),
+        run_id=run_id,
     )
     activity.append(("exit", line, exit_id))
+
+
+def build_decision_time_context(working: "Portfolio", bars: dict[str, dict],
+                                watchlist: list[str], limits_ctx: dict) -> Context:
+    """Context for validating a PROPOSED decision BEFORE it is queued --
+    pure, no I/O (2026-08-28 pre-training pass, item 3). Uses TODAY's known
+    state (equity/cash/positions marked at today's daily close) as a good-
+    faith proxy: the real fill won't happen until tomorrow's real 09:45
+    open, so this is deliberately advisory, not authoritative -- the real
+    gate remains resolve_queued_order's execution-time call against the
+    REAL price, unchanged.
+
+    is_open/minute values are placeholders that are NEVER READ: the caller
+    passes validate_timing=False to check_trade, which skips the §7 block
+    entirely rather than pretending to know a fill time that doesn't exist
+    yet -- see check_trade's own docstring for why faking a clock here
+    would be wrong.
+    """
+    equity = working.equity(bars)
+    return Context(
+        account=AccountState(
+            equity=equity, cash=working.cash,
+            daily_pl_pct=working.pct_since(1), weekly_pl_pct=working.pct_since(5),
+            drawdown_from_peak_pct=working.drawdown_pct(),
+        ),
+        clock=MarketClock(is_open=True, minutes_since_open=None, minutes_until_close=None),
+        positions=[
+            Position(ticker=t, quantity=h.quantity,
+                    market_value=h.quantity * bars.get(t, {}).get("close", h.entry_price))
+            for t, h in working.holdings.items()
+        ],
+        watchlist=watchlist,
+        recent_losses=[p < 0 for p in reversed(working.closed_pnl)],
+        stopped_out_today=working.stopped_out_today,
+        **limits_ctx,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1356,6 +1777,11 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     tickers = [t["symbol"] for t in watchlist]
     summary = {"day": str(day), "exits": [], "decisions": [], "blocked": [], "usage": {}}
     day_label = masking.day_index(day)
+    # Deterministic per (run, day) -- see record_snapshot_once's docstring.
+    # run_key doubles as this run's run_id (main() now generates it as a
+    # real uuid4 and persists it in backtest_state.json -- 2026-08-28, item
+    # 5) -- no separate parameter needed.
+    cycle_id = str(uuid.uuid5(_DECISION_ID_NAMESPACE, f"{run_key}|cycle|{day_index}"))
     activity: list[tuple[str, str, str | None]] = [
         ("cycle_start", f"{day_label} ({day}) — reconciling and fetching data", None)
     ]
@@ -1404,25 +1830,48 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                 _execute_exit(
                     working, ticker, event["quantity"], event["entry_price"], event["exit_price"],
                     event["reason"], event["stage"], run_key, day_index, summary, activity,
+                    run_id=run_key,
                 )
             elif kind == "superseded":
-                line = f"{ticker}: queued {event['order'].action} superseded -- {event['reason']}"
-                activity.append(("order_queued", line, None))
+                order = event["order"]
+                line = f"{ticker}: queued {order.action} superseded -- {event['reason']}"
+                activity.append(("order_queued", line, order.decision_id or None))
+                # The decision was already journaled 'pending' at queue time
+                # (record_queued_decision) -- a superseded order never fills,
+                # so it must still resolve to something other than a
+                # dangling 'pending' row. Treated as a rejection, honestly
+                # reasoned ("superseded"), never a fabricated fill.
+                if order.decision_id:
+                    resolve_trade_rejection(order.decision_id, f"superseded: {event['reason']}")
             elif kind == "rejected":
                 order = event["order"]
                 line = f"{ticker}: queued {order.action} rejected -- {event['reason']}"
                 summary["blocked"].append(line)
-                activity.append(("order_rejected", line, None))
+                activity.append(("order_rejected", line, order.decision_id or None))
+                if order.decision_id:
+                    resolve_trade_rejection(order.decision_id, event["reason"])
             elif kind == "fill":
                 order, bar = event["order"], event["bar"]
                 fill = simulate_fill(order.alias, order.action, order.quantity, bar["open"], bar)
                 if fill["status"] != "filled":
                     line = f"{ticker}: sim {fill['rejection_reason']}"
                     summary["blocked"].append(line)
-                    activity.append(("order_rejected", line, None))
+                    activity.append(("order_rejected", line, order.decision_id or None))
+                    if order.decision_id:
+                        resolve_trade_rejection(order.decision_id, fill["rejection_reason"])
                     continue
-                fill_id = make_decision_id(run_key, day_index, ticker, order.action, "queued_fill")
-                decision_id = record_trade(order.decision, ticker, fill, decision_id=fill_id)
+                # Resolve the SAME decision_id record_queued_decision
+                # already journaled 'pending' at queue time -- never a
+                # fresh id (item 2: one continuous row, proposal to
+                # outcome). Falls back to a fresh journal write only for a
+                # pre-migration pending order resumed from an old state
+                # file (see Portfolio.from_dict's decision_id="" fallback).
+                decision_id = order.decision_id
+                if decision_id:
+                    resolve_trade_fill(decision_id, fill)
+                else:
+                    fallback_id = make_decision_id(run_key, day_index, ticker, order.action, "queued_fill")
+                    decision_id = record_trade(order.decision, ticker, fill, decision_id=fallback_id, run_id=run_key)
                 if order.action == "BUY":
                     cost = fill["fill_price"] * fill["fill_quantity"]
                     working.cash -= cost
@@ -1504,13 +1953,24 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     )
 
     # -- STEP C: gather + mask today's data for Hermes to reason on -------
-    technicals = fetch_technicals(
-        [t for t in tickers if t not in working.holdings], day
-    )
-    news = fetch_news(list(technicals), day)
+    # 2026-08-28 pre-training pass (item 4): fresh point-in-time technicals
+    # AND news are now fetched for HELD tickers too, not only unheld
+    # candidates -- previously §6d's thesis-invalidation check ("has the
+    # signal that justified the entry reversed, or has genuinely adverse
+    # news landed") had nothing fresh to reason from every cycle after
+    # entry; a held position's technicals/news were never fetched again.
+    # One combined fetch (not two) -- fewer real docker-exec round trips.
+    held_tickers = list(working.holdings)
+    unheld_tickers = [t for t in tickers if t not in working.holdings]
+    all_technicals = fetch_technicals(unheld_tickers + held_tickers, day)
+    news = fetch_news(unheld_tickers + held_tickers, day)
+    technicals = {t: all_technicals[t] for t in unheld_tickers if t in all_technicals}
+    held_technicals = {t: all_technicals[t] for t in held_tickers if t in all_technicals}
 
     candidates = []
     for ticker, tech in technicals.items():
+        if "error" in tech:
+            continue
         entry = next(w for w in watchlist if w["symbol"] == ticker)
         candidates.append({
             "alias": masking.alias(ticker),
@@ -1525,6 +1985,15 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         "stop_price": h.stop_price, "target_price": h.target_price,
         "current_price": bars.get(t, {}).get("close", h.entry_price),
         "days_held": day_index - h.entry_day,
+        # None when a fetch error occurred for this ticker -- the position
+        # itself is still shown (entry/current/stop/target above), just
+        # without fresh evidence this cycle, same "skip, don't fabricate"
+        # discipline candidates already follow.
+        "tech": (
+            masking.mask_technicals({**held_technicals[t], "ticker": t}, day)
+            if t in held_technicals and "error" not in held_technicals[t] else None
+        ),
+        "news": masking.mask_news(news.get(t, []), day),
     } for t, h in working.holdings.items()]
 
     account_view = {
@@ -1551,11 +2020,13 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # reflection actually change future behaviour, not just sit in a log).
     # Reflection material (masked closed-trade review) is only fetched
     # every 5th cycle -- see cycles_since_reflection's docstring on why this
-    # is a persisted counter, not a local one.
-    recent_insights = fetch_recent_insights()
+    # is a persisted counter, not a local one. Both filtered to THIS run
+    # (run_key doubles as run_id) -- see fetch_recent_insights/
+    # fetch_recent_closed_trades docstrings (item 8).
+    recent_insights = fetch_recent_insights(run_id=run_key)
     is_reflection_day = working.cycles_since_reflection >= 4
     reflection_trades = (
-        fetch_recent_closed_trades(masking) if is_reflection_day else None
+        fetch_recent_closed_trades(masking, run_id=run_key) if is_reflection_day else None
     )
 
     prompt = build_prompt(masking.day_index(day), account_view,
@@ -1573,31 +2044,80 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             pacer.record_cycle()
             invoked["done"] = True
 
-    response = ask_hermes(prompt, summary["usage"], on_invoked=mark_invoked)
-    record_snapshot(usage=summary["usage"], pacer=pacer, **snapshot_kwargs)
+    try:
+        response = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day,
+                              on_invoked=mark_invoked)
+    except Exception as exc:
+        # Tag with whatever real usage ask_hermes accumulated before
+        # failing (a validation-retry exhaustion still burns 1-2 real
+        # calls) -- _run_cycle_or_halt reads this for log_cycle_failure's
+        # "real token usage when available" (item 6). This is the single
+        # most usage-relevant failure point (a real _call_hermes just ran);
+        # a failure LATER in this function (a journal write, etc.) still
+        # gets the real, current quota-pacer count via log_cycle_failure's
+        # own pacer argument, just not this specific per-cycle token total.
+        exc.usage = summary["usage"]
+        raise
+
+    # -- cycle-success gate (2026-08-28 pre-training pass, items 5+6) -----
+    # This snapshot write is the ONE thing in this function protected by a
+    # real database-level uniqueness constraint (cycle_id). `is_new` tells
+    # us whether THIS call is the first time this (run, day) has ever
+    # recorded a snapshot: if it is, this cycle's activity narration and
+    # reflection insight are genuinely new and get written below; if it is
+    # NOT (a retry of a day that fully succeeded before -- e.g. the local
+    # state-file write failed AFTER Neon writes already landed), they are
+    # correctly skipped, so a retry cannot duplicate a completed day's
+    # narration or reflection. This does not change decisions/trades
+    # journaling above -- those are already independently idempotent via
+    # each trade's own deterministic decision_id.
+    is_new = record_snapshot_once(run_id=run_key, cycle_id=cycle_id,
+                                  usage=summary["usage"], pacer=pacer, **snapshot_kwargs)
     summary["no_action_reason"] = response.get("no_action_reason", "")
-    if summary["no_action_reason"]:
+    if is_new and summary["no_action_reason"]:
         activity.append(("reasoning", summary["no_action_reason"][:900], None))
 
     if is_reflection_day:
+        # validate_hermes_response already guarantees a non-blank
+        # reflection on a reflection day (fails closed otherwise) -- this
+        # if/else is defense in depth, not the primary gate: a missing
+        # reflection must never reset the cadence (item 1's last
+        # requirement), it should keep trying every subsequent cycle.
         reflection_text = response.get("reflection", "").strip()
         if reflection_text:
-            # reflection_trades IS the closed-trade set this reflection was
-            # actually drawn from -- its length is the real sample size,
-            # not a guess.
-            record_insight(reflection_text, sample_size=len(reflection_trades or []))
-            activity.append(("weekly_reflection", reflection_text[:900], None))
-        working.cycles_since_reflection = 0
+            if is_new:
+                # reflection_trades IS the closed-trade set this reflection
+                # was actually drawn from -- its length is the real sample
+                # size, not a guess.
+                record_insight(reflection_text, sample_size=len(reflection_trades or []),
+                               run_id=run_key, cycle_id=cycle_id)
+                activity.append(("weekly_reflection", reflection_text[:900], None))
+            working.cycles_since_reflection = 0
+        else:
+            working.cycles_since_reflection += 1
     else:
         working.cycles_since_reflection += 1
 
-    # -- STEP D: QUEUE today's decisions -- never execute them today ------
-    # This is the other half of the no-lookahead guarantee: whatever
-    # Hermes decided from today's completed data waits for tomorrow's real
-    # open (step B, next invocation). Only light structural validation
-    # happens here (alias resolves, action/quantity/stop/target are
-    # present and sane) -- the real risk-checker validation is deliberately
-    # deferred to fill time against the REAL price, not duplicated here.
+    # -- STEP D: risk-validate, then QUEUE today's decisions -- never -----
+    #    execute them today. This is the other half of the no-lookahead
+    #    guarantee: whatever Hermes decided from today's completed data
+    #    waits for tomorrow's real open (step B, next invocation).
+    #
+    # 2026-08-28 pre-training pass (items 1-3):
+    #   - Structural checks below are now DEFENSE IN DEPTH -- validate_
+    #     hermes_response already guarantees every field's shape before
+    #     this loop ever runs (see ask_hermes); they should rarely fire.
+    #   - A NEW decision-time risk check (check_trade, validate_timing=
+    #     False) runs every proposal through the SAME rule set the real
+    #     execution-time check uses -- §1/§2/§3/§4/§6/§9 in full, §7 timing
+    #     deliberately skipped (the real fill instant isn't known yet; see
+    #     build_decision_time_context). This is advisory/pre-flight, NOT a
+    #     duplicate of the authoritative check: resolve_queued_order still
+    #     re-validates for real against tomorrow's real 09:45 price and
+    #     remains the sole authority on whether the trade actually happens.
+    #   - Every decision that PASSES both gates is now journaled the
+    #     instant it's queued (status 'pending'), not only once it fills --
+    #     see record_queued_decision / QueuedOrder.decision_id.
     for decision in response.get("decisions", []):
         try:
             real_ticker = masking.real(decision["alias"])
@@ -1622,24 +2142,47 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         if action == "BUY" and (stop_price is None or target_price is None):
             summary["blocked"].append(f"{real_ticker}: BUY missing stop/target -- cannot queue")
             continue
+        try:
+            entry_price = float(decision.get("entry_price", 0.0))
+        except (TypeError, ValueError):
+            summary["blocked"].append(f"{real_ticker}: invalid entry_price -- cannot queue")
+            continue
 
-        order = QueuedOrder(
-            ticker=real_ticker, alias=decision["alias"], action=action, quantity=quantity,
+        proposal = ProposedTrade(
+            ticker=real_ticker, action=action, quantity=quantity,
+            entry_price=entry_price,
             stop_price=float(stop_price) if stop_price is not None else None,
             target_price=float(target_price) if target_price is not None else None,
-            entry_price=float(decision.get("entry_price", 0.0)),  # audit only, never used to fill
-            queued_day_index=day_index, decision=decision,
+        )
+        decision_ctx = build_decision_time_context(working, bars, tickers, limits_ctx)
+        decision_verdict = check_trade(proposal, decision_ctx, validate_timing=False)
+        if not decision_verdict.allowed:
+            reason = "; ".join(decision_verdict.violations)
+            line = f"{real_ticker}: decision-time risk check rejected -- {reason}"
+            summary["blocked"].append(line)
+            activity.append(("risk_check", line, None))
+            continue
+
+        decision_id = make_decision_id(run_key, day_index, real_ticker, action, "queued_proposal")
+        record_queued_decision(decision, real_ticker, decision_id, run_id=run_key)
+        order = QueuedOrder(
+            ticker=real_ticker, alias=decision["alias"], action=action, quantity=quantity,
+            stop_price=proposal.stop_price, target_price=proposal.target_price,
+            entry_price=entry_price,  # audit only, never used to fill
+            queued_day_index=day_index, decision=decision, decision_id=decision_id,
         )
         working.pending_orders.append(order)
         line = f"{action} {real_ticker} ({decision['alias']}) x{quantity} queued for next trading day's open"
         summary["decisions"].append(line)
-        activity.append(("order_queued", line, None))
+        activity.append(("order_queued", line, decision_id))
 
-    log_activity(activity)
+    if is_new:
+        log_activity(activity, run_id=run_key, cycle_id=cycle_id)
     return working, summary
 
 
-def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict]]", day_label: str = ""):
+def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict]]", day_label: str = "",
+                       run_id: str | None = None, pacer: "QuotaPacer | None" = None):
     """Isolated control-flow wrapper -- the one piece of "a failed cycle
     must not advance the simulated date" that's actually unit-testable
     without Docker/Neon. Runs one cycle; on any exception, prints why and
@@ -1656,12 +2199,17 @@ def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict]]", day_l
               f"{type(exc).__name__}: {exc}")
         print("  Re-run the harness to retry this same day; any trade already "
               "journaled before the failure is safe to retry (idempotent).")
-        # Best-effort dashboard visibility ("Last failed attempt") -- never
-        # let a logging failure mask the real exception above (e.g. the
-        # failure itself was a lost Docker/Neon connection, in which case
-        # this write will also fail, harmlessly).
+        # Best-effort dashboard visibility (item 6): real token usage when
+        # available (ask_hermes tags a raised exception with `.usage` --
+        # see run_day) and the real, current quota-pacer count (always
+        # available). Never let a logging failure mask the real exception
+        # above (e.g. the failure itself was a lost Docker/Neon connection,
+        # in which case this write will also fail, harmlessly).
         try:
-            log_activity([("cycle_failed", f"{day_label}: {type(exc).__name__}: {exc}"[:900], None)])
+            log_cycle_failure(
+                day_label, f"{type(exc).__name__}: {exc}", run_id,
+                usage=getattr(exc, "usage", None), pacer=pacer,
+            )
         except Exception:
             pass
         return None, True
@@ -1690,19 +2238,32 @@ def main() -> None:
     names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
     masking = RunMasking(names, run_start=start, seed=args.seed)
     pacer = QuotaPacer()
-    # Stable per (start, seed) -- feeds make_decision_id so a retry of the
-    # SAME logical run regenerates the SAME ids for the SAME real events.
-    # A genuinely different run (different window or seed) gets a
-    # different key, so it can never collide with an unrelated run's ids.
-    run_key = f"{args.start}|{args.seed}"
 
     if STATE_PATH.exists():
         state = json.loads(STATE_PATH.read_text())
         portfolio = Portfolio.from_dict(state["portfolio"])
         cursor = date.fromisoformat(state["cursor"])
-        print(f"resuming from {cursor}")
+        # 2026-08-28 pre-training pass (item 5): a RESUMED run keeps its
+        # existing run_id -- .get() falls back to a fresh one only for a
+        # state file written before this field existed (never true after
+        # today's baseline reset, but harmless either way: an old file has
+        # no pending_orders with a real decision_id to collide with).
+        run_id = state.get("run_id") or str(uuid.uuid4())
+        print(f"resuming from {cursor} (run_id={run_id})")
     else:
         portfolio, cursor = Portfolio(), start
+        run_id = None  # generated below
+
+    # --reset (or a genuinely fresh state file) ALWAYS gets a brand new
+    # run_id -- this is what makes "do not let --reset reuse old trade IDs
+    # from an earlier run" real: make_decision_id derives every id from
+    # run_key, and run_key IS this run_id below, so a fresh uuid4 here
+    # guarantees a fresh id space even if --start/--seed are identical to
+    # a prior, discarded run.
+    if run_id is None:
+        run_id = str(uuid.uuid4())
+        print(f"starting fresh run (run_id={run_id})")
+    run_key = run_id
 
     end = date.fromisoformat(args.end)
     completed = 0
@@ -1732,6 +2293,7 @@ def main() -> None:
         result, halted = _run_cycle_or_halt(
             lambda: run_day(cursor, day_index, portfolio, masking, watchlist, {}, pacer, run_key),
             day_label=masking.day_index(cursor),
+            run_id=run_id, pacer=pacer,
         )
         if halted:
             break
@@ -1762,12 +2324,14 @@ def main() -> None:
 
         _atomic_write_json(
             STATE_PATH,
-            {"portfolio": portfolio.to_dict(), "cursor": str(cursor + timedelta(days=1))},
+            {"portfolio": portfolio.to_dict(), "cursor": str(cursor + timedelta(days=1)),
+             "run_id": run_id},
         )
         cursor += timedelta(days=1)
 
     final = portfolio.equity_curve[-1]
     print(f"\n{'=' * 70}")
+    print(f"run_id: {run_id}")
     print(f"cycles this run: {completed} | quota used this week: "
           f"{pacer.used_this_week()}/{pacer.budget}")
     print(f"equity ${final:,.2f} ({(final / STARTING_EQUITY - 1) * 100:+.2f}%) "

@@ -39,6 +39,7 @@ exist to protect against — strictly worse than no checker. See
 # here for the same reason.
 """
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -137,15 +138,21 @@ def _held(ctx: Context, ticker: str) -> Position | None:
     return next((p for p in ctx.positions if p.ticker.upper() == ticker.upper()), None)
 
 
-def _check_exit(trade: ProposedTrade, ctx: Context, v: list[str]) -> None:
+def _check_exit(trade: ProposedTrade, ctx: Context, v: list[str], validate_timing: bool = True) -> None:
     """Exits are deliberately almost unrestricted — see module docstring.
 
     Only two things can block an exit, and neither is a risk limit: a closed
     market (the order physically cannot fill at the assumed price), and
     trying to sell more than is actually held (which would open a short,
     banned outright by §1).
+
+    validate_timing: False for decision-TIME proposal validation, where the
+    real fill instant isn't known yet -- see check_trade's docstring. Never
+    fake `is_open`/minute values to dodge this; just skip the check that
+    depends on them, and let the real execution-time call (the default,
+    validate_timing=True) remain authoritative.
     """
-    if not ctx.clock.is_open:
+    if validate_timing and not ctx.clock.is_open:
         v.append("§7: market is closed")
 
     position = _held(ctx, trade.ticker)
@@ -154,9 +161,18 @@ def _check_exit(trade: ProposedTrade, ctx: Context, v: list[str]) -> None:
             f"§1: selling {trade.quantity} exceeds the {position.quantity} held "
             "— would open a short position"
         )
+    # One-lot model (RULES.md §9.1): a discretionary SELL must close the
+    # WHOLE position, never part of it. A broker-side involuntary partial
+    # fill is a separate, unmodelled live-mode limitation (see HANDOFF.md) --
+    # this blocks a *proposed* partial SELL, not a partial fill outcome.
+    if position is not None and 0 < trade.quantity < position.quantity:
+        v.append(
+            f"§9.1: partial SELL of {trade.quantity}/{position.quantity} held "
+            "is not allowed -- a discretionary exit must close the full position"
+        )
 
 
-def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str]) -> None:
+def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str], validate_timing: bool = True) -> None:
     lim, acct = ctx.limits, ctx.account
 
     # -- §1 scope ---------------------------------------------------------
@@ -200,6 +216,22 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str]) -> None:
         v.append("§2: equity/cash unknown — cannot size or verify any limit")
         return  # every remaining check divides by equity
 
+    # Fail closed on non-finite/non-positive values rather than let them
+    # bypass every comparison below or crash through a division. A NaN
+    # compares False against every `>`/`<` here (silently PASSING a check
+    # that should have blocked), and equity <= 0 divides by zero or
+    # produces a nonsensical negative percentage that can also silently
+    # pass -- neither is "unknown," both must block outright.
+    if not math.isfinite(acct.equity) or acct.equity <= 0:
+        v.append("§2: equity is not a positive finite number — cannot size or verify any limit")
+        return
+    if not math.isfinite(acct.cash):
+        v.append("§2: cash is not a finite number — cannot size or verify any limit")
+        return
+    if not math.isfinite(trade.entry_price) or trade.entry_price <= 0:
+        v.append("§2: entry_price is not a positive finite number — cannot size or verify any limit")
+        return
+
     equity = acct.equity
     notional = trade.quantity * trade.entry_price
 
@@ -226,6 +258,8 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str]) -> None:
     # -- §6a stop-loss --------------------------------------------------
     if trade.stop_price is None:
         v.append("§6a: no stop price — every entry must have one set at entry time")
+    elif not math.isfinite(trade.stop_price) or trade.stop_price <= 0:
+        v.append("§6a: stop_price is not a positive finite number")
     else:
         stop_distance_pct = (trade.entry_price - trade.stop_price) / trade.entry_price * 100
         if stop_distance_pct <= 0:
@@ -254,6 +288,8 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str]) -> None:
         # -- §6b reward:risk ----------------------------------------------
         if trade.target_price is None:
             v.append("§6b: no target price — reward:risk cannot be verified")
+        elif not math.isfinite(trade.target_price) or trade.target_price <= 0:
+            v.append("§6b: target_price is not a positive finite number")
         else:
             reward = trade.target_price - trade.entry_price
             risk_per_share = trade.entry_price - trade.stop_price
@@ -288,50 +324,75 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str]) -> None:
         )
 
     # -- §7 market hours ---------------------------------------------------
-    if not ctx.clock.is_open:
-        v.append("§7: market is closed — a queued order fills at an unknown price")
-    else:
-        since = ctx.clock.minutes_since_open
-        until = ctx.clock.minutes_until_close
-        if since is not None and since < lim.open_buffer_min:
-            v.append(
-                f"§7: {since} min after open, no entries for the first "
-                f"{lim.open_buffer_min}"
-            )
-        if until is not None and until < lim.close_buffer_min:
-            v.append(
-                f"§7: {until} min before close, no entries in the final "
-                f"{lim.close_buffer_min}"
-            )
+    # validate_timing=False: decision-TIME proposal validation, called
+    # before the real fill instant is known (see check_trade's docstring).
+    # Skipping this block is not "assume it passes" -- it means §7 is
+    # simply not this call's job; the real execution-time call (always
+    # validate_timing=True) is what actually enforces it, against the real
+    # clock, and remains authoritative.
+    if validate_timing:
+        if not ctx.clock.is_open:
+            v.append("§7: market is closed — a queued order fills at an unknown price")
+        else:
+            since = ctx.clock.minutes_since_open
+            until = ctx.clock.minutes_until_close
+            # Unknown timing while the market is reported open must fail
+            # closed, not be silently skipped -- an unevaluated §7 check has
+            # not passed, matching this module's own fail-closed contract
+            # for a missing P&L figure elsewhere in this function.
+            if since is None or until is None:
+                v.append("§7: market-hours timing could not be determined — treated as blocking")
+            else:
+                if since < lim.open_buffer_min:
+                    v.append(
+                        f"§7: {since} min after open, no entries for the first "
+                        f"{lim.open_buffer_min}"
+                    )
+                if until < lim.close_buffer_min:
+                    v.append(
+                        f"§7: {until} min before close, no entries in the final "
+                        f"{lim.close_buffer_min}"
+                    )
 
 
-def check_trade(trade: ProposedTrade, ctx: Context) -> Verdict:
+def check_trade(trade: ProposedTrade, ctx: Context, validate_timing: bool = True) -> Verdict:
     """Approve or reject a proposed trade against RULES.md.
 
     An exit is a SELL of something currently held; anything else is an entry.
     Deriving it rather than taking a flag removes a way for the caller to get
     it wrong — and makes a SELL of an unheld ticker fall through to the entry
     path, where §1's long-only rule correctly rejects it as a short.
+
+    validate_timing: True (default, and the only mode used at real
+    execution -- see simulate_trading_day) enforces §7 market-hours timing
+    against ctx.clock, failing closed on an unknown minute value while the
+    market is reported open. False is for decision-TIME proposal
+    validation (see run_backtest.py's check_decision_time_risk): the real
+    fill instant isn't known yet at proposal time, so §7's timing checks
+    are skipped entirely rather than faked with placeholder clock values --
+    every OTHER rule (§1, §2, §3, §4, §6, §9) still applies in full. The
+    real execution-time call, always validate_timing=True, remains the
+    sole authority on timing.
     """
     violations: list[str] = []
 
     position = _held(ctx, trade.ticker)
     is_exit = trade.action.upper() == "SELL" and position is not None
 
-    if trade.quantity <= 0:
-        violations.append("quantity must be positive")
+    if not math.isfinite(trade.quantity) or trade.quantity <= 0:
+        violations.append("quantity must be a positive finite number")
     if trade.action.upper() not in ("BUY", "SELL"):
         violations.append(f"§1: unsupported action {trade.action!r}")
         return Verdict(allowed=False, violations=violations)
 
     if is_exit:
-        _check_exit(trade, ctx, violations)
+        _check_exit(trade, ctx, violations, validate_timing)
     else:
         if trade.action.upper() == "SELL":
             violations.append(
                 f"§1: SELL of {trade.ticker}, which is not held — short selling "
                 "is prohibited"
             )
-        _check_entry(trade, ctx, violations)
+        _check_entry(trade, ctx, violations, validate_timing)
 
     return Verdict(allowed=not violations, violations=violations)

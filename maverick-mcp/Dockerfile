@@ -1,7 +1,11 @@
 # Dockerfile for Maverick-MCP
 # Python-only MCP server
 
-FROM python:3.12-slim
+# Pinned by digest (2026-08-28, hermes-trading-agent project) --
+# python:3.12-slim, the currently installed/verified base -- see
+# ../docker-compose.yml gateway comment for why. A local, tracked change
+# to this vendored file, not an upstream one.
+FROM python@sha256:dd29372629eeba2dd003fd9e9d35a5b8236c44727875a0364254b5127af88e65
 
 # MCP registry identity label (Docker MCP Catalog / GHCR discovery)
 LABEL io.modelcontextprotocol.server.name="io.github.wshobson/maverick-mcp"

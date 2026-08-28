@@ -135,6 +135,7 @@ async def _record_decision(
     decision_id: str | None = None,
     stop_price: float | None = None,
     target_price: float | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     """decision_id: optional caller-supplied id. Live Hermes never passes
     one (always gets a fresh uuid4, unchanged behavior). The backtest
@@ -144,7 +145,14 @@ async def _record_decision(
     fresh random one. ON CONFLICT DO NOTHING + the fallback SELECT below
     make a retried write a safe no-op, mirroring
     _record_execution_result's own idempotency pattern (only resolves a
-    row that's still 'pending')."""
+    row that's still 'pending').
+
+    A decision_id COLLISION with a DIFFERENT payload fails loudly instead
+    of silently returning the stale existing row -- see the mismatch check
+    below. This should never happen for a genuine retry of the same event
+    (deterministic ids are derived from the event's own identity); if it
+    does, something is wrong with id derivation itself and silently
+    returning the wrong trade's data would be far worse than an error."""
     _validate_decision_fields(
         action, confidence, primary_signal, expected_reward_risk,
         invalidation_condition, strategy_notes, technical_basis,
@@ -158,8 +166,8 @@ async def _record_decision(
                              confidence, primary_signal, technical_basis,
                              expected_reward_risk, invalidation_condition,
                              strategy_notes, data_timestamps, stop_price,
-                             target_price)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                             target_price, run_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         ON CONFLICT (decision_id) DO NOTHING
         RETURNING *
         """,
@@ -167,13 +175,32 @@ async def _record_decision(
         order_type, limit_price, confidence, primary_signal, technical_basis,
         expected_reward_risk, invalidation_condition, strategy_notes,
         json.dumps(data_timestamps) if data_timestamps else None,
-        stop_price, target_price,
+        stop_price, target_price, run_id,
     )
     if row is None:
         # A caller-supplied decision_id that already exists -- a retry of
         # an already-journaled event. Return the existing row instead of
-        # a duplicate insert or an error.
+        # a duplicate insert or an error -- UNLESS the incoming payload
+        # describes a genuinely different real-world event under the same
+        # id, which fails loudly (see docstring).
         row = await pool.fetchrow("SELECT * FROM trades WHERE decision_id = $1", decision_id)
+        if row is None:
+            raise ValueError(f"decision_id {decision_id} conflicted on insert but no row exists -- unexpected state")
+        mismatch = (
+            row["ticker"] != ticker
+            or row["action"] != action
+            or int(row["intended_quantity"]) != int(intended_quantity)
+            or row["order_type"] != order_type
+        )
+        if mismatch:
+            raise ValueError(
+                f"decision_id {decision_id} collision with a DIFFERENT payload -- "
+                f"existing: ticker={row['ticker']!r} action={row['action']!r} "
+                f"qty={row['intended_quantity']}; incoming: ticker={ticker!r} "
+                f"action={action!r} qty={intended_quantity}. This should never "
+                "happen for a genuine retry of the same event -- failing loudly "
+                "instead of silently returning a different trade's data."
+            )
     return dict(row)
 
 
@@ -194,7 +221,17 @@ async def _record_portfolio_snapshot(
     hermes_calls_used: int | None = None,
     weekly_budget: int | None = None,
     open_positions_detail: list[dict[str, Any]] | None = None,
-) -> dict[str, Any]:
+    run_id: str | None = None,
+    cycle_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Returns the inserted row, or None if `cycle_id` already had a
+    snapshot (ON CONFLICT DO NOTHING) -- the caller (run_backtest.py) uses
+    that distinction to decide whether this cycle is genuinely new (and its
+    activity narration/reflection should also be written) or already fully
+    recorded by an earlier attempt (and must NOT be re-narrated/duplicated).
+    A NULL cycle_id (always true for live) never conflicts -- Postgres
+    treats every NULL as distinct in a UNIQUE constraint -- so live callers
+    always get a real row back, unaffected by this mechanism."""
     if mode not in ("backtest", "live"):
         raise ValueError(f"mode must be 'backtest' or 'live', got {mode!r}")
     pool = await get_pool()
@@ -204,16 +241,19 @@ async def _record_portfolio_snapshot(
                                           drawdown_pct, day_label, open_positions,
                                           input_tokens, output_tokens, cache_read_tokens,
                                           reasoning_tokens, total_tokens, api_calls,
-                                          hermes_calls_used, weekly_budget, open_positions_detail)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                                          hermes_calls_used, weekly_budget, open_positions_detail,
+                                          run_id, cycle_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+        ON CONFLICT (cycle_id) DO NOTHING
         RETURNING *
         """,
         mode, equity, cash, exposure_pct, drawdown_pct, day_label, open_positions,
         input_tokens, output_tokens, cache_read_tokens, reasoning_tokens, total_tokens,
         api_calls, hermes_calls_used, weekly_budget,
         json.dumps(open_positions_detail) if open_positions_detail is not None else None,
+        run_id, cycle_id,
     )
-    return dict(row)
+    return dict(row) if row is not None else None
 
 
 async def _record_execution_result(
@@ -249,8 +289,13 @@ async def _record_execution_result(
 
 
 async def _get_trade_history(
-    ticker: str | None = None, status: str | None = None, limit: int = 20
+    ticker: str | None = None, status: str | None = None, limit: int = 20,
+    execution_mode: str | None = None, run_id: str | None = None,
 ) -> list[dict[str, Any]]:
+    """execution_mode/run_id: pushed into SQL (not filtered in Python by the
+    caller) so a caller asking for "this run's backtest trades" gets
+    exactly that from the query itself, not an incidentally-correct
+    Python-side filter applied after the fact."""
     pool = await get_pool()
     conditions, params = [], []
     if ticker:
@@ -259,6 +304,12 @@ async def _get_trade_history(
     if status:
         params.append(status)
         conditions.append(f"status = ${len(params)}")
+    if execution_mode:
+        params.append(execution_mode)
+        conditions.append(f"execution_mode = ${len(params)}")
+    if run_id:
+        params.append(run_id)
+        conditions.append(f"run_id = ${len(params)}")
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
     params.append(limit)
     rows = await pool.fetch(
@@ -270,39 +321,63 @@ async def _get_trade_history(
 async def _log_insight(
     cycle_type: str, insight_text: str, mode: str,
     sample_size: int | None = None,
-) -> dict[str, Any]:
+    run_id: str | None = None,
+    cycle_id: str | None = None,
+) -> dict[str, Any] | None:
+    """Returns the inserted row, or None if `cycle_id` already has an
+    insight (ON CONFLICT DO NOTHING) -- same duplicate-prevention purpose
+    as _record_portfolio_snapshot's cycle_id handling. A NULL cycle_id
+    (always true for live) never conflicts."""
     if mode not in ("backtest", "live"):
         raise ValueError(f"mode must be 'backtest' or 'live', got {mode!r}")
     pool = await get_pool()
     row = await pool.fetchrow(
-        "INSERT INTO insight_log (cycle_type, insight_text, sample_size, mode) "
-        "VALUES ($1, $2, $3, $4) RETURNING *",
-        cycle_type, insight_text, sample_size, mode,
+        "INSERT INTO insight_log (cycle_type, insight_text, sample_size, mode, run_id, cycle_id) "
+        "VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (cycle_id) DO NOTHING RETURNING *",
+        cycle_type, insight_text, sample_size, mode, run_id, cycle_id,
     )
-    return dict(row)
+    return dict(row) if row is not None else None
 
 
-async def _get_insight_history(cycle_type: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+async def _get_insight_history(
+    cycle_type: str | None = None, limit: int = 20,
+    mode: str | None = None, run_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """mode/run_id: without these, a reflection prompt or the dashboard
+    could surface an insight from a DIFFERENT (discarded/reset) backtest
+    run, or a live insight leaking into a training view -- see RULES.md's
+    own "never let old state masquerade as current" concern, applied here."""
     pool = await get_pool()
+    conditions, params = [], []
     if cycle_type:
-        rows = await pool.fetch(
-            "SELECT * FROM insight_log WHERE cycle_type = $1 ORDER BY created_at DESC LIMIT $2",
-            cycle_type, limit,
-        )
-    else:
-        rows = await pool.fetch("SELECT * FROM insight_log ORDER BY created_at DESC LIMIT $1", limit)
+        params.append(cycle_type)
+        conditions.append(f"cycle_type = ${len(params)}")
+    if mode:
+        params.append(mode)
+        conditions.append(f"mode = ${len(params)}")
+    if run_id:
+        params.append(run_id)
+        conditions.append(f"run_id = ${len(params)}")
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    params.append(limit)
+    rows = await pool.fetch(
+        f"SELECT * FROM insight_log {where} ORDER BY created_at DESC LIMIT ${len(params)}", *params
+    )
     return [dict(r) for r in rows]
 
 
 async def _log_activity(
     event_type: str, description: str, decision_id: str | None = None,
-    mode: str | None = None,
+    mode: str | None = None, run_id: str | None = None, cycle_id: str | None = None,
+    total_tokens: int | None = None, hermes_calls_used: int | None = None,
 ) -> dict[str, Any]:
     pool = await get_pool()
     row = await pool.fetchrow(
-        "INSERT INTO agent_activity (decision_id, event_type, description, mode) "
-        "VALUES ($1, $2, $3, $4) RETURNING *",
-        decision_id, event_type, description, mode,
+        "INSERT INTO agent_activity (decision_id, event_type, description, mode, "
+        "run_id, cycle_id, total_tokens, hermes_calls_used) "
+        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *",
+        decision_id, event_type, description, mode, run_id, cycle_id,
+        total_tokens, hermes_calls_used,
     )
     return dict(row)
 

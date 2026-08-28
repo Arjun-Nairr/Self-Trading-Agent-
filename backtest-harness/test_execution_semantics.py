@@ -20,11 +20,13 @@ from unittest.mock import patch
 # effect -- must be imported first, matching test_execution_path.py's
 # existing pattern.
 from run_backtest import (
-    Holding, Portfolio, QueuedOrder, _atomic_write_json, _run_cycle_or_halt,
+    Holding, Portfolio, QueuedOrder, ResponseValidationError, _atomic_write_json,
+    _run_cycle_or_halt, build_decision_time_context, build_prompt,
     evaluate_bar_stop_target, evaluate_opening_gap, make_decision_id,
     require_intraday_coverage, resolve_queued_order, simulate_trading_day,
+    validate_hermes_response,
 )
-from risk_checker import AccountState, Context, MarketClock, check_trade  # noqa: E402
+from risk_checker import AccountState, Context, MarketClock, ProposedTrade, check_trade  # noqa: E402
 
 
 def _ctx(**overrides) -> Context:
@@ -41,6 +43,7 @@ def _order(**overrides) -> QueuedOrder:
         "entry_price": 999.0,  # deliberately wrong -- must never be used
         "queued_day_index": 3,
         "decision": {"action": "BUY", "quantity": 90, "confidence": 3},
+        "decision_id": "test-decision-id",
         **overrides,
     })
 
@@ -297,6 +300,7 @@ def _sell_order(**kw) -> QueuedOrder:
         "ticker": "OLN", "alias": "ALPHA", "action": "SELL", "quantity": 90,
         "stop_price": None, "target_price": None, "entry_price": 0.0,
         "queued_day_index": 3, "decision": {"action": "SELL", "quantity": 90},
+        "decision_id": "test-decision-id",
         **kw,
     })
 
@@ -486,80 +490,238 @@ def test_missing_required_intraday_data_fails_closed():
     print("  ok  full coverage passes without raising")
 
 
-def test_partial_sell_credits_only_the_sold_shares():
-    """Bug fix (2026-08-25): a partial queued SELL (order.quantity <
-    holding.quantity) was crediting running_cash for the WHOLE position's
-    value, not just the shares actually sold -- inflating the 09:45 cash/
-    equity context a subsequent BUY gets risk-checked against.
-
-    Proves all three required properties in one scenario:
-      1. Only the sold shares' proceeds are credited (via a later-in-the-
-         day exit on the REMAINING shares, whose recorded quantity proves
-         how much was actually left held).
-      2. The remaining quantity is correct (same mechanism).
-      3. A later 09:45 BUY is evaluated against the correct, non-inflated
-         cash/equity -- constructed as a real boundary case: it's rejected
-         (over the §2b concentration cap) using the CORRECT equity figure;
-         if the old bug were still present, the inflated equity would
-         raise the cap enough to wrongly accept it.
+def test_partial_sell_rejected_full_exit_still_works():
+    """2026-08-28 pre-training pass, item 7: the one-lot model now REJECTS
+    a partial discretionary SELL outright (RULES.md §9.1, enforced by
+    risk_checker.py's own §9.1 check -- see resolve_queued_order, which
+    calls the SAME check_trade this rejection runs through). This replaces
+    the old 2026-08-25 test of the (now-removed) partial-credit branch in
+    simulate_trading_day's queued-SELL stage -- that code path no longer
+    exists; a partial SELL can no longer reach it.
     """
     # 100 OLN shares held @ $50, stop $45 (10% -- within band), target $65.
     oln_holding = {"OLN": Holding(ticker="OLN", quantity=100, entry_price=50.0,
                                   stop_price=45.0, target_price=65.0,
                                   entry_day=1, entry_trading_day=1)}
-    # Sell only 20 of the 100 at the 09:30 open ($50) -- a real partial.
-    sell = _sell_order(ticker="OLN", quantity=20)
-    # A later bar (11:00) drives OLN's low to $44, below the $45 stop --
-    # this must fire against whatever is ACTUALLY still held.
-    oln_bars = _flat_session(price=50.0, overrides={
-        "11:00": {"open": 50.0, "high": 50.0, "low": 44.0, "close": 44.0},
-    })
-    # DINO BUY sized to land BETWEEN the correct cap ($500 = 10% of the
-    # correct $5,000 equity) and the buggy cap ($900 = 10% of the buggy
-    # $9,000 equity that the old code would have produced): $600 notional.
-    # Stop/target chosen so §2a (risk budget) and §6a/§6b pass cleanly --
-    # §2b concentration is the one, isolated thing this scenario tests.
-    buy = _buy_order(ticker="DINO", alias="DELTA", quantity=10,
-                     stop_price=55.0, target_price=70.0)
-    dino_bars = _flat_session(price=60.0)
+    # A queued partial SELL: only 20 of the 100 held.
+    partial_sell = _sell_order(ticker="OLN", quantity=20)
+    oln_bars = _flat_session(price=50.0)
 
     plan = simulate_trading_day(
-        holdings=oln_holding, pending_orders=[sell, buy],
-        intraday={"OLN": oln_bars, "DINO": dino_bars}, day_index=8,
-        trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN", "DINO"], closed_pnl=[],
+        holdings=oln_holding, pending_orders=[partial_sell],
+        intraday={"OLN": oln_bars}, day_index=8,
+        trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN"], closed_pnl=[],
         starting_cash=0.0, daily_pl_pct=0.0, weekly_pl_pct=0.0, drawdown_from_peak_pct=0.0,
     )
+    sell_events = [e for e in plan.events if e["stage"] == "queued_sell"]
+    assert len(sell_events) == 1 and sell_events[0]["kind"] == "rejected", plan.events
+    assert "§9.1" in sell_events[0]["reason"], sell_events[0]["reason"]
+    print("  ok  a partial discretionary SELL is rejected (§9.1), not filled")
 
-    sell_fill = [e for e in plan.events if e["stage"] == "queued_sell" and e["kind"] == "fill"]
-    assert len(sell_fill) == 1, plan.events
-    print("  ok  the partial SELL fills (not rejected/superseded)")
-
-    # Property 1 + 2: the later 11:00 stop on OLN must report exactly the
-    # REMAINING 80 shares (100 - 20) -- if the fix's cash credit were
-    # wrong but the quantity math happened to be right, this would still
-    # pass; it's here to pin down the OTHER half (remaining quantity) the
-    # task also requires proven, using the same scenario.
-    later_exit = [e for e in plan.events if e["stage"] == "intraday_walk" and e["ticker"] == "OLN"]
-    assert len(later_exit) == 1, plan.events
-    assert later_exit[0]["quantity"] == 80, (
-        f"expected 80 shares remaining held (100 - 20 sold), got {later_exit[0]['quantity']}"
+    # The rejection must leave the full 100-share position untouched --
+    # no cash credited, nothing removed from holdings.
+    full_sell = _sell_order(ticker="OLN", quantity=100)
+    plan2 = simulate_trading_day(
+        holdings=oln_holding, pending_orders=[full_sell],
+        intraday={"OLN": oln_bars}, day_index=8,
+        trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN"], closed_pnl=[],
+        starting_cash=0.0, daily_pl_pct=0.0, weekly_pl_pct=0.0, drawdown_from_peak_pct=0.0,
     )
-    print("  ok  exactly 80 shares (100 - 20 sold) remain held and are what the later stop exits")
+    full_sell_events = [e for e in plan2.events if e["stage"] == "queued_sell"]
+    assert len(full_sell_events) == 1 and full_sell_events[0]["kind"] == "fill", plan2.events
+    print("  ok  a full-quantity discretionary SELL still fills normally")
 
-    # Property 3: the 09:45 DINO BUY must be REJECTED for §2b using the
-    # CORRECT ($5,000) equity -- proves running_cash was NOT inflated by
-    # crediting the full 100-share position instead of the 20 actually
-    # sold (which would have produced $9,000 equity and a $900 cap,
-    # wrongly accepting this $600 order).
-    dino_events = [e for e in plan.events if e["ticker"] == "DINO"]
-    assert len(dino_events) == 1, dino_events
-    assert dino_events[0]["kind"] == "rejected", (
-        f"expected the DINO BUY rejected under correct (non-inflated) equity, "
-        f"got {dino_events[0]['kind']} -- the partial-sell cash bug may have regressed"
-    )
-    assert "§2b" in dino_events[0]["reason"], dino_events[0]["reason"]
-    print("  ok  the 09:45 BUY is rejected using the correct, non-inflated cash/equity "
-          "(would have been wrongly accepted under the old full-position-credit bug)")
+
+# --------------------------------------------------------------------------
+# 2026-08-28 pre-training pass: semantic response validation (item 1)
+# --------------------------------------------------------------------------
+
+_VALID_DECISION = {
+    "alias": "ALPHA", "action": "BUY", "quantity": 10, "entry_price": 100.0,
+    "stop_price": 93.0, "target_price": 115.0, "confidence": 3,
+    "primary_signal": "technical", "technical_basis": "rsi",
+    "expected_reward_risk": 2.14, "invalidation_condition": "closes below $93",
+    "reasoning": "clean breakout with volume confirmation",
+}
+
+
+def _response(**overrides) -> dict:
+    return {"decisions": [dict(_VALID_DECISION, **overrides)], "no_action_reason": ""}
+
+
+def test_validate_hermes_response_accepts_a_clean_reply():
+    validate_hermes_response(_response(), is_reflection_day=False)
+    validate_hermes_response({"decisions": [], "no_action_reason": "nothing qualified"},
+                             is_reflection_day=False)
+    print("  ok  a clean decision and a clean empty-decisions reply both validate")
+
+
+def test_validate_hermes_response_rejects_missing_decisions_list():
+    for bad in ({"no_action_reason": "x"}, {"decisions": "not a list"}):
+        try:
+            validate_hermes_response(bad, is_reflection_day=False)
+            raise AssertionError(f"should have rejected {bad!r}")
+        except ResponseValidationError:
+            pass
+    print("  ok  a missing/malformed 'decisions' list is rejected")
+
+
+def test_validate_hermes_response_requires_honest_no_action_reason():
+    try:
+        validate_hermes_response({"decisions": [], "no_action_reason": ""}, is_reflection_day=False)
+        raise AssertionError("blank no_action_reason on an empty decisions list should be rejected")
+    except ResponseValidationError:
+        pass
+    print("  ok  an empty decisions list requires a non-blank no_action_reason")
+
+
+def test_validate_hermes_response_enforces_buy_never_sentiment():
+    try:
+        validate_hermes_response(_response(primary_signal="sentiment", technical_basis=None),
+                                 is_reflection_day=False)
+        raise AssertionError("BUY + primary_signal=sentiment should be rejected")
+    except ResponseValidationError as exc:
+        assert "§5a" in str(exc)
+    print("  ok  §5a: a BUY can never have primary_signal='sentiment'")
+
+
+def test_validate_hermes_response_catches_bad_reward_risk_self_report():
+    # Real math: (115-100)/(100-93) = 2.14. Reporting 5.0 is badly wrong.
+    try:
+        validate_hermes_response(_response(expected_reward_risk=5.0), is_reflection_day=False)
+        raise AssertionError("a self-reported R that contradicts the trade's own math should be rejected")
+    except ResponseValidationError as exc:
+        assert "does not match" in str(exc)
+    # A close, honest report (2.1 vs the real 2.14) must still pass.
+    validate_hermes_response(_response(expected_reward_risk=2.1), is_reflection_day=False)
+    print("  ok  a self-reported reward:risk that contradicts the trade's own stop/target math is rejected")
+
+
+def test_validate_hermes_response_rejects_non_finite_and_bad_fields():
+    for bad_qty in (0, -5, float("nan"), "ten", 3.5):
+        try:
+            validate_hermes_response(_response(quantity=bad_qty), is_reflection_day=False)
+            raise AssertionError(f"quantity={bad_qty!r} should be rejected")
+        except ResponseValidationError:
+            pass
+    for bad_price in (0.0, -1.0, float("nan"), float("inf")):
+        try:
+            validate_hermes_response(_response(entry_price=bad_price), is_reflection_day=False)
+            raise AssertionError(f"entry_price={bad_price!r} should be rejected")
+        except ResponseValidationError:
+            pass
+    try:
+        validate_hermes_response(_response(invalidation_condition="  "), is_reflection_day=False)
+        raise AssertionError("blank invalidation_condition should be rejected")
+    except ResponseValidationError:
+        pass
+    print("  ok  non-finite/non-positive quantity/price and blank required text all rejected")
+
+
+def test_validate_hermes_response_requires_reflection_on_reflection_day():
+    ok_response = {"decisions": [], "no_action_reason": "nothing qualified", "reflection": "process notes"}
+    validate_hermes_response(ok_response, is_reflection_day=True)
+    for bad in ({"decisions": [], "no_action_reason": "x"},
+               {"decisions": [], "no_action_reason": "x", "reflection": "   "}):
+        try:
+            validate_hermes_response(bad, is_reflection_day=True)
+            raise AssertionError(f"missing/blank reflection on a reflection day should be rejected: {bad!r}")
+        except ResponseValidationError:
+            pass
+    # The SAME reply is fine on a non-reflection day (reflection is optional there).
+    validate_hermes_response({"decisions": [], "no_action_reason": "x"}, is_reflection_day=False)
+    print("  ok  a reflection day requires a non-blank 'reflection'; a normal day does not")
+
+
+# --------------------------------------------------------------------------
+# 2026-08-28 pre-training pass: decision-time risk validation (item 3)
+# --------------------------------------------------------------------------
+
+def test_decision_time_context_skips_timing_but_enforces_everything_else():
+    working = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
+    ctx = build_decision_time_context(working, bars={}, watchlist=["OLN"], limits_ctx={})
+
+    # A clean BUY on the watchlist, well inside every limit, passes even
+    # though the clock fields are all None/placeholder (validate_timing=False
+    # means §7 is never consulted).
+    clean = ProposedTrade(ticker="OLN", action="BUY", quantity=90,
+                          entry_price=100.0, stop_price=93.0, target_price=115.0)
+    verdict = check_trade(clean, ctx, validate_timing=False)
+    assert verdict.allowed, verdict.violations
+    print("  ok  a clean decision-time proposal is approved with no real clock known yet")
+
+    # An off-watchlist ticker is still rejected -- §1 is NOT a timing rule.
+    off_list = ProposedTrade(ticker="TSLA", action="BUY", quantity=90,
+                             entry_price=100.0, stop_price=93.0, target_price=115.0)
+    verdict = check_trade(off_list, ctx, validate_timing=False)
+    assert not verdict.allowed and any("§1" in v for v in verdict.violations)
+    print("  ok  §1 off-watchlist is still enforced at decision time")
+
+    # A stop too close is still rejected -- §6a is NOT a timing rule either.
+    bad_stop = ProposedTrade(ticker="OLN", action="BUY", quantity=90,
+                             entry_price=100.0, stop_price=99.0, target_price=115.0)
+    verdict = check_trade(bad_stop, ctx, validate_timing=False)
+    assert not verdict.allowed and any("§6a" in v for v in verdict.violations)
+    print("  ok  §6a stop-distance is still enforced at decision time")
+
+
+def test_decision_time_context_reflects_current_holdings_and_streak():
+    holdings = {"OLN": Holding(ticker="OLN", quantity=90, entry_price=100.0,
+                               stop_price=93.0, target_price=115.0,
+                               entry_day=1, entry_trading_day=1)}
+    working = Portfolio(cash=91_000.0, holdings=holdings, equity_curve=[100_000.0] * 6,
+                        stopped_out_today=["ALGM"])
+    ctx = build_decision_time_context(working, bars={"OLN": {"close": 100.0}},
+                                      watchlist=["OLN", "ALGM"], limits_ctx={})
+
+    # §9.1: already holding OLN -- averaging down blocked.
+    average_down = ProposedTrade(ticker="OLN", action="BUY", quantity=10,
+                                 entry_price=100.0, stop_price=93.0, target_price=115.0)
+    verdict = check_trade(average_down, ctx, validate_timing=False)
+    assert not verdict.allowed and any("§9.1" in v for v in verdict.violations)
+
+    # §9.4: ALGM stopped out today -- same-day re-entry blocked.
+    reentry = ProposedTrade(ticker="ALGM", action="BUY", quantity=10,
+                            entry_price=50.0, stop_price=47.0, target_price=58.0)
+    verdict = check_trade(reentry, ctx, validate_timing=False)
+    assert not verdict.allowed and any("§9.4" in v for v in verdict.violations)
+    print("  ok  decision-time context reflects today's real holdings (§9.1) and stopped-out list (§9.4)")
+
+
+# --------------------------------------------------------------------------
+# 2026-08-28 pre-training pass: held-position evidence in the prompt (item 4)
+# --------------------------------------------------------------------------
+
+def test_build_prompt_renders_fresh_evidence_for_held_positions():
+    account = {"equity": 100_000.0, "cash": 90_000.0, "exposure_pct": 10.0,
+              "daily_pl_pct": 0.0, "weekly_pl_pct": 0.0, "drawdown_pct": 0.0}
+    position_with_evidence = {
+        "alias": "ALPHA", "quantity": 90, "entry_price": 100.0,
+        "current_price": 97.0, "stop_price": 93.0, "target_price": 115.0,
+        "days_held": 3,
+        "tech": {"rsi": 38.2, "rsi_signal": "neutral", "macd_signal": "bearish crossover",
+                "trend": "down", "outlook": "cautious"},
+        "news": [{"age_days": 1, "headline": "ALPHA misses on guidance, shares slide"}],
+    }
+    position_without_evidence = {
+        "alias": "BRAVO", "quantity": 50, "entry_price": 50.0,
+        "current_price": 51.0, "stop_price": 46.0, "target_price": 60.0,
+        "days_held": 1, "tech": None, "news": [],
+    }
+    prompt = build_prompt("Day 5", account, [position_with_evidence, position_without_evidence],
+                          candidates=[], recent_insights=[])
+
+    # The held position's fresh RSI/MACD/trend and its news headline must
+    # actually appear -- this is what makes AGENTS.md §6d's "has the signal
+    # that justified the entry reversed" answerable, not just a claim.
+    assert "RSI 38.2" in prompt and "bearish crossover" in prompt and "trend down" in prompt
+    assert "ALPHA misses on guidance" in prompt
+    print("  ok  a held position with fresh technicals/news renders both into the prompt")
+
+    # A position with no fresh evidence this cycle (a fetch error) still
+    # shows its base entry/current/stop/target line -- never fabricated.
+    assert "BRAVO: 50 @ $50.00" in prompt
+    print("  ok  a held position without fresh evidence still shows its base line, nothing invented")
 
 
 def main():
