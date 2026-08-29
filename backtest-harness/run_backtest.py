@@ -60,7 +60,7 @@ import sys
 import tempfile
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -326,6 +326,7 @@ class Portfolio:
             "cycles_since_reflection": self.cycles_since_reflection,
             "trading_days_elapsed": self.trading_days_elapsed,
             "pending_orders": [vars(o) for o in self.pending_orders],
+            "stopped_out_today": self.stopped_out_today,
         }
 
     @classmethod
@@ -355,6 +356,10 @@ class Portfolio:
                 QueuedOrder(**{**o, "decision_id": o.get("decision_id", "")})
                 for o in d.get("pending_orders", [])
             ],
+            # .get(): old state files predate this field -- a legacy resume
+            # correctly starts with nothing stopped out today (the field's
+            # own dataclass default), never a crash on a missing key.
+            stopped_out_today=d.get("stopped_out_today", []),
         )
 
 
@@ -524,6 +529,25 @@ def evaluate_bar_stop_target(stop_price: float, target_price: float, bar: dict) 
     if bar["high"] >= target_price:
         return "target", target_price
     return None
+
+
+def _expected_session_bar_times(session_open: str, session_close: str) -> list[str]:
+    """The full 15-minute regular-session bar-time grid from `session_open`
+    (inclusive) to `session_close` (exclusive -- the LAST bar covers
+    [session_close - 15min, session_close)), both "HH:MM" ET wall-clock.
+    Pure, no I/O -- takes the real session boundaries as arguments rather
+    than assuming a fixed 09:30-16:00 (2026-08-29 correctness pass #4,
+    item 4) so a genuine half day (e.g. close "13:00") gets its own
+    correct, shorter grid instead of over-requiring afternoon bars that
+    were never going to exist."""
+    start = datetime.strptime(session_open, "%H:%M")
+    end = datetime.strptime(session_close, "%H:%M")
+    times = []
+    t = start
+    while t < end:
+        times.append(t.strftime("%H:%M"))
+        t += timedelta(minutes=15)
+    return times
 
 
 def require_intraday_coverage(
@@ -882,6 +906,39 @@ def _resolve_seed(stored_seed: int | None, requested_seed: int | None) -> int:
     return stored_seed
 
 
+def _resolve_window(
+    stored_start: str | None, stored_end: str | None,
+    requested_start: str, requested_end: str,
+) -> tuple[str, str]:
+    """Pure decision logic for item 5, 2026-08-29 correctness pass #4
+    (--start/--end persistence) -- mirrors _resolve_seed's style,
+    separated from main() so it's unit-testable without Docker/preflight.
+
+      - No stored window yet (a fresh/--reset run, or a legacy state file
+        written before this field existed): the requested --start/--end
+        become the window going forward -- nothing to conflict with yet.
+      - A stored window exists and the requested one differs in EITHER
+        bound: fail loudly (SystemExit, names all four values) BEFORE any
+        fetch or Hermes call -- day_index derives from `start`, so a
+        silently different --start would misalign every decision_id and
+        every "trading day N" label against what this run already
+        journaled.
+      - A stored window exists and matches exactly: proceed.
+    """
+    if stored_start is None or stored_end is None:
+        return requested_start, requested_end
+    if requested_start != stored_start or requested_end != stored_end:
+        raise SystemExit(
+            f"--start {requested_start} --end {requested_end} conflicts with "
+            f"this run's stored window (start {stored_start}, end {stored_end}) "
+            f"in {STATE_PATH.name} -- a resumed run must reuse its stored "
+            "window; day_index derives from --start, so a silent change would "
+            "misalign every decision_id and \"trading day N\" label already "
+            "journaled. Use --reset to start a genuinely new run instead."
+        )
+    return stored_start, stored_end
+
+
 def _atomic_write_json(path: Path, data: dict) -> None:
     """Write-to-temp-then-atomic-rename -- the same pattern quota_pacer.py's
     `_save` already uses. A process killed mid-write (exactly the failure
@@ -986,6 +1043,27 @@ for t in {tickers!r}:
 print(json.dumps({{"bars": out}}))
 '''
     return json_from(run_in("maverick-mcp", script))["bars"]
+
+
+def fetch_trading_calendar_day(day: date) -> dict | None:
+    """Real Alpaca trading-calendar entry for `day`, or None if `day` is
+    not a real trading day at all (weekend/holiday) -- see
+    alpaca-mcp's `_fetch_calendar_day` docstring. This is what lets
+    run_day tell a genuine holiday apart from a data OUTAGE on a real
+    trading day (2026-08-29 correctness pass #4, item 3) -- and, when a
+    real entry IS returned, its `close` field is that session's ACTUAL
+    close time (early on a half day), used by require_intraday_coverage
+    (item 4) instead of assuming a fixed 16:00."""
+    script = f'''
+import asyncio, json
+from server import _fetch_calendar_day
+
+async def main():
+    print(json.dumps({{"calendar_day": await _fetch_calendar_day("{day}")}}))
+
+asyncio.run(main())
+'''
+    return json_from(run_in("alpaca-mcp", script))["calendar_day"]
 
 
 def fetch_intraday_bars(tickers: list[str], day: date) -> dict[str, list[dict]]:
@@ -1244,6 +1322,14 @@ def record_exit(real_ticker: str, quantity: int, exit_price: float, reason: str,
 
     decision_id is now REQUIRED and deterministic (see make_decision_id) --
     Phase 0 repair, same idempotency reasoning as record_trade.
+
+    confidence=None (2026-08-29 correctness pass #4, item 9): a mechanical
+    exit is not a judgment call -- the old confidence=5 literal was a
+    fabricated "report card" that polluted the confidence-calibration
+    dataset (RECENT DECISIONS / the dashboard's win-rate-by-confidence
+    view) with rows that were never actually a decision at all. trade-
+    journal-mcp's `_validate_decision_fields` now accepts and expects
+    None here, skipping the report-card checks entirely for this case.
     """
     script = f'''
 import asyncio, json
@@ -1257,7 +1343,7 @@ async def main():
         intended_quantity={int(quantity)},
         intended_notional={float(quantity) * float(exit_price)},
         order_type="MARKET",
-        confidence=5, primary_signal="other", technical_basis=None,
+        confidence=None, primary_signal="other", technical_basis=None,
         expected_reward_risk=1.0,
         invalidation_condition="n/a -- mechanical exit, not a discretionary decision",
         strategy_notes={f"Mechanical exit: {reason}"!r},
@@ -2023,14 +2109,48 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # fetch_bars's docstring.
     bars = fetch_bars(tickers, day)
     if not bars:
-        summary["skipped"] = "no market data (holiday/weekend)"
-        # nothing happened -- caller's object, unchanged; 3-tuple to match
-        # the real return shape below (a no-op observability closure).
-        return portfolio, summary, (lambda: None)
+        # 2026-08-29 correctness pass #4 (item 3): missing bars alone used
+        # to be treated as "holiday/weekend" unconditionally -- silently
+        # indistinguishable from a genuine data OUTAGE on a real trading
+        # day. Cross-check against Alpaca's real trading calendar before
+        # deciding which one this is.
+        try:
+            calendar_day = fetch_trading_calendar_day(day)
+        except Exception as exc:
+            raise RuntimeError(
+                f"{day}: no market data, AND the trading calendar could not be "
+                f"checked ({type(exc).__name__}: {exc}) -- failing closed rather "
+                "than guessing whether this is a holiday or an outage"
+            ) from exc
+        if calendar_day is None:
+            # Confirmed via the real calendar, not just assumed from
+            # missing bars alone -- a genuine holiday/weekend.
+            summary["skipped"] = "no market data (confirmed holiday/weekend via trading calendar)"
+            # nothing happened -- caller's object, unchanged; 3-tuple to
+            # match the real return shape below (a no-op observability
+            # closure).
+            return portfolio, summary, (lambda: None)
+        # A REAL trading day per the calendar returned no market data --
+        # a genuine OUTAGE, not a holiday. Must fail the cycle like any
+        # other failure (halts, state not advanced, safely retryable) --
+        # silently skipping would misrepresent a real data gap as "nothing
+        # happened."
+        raise RuntimeError(
+            f"{day}: a real trading day per Alpaca's calendar (session "
+            f"{calendar_day.get('open')}-{calendar_day.get('close')}) returned no "
+            "market data -- treating as a data OUTAGE, not a holiday. Failing closed."
+        )
     # This IS a trading day (real bars exist) -- count it before anything
     # below reads it, so a position opened today is at trading-day-offset 0,
     # not -1.
     working.trading_days_elapsed += 1
+    # 2026-08-29 correctness pass #4 (item 1): reset UNCONDITIONALLY, every
+    # real trading day, regardless of whether `needed` (below) turns out
+    # non-empty. The old reset lived INSIDE `if needed:`, so on any later
+    # day with no holdings and no pending orders, a stop-out from a PRIOR
+    # day was never cleared -- §9.4's same-day re-entry block kept firing
+    # indefinitely instead of expiring after the day it happened.
+    working.stopped_out_today = []
 
     # -- chronological intraday execution ----------------------------------
     # Only fetch (and require) real intraday data for tickers that actually
@@ -2039,7 +2159,28 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # this at all.
     needed = sorted(set(working.holdings) | {o.ticker for o in working.pending_orders})
     intraday: dict[str, list[dict]] = fetch_intraday_bars(needed, day) if needed else {}
-    require_intraday_coverage(needed, intraday)  # fails closed -- see its docstring
+    if needed:
+        # 2026-08-29 correctness pass #4 (item 4): the real session's own
+        # open/close (supports a genuine half day, e.g. close "13:00")
+        # instead of assuming a fixed 09:30-16:00 grid. `bars` was already
+        # non-empty above, so `day` IS a real trading day -- a None here
+        # would be a genuine contradiction between fetch_bars and the
+        # calendar, not something to guess past.
+        calendar_day = fetch_trading_calendar_day(day)
+        if calendar_day is None:
+            raise RuntimeError(
+                f"{day}: daily market data exists but Alpaca's trading calendar "
+                "says this is not a trading day -- contradictory data sources, "
+                "failing closed rather than guessing which one is right"
+            )
+        full_session = _expected_session_bar_times(calendar_day["open"], calendar_day["close"])
+        # Extended coverage (item 4): the FULL session grid, not just the
+        # 09:30/09:45 boundaries -- a feed silently missing afternoon bars
+        # used to let the walk stage iterate only what was there and the
+        # close mark trust intraday[t][-1] as if it were the real close.
+        require_intraday_coverage(needed, intraday, required_times=tuple(full_session))
+    else:
+        require_intraday_coverage(needed, intraday)  # fails closed -- see its docstring (no-op: needed=[])
 
     if needed:
         # working.equity_curve as of end of YESTERDAY -- equity_curve isn't
@@ -2058,7 +2199,6 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             limits_ctx=limits_ctx, watchlist=tickers, closed_pnl=working.closed_pnl,
             starting_cash=working.cash, equity_curve=working.equity_curve,
         )
-        working.stopped_out_today = []
         for event in plan.events:
             ticker, kind = event["ticker"], event["kind"]
             if kind == "exit":
@@ -2377,7 +2517,18 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     #   - Every decision that PASSES both gates is now journaled the
     #     instant it's queued (status 'pending'), not only once it fills --
     #     see record_queued_decision / QueuedOrder.decision_id.
-    for decision in response.get("decisions", []):
+    # enumerate(): 2026-08-29 correctness pass #4 (item 2). `i` is each
+    # decision's own position in the response's OWN "decisions" list --
+    # deterministic and stable under a checkpointed replay (the exact same
+    # response, hence the exact same list, is reused verbatim -- see the
+    # checkpoint gate above), unlike a runtime counter. Folded into
+    # make_decision_id's `kind` below so two IDENTICAL decisions in one
+    # reply (same ticker/action) no longer collide on the same decision_id
+    # -- previously, if the first resolved rejected and the second filled,
+    # the fill's resolution found the row already claimed 'rejected' by
+    # the first and was silently dropped (_record_execution_result only
+    # ever resolves a row still 'pending').
+    for i, decision in enumerate(response.get("decisions", [])):
         try:
             real_ticker = masking.real(decision["alias"])
         except KeyError:
@@ -2422,7 +2573,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             activity.append(("risk_check", line, None))
             continue
 
-        decision_id = make_decision_id(run_key, day_index, real_ticker, action, "queued_proposal")
+        decision_id = make_decision_id(run_key, day_index, real_ticker, action, f"queued_proposal[{i}]")
         record_queued_decision(decision, real_ticker, decision_id, run_id=run_key)
         order = QueuedOrder(
             ticker=real_ticker, alias=decision["alias"], action=action, quantity=quantity,
@@ -2523,7 +2674,6 @@ def main() -> None:
     watchlist = json.loads(
         (REPO / "watchlist" / "watchlist.json").read_text()
     )["tickers"]
-    start = date.fromisoformat(args.start)
 
     if STATE_PATH.exists():
         state = json.loads(STATE_PATH.read_text())
@@ -2540,14 +2690,25 @@ def main() -> None:
         # every invocation -- a resumed run reuses its STORED seed (or
         # fails loudly on a genuine conflict). See _resolve_seed.
         seed = _resolve_seed(state.get("seed"), args.seed)
+        # 2026-08-29 correctness pass #4 (item 5): --start/--end are the
+        # SAME kind of resume-time hazard as seed -- day_index derives
+        # from `start`, so a silently different --start on resume would
+        # misalign every decision_id and "trading day N" label already
+        # journaled. Fails loudly BEFORE any fetch or Hermes call if
+        # changed. See _resolve_window.
+        start_str, end_str = _resolve_window(
+            state.get("start"), state.get("end"), args.start, args.end,
+        )
         print(f"resuming from {cursor} (run_id={run_id}, seed={seed})")
     else:
         # A reset (or a genuinely fresh state file) may establish a new
-        # seed -- there is nothing stored yet to conflict with.
-        portfolio, cursor = Portfolio(), start
+        # window/seed -- there is nothing stored yet to conflict with.
+        start_str, end_str = args.start, args.end
+        portfolio, cursor = Portfolio(), date.fromisoformat(start_str)
         run_id = None  # generated below
         seed = _resolve_seed(None, args.seed)
 
+    start = date.fromisoformat(start_str)
     names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
     masking = RunMasking(names, run_start=start, seed=seed)
     pacer = QuotaPacer()
@@ -2563,7 +2724,7 @@ def main() -> None:
         print(f"starting fresh run (run_id={run_id})")
     run_key = run_id
 
-    end = date.fromisoformat(args.end)
+    end = date.fromisoformat(end_str)
     completed = 0
     run_usage = {"total_tokens": 0, "api_calls": 0, "estimated_cost_usd": 0.0}
     while completed < args.days and cursor <= end:
@@ -2623,7 +2784,7 @@ def main() -> None:
         _atomic_write_json(
             STATE_PATH,
             {"portfolio": portfolio.to_dict(), "cursor": str(cursor + timedelta(days=1)),
-             "run_id": run_id, "seed": seed},
+             "run_id": run_id, "seed": seed, "start": start_str, "end": end_str},
         )
         # Only NOW -- the atomic local-state commit for this exact cycle
         # has actually succeeded -- is this cycle's checkpoint (if any) no

@@ -97,6 +97,25 @@ def main():
     ))
     print("  ok  BUY+sentiment-only rejected (§5a), SELL+sentiment-only allowed (§6d)")
 
+    # 2026-08-29 correctness pass #4, item 9: confidence=None (a
+    # mechanical exit, not a judgment call) skips the report-card checks
+    # ENTIRELY -- even fields that would otherwise be flatly invalid
+    # (garbage primary_signal, blank invalidation_condition) must not
+    # raise, because none of that applies to a rule firing mechanically.
+    _validate_decision_fields(
+        action="SELL", confidence=None, primary_signal="vibes",
+        expected_reward_risk=-99, invalidation_condition="",
+        strategy_notes=None, technical_basis=None,
+    )
+    print("  ok  confidence=None skips every report-card check, even on "
+          "otherwise-invalid fields")
+
+    # And a REAL confidence still enforces everything as before -- None
+    # is a deliberate opt-out, not a hole that swallows normal validation.
+    assert _rejects(confidence=0) is not None
+    assert _rejects(primary_signal="vibes") is not None
+    print("  ok  a real (non-None) confidence still enforces every check as before")
+
     print("PASS: decision-field validation enforces every rule it claims to")
 
 

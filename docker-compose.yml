@@ -41,6 +41,7 @@ services:
       - net-newsrss
       - net-journal
       - net-execution
+      - net-execution-sim
     volumes:
       - ${USERPROFILE}/.hermes-trading-agent:/opt/data
       # SOUL.md (identity), AGENTS.md (procedure), RULES.md (the risk layer)
@@ -117,13 +118,17 @@ services:
   # project_hermes_trading_agent memory for why: idempotency and
   # execution_mode tagging both assume one execution path per decision,
   # and §6's "pause, don't fallback" principle applies here too).
+  # 2026-08-29 correctness pass #4 hygiene: own network, not net-execution
+  # (shared with alpaca-mcp) -- the header's hub-and-spoke claim ("no tool
+  # container can reach another") wasn't actually true for these two while
+  # they shared a bridge network.
   execution-sim:
     build:
       context: ./execution-sim-mcp
     container_name: hermes-trading-agent-execution-sim
     restart: "no"
     networks:
-      - net-execution
+      - net-execution-sim
 
   # alpaca-mcp — OUR OWN tool (place_order, get_positions, get_order_status)
   # over Alpaca's Paper Trading API. Rebuilt after the official
@@ -142,8 +147,14 @@ services:
     restart: unless-stopped
     networks:
       - net-execution
-    env_file:
-      - .env
+    # 2026-08-29 correctness pass #4 hygiene: explicit environment, not
+    # env_file: .env -- env_file handed this container ALL THREE .env
+    # vars, including NEON_DATABASE_URL, which alpaca-mcp never reads and
+    # has no business holding (least privilege; also matches trade-
+    # journal-mcp being the ONLY container that touches Neon at all).
+    environment:
+      - ALPACA_API_KEY=${ALPACA_API_KEY}
+      - ALPACA_SECRET_KEY=${ALPACA_SECRET_KEY}
     volumes:
       # Mounted, not COPYed: one risk_checker and one watchlist for the
       # whole project. A per-container copy would be a second source of
@@ -184,6 +195,8 @@ networks:
   net-journal:
     driver: bridge
   net-execution:
+    driver: bridge
+  net-execution-sim:
     driver: bridge
 
 volumes:

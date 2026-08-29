@@ -61,7 +61,7 @@ _VALID_TECHNICAL_BASES = {"rsi", "macd", "support_resistance", "trend", "multipl
 
 def _validate_decision_fields(
     action: str,
-    confidence: int,
+    confidence: int | None,
     primary_signal: str,
     expected_reward_risk: float,
     invalidation_condition: str,
@@ -69,12 +69,23 @@ def _validate_decision_fields(
     technical_basis: str | None,
 ) -> None:
     """Pure validation, no DB -- the "report card" fields are required for
-    every real decision (per RULES.md), and the 'other' escape hatch must
-    never be a free pass: choosing it requires actually explaining what it
-    was in strategy_notes, or 'other' just becomes a way to skip the whole
-    point of structured logging. Raises ValueError naming exactly which
-    rule failed; callers never get a silently-accepted bad row.
+    every real JUDGMENT decision (per RULES.md), and the 'other' escape
+    hatch must never be a free pass: choosing it requires actually
+    explaining what it was in strategy_notes, or 'other' just becomes a
+    way to skip the whole point of structured logging. Raises ValueError
+    naming exactly which rule failed; callers never get a silently-
+    accepted bad row.
+
+    confidence=None (2026-08-29 correctness pass #4, item 9): a
+    MECHANICAL exit (stop/target/time-stop -- see run_backtest.py's
+    record_exit) is not a judgment call at all, so none of the report-
+    card checks below apply to it -- skipped entirely, rather than
+    forcing a fabricated confidence value just to pass validation (which
+    is exactly what was polluting the confidence-calibration dataset
+    with non-decisions before this fix).
     """
+    if confidence is None:
+        return
     if not 1 <= confidence <= 5:
         raise ValueError(f"confidence must be 1-5, got {confidence}")
     if primary_signal not in _VALID_PRIMARY_SIGNALS:
@@ -128,18 +139,30 @@ def _num_close(a: Any, b: Any, tol: float = 0.01) -> bool:
     return abs(float(a) - float(b)) <= tol
 
 
+def _normalize_data_timestamps(data_timestamps: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Empty and None are the same "nothing to record" state for this
+    field -- collapsed identically wherever data_timestamps is written or
+    compared (2026-08-29 correctness pass #4, item 7). Previously the
+    WRITE path alone made this collapse (`json.dumps(...) if
+    data_timestamps else None`); the compare path in _json_equal did not,
+    so an identical retry carrying {} (stored as NULL on the first write)
+    false-failed as a payload mismatch against that same NULL."""
+    return data_timestamps or None
+
+
 def _json_equal(a: Any, b: Any) -> bool:
     """Normalizes a DB-stored JSON value (asyncpg may hand back a str,
     depending on codec setup) against the incoming Python value before
     comparing -- key-order or str-vs-dict representation differences must
-    never register as a mismatch on their own."""
+    never register as a mismatch on their own. Also collapses an empty
+    dict to None on both sides -- see _normalize_data_timestamps."""
     def _norm(x: Any) -> Any:
         if isinstance(x, str):
             try:
-                return json.loads(x)
+                x = json.loads(x)
             except (TypeError, ValueError):
                 return x
-        return x
+        return _normalize_data_timestamps(x) if x is None or isinstance(x, dict) else x
     return _norm(a) == _norm(b)
 
 
@@ -156,10 +179,22 @@ def _uuid_equal(a: Any, b: Any) -> bool:
     return str(a) == str(b)
 
 
+def _int_equal(a: Any, b: Any) -> bool:
+    """None-safe integer comparison. 2026-08-29 correctness pass #4 (item
+    8): confidence can be NULL for a mechanical exit (see item 9,
+    record_exit) -- the prior direct `int(row["confidence"])` cast
+    crashed with TypeError on a NULL row instead of reporting a clean,
+    named mismatch, the same way every other comparator here already
+    handles None."""
+    if a is None or b is None:
+        return a is None and b is None
+    return int(a) == int(b)
+
+
 def _decision_field_mismatches(
     row: "asyncpg.Record",
     *, ticker: str, action: str, intended_quantity: int, intended_notional: float,
-    order_type: str, confidence: int, primary_signal: str, technical_basis: str | None,
+    order_type: str, confidence: int | None, primary_signal: str, technical_basis: str | None,
     expected_reward_risk: float, invalidation_condition: str, strategy_notes: str | None,
     data_timestamps: dict[str, Any] | None, stop_price: float | None,
     target_price: float | None, limit_price: float | None, run_id: str | None,
@@ -177,7 +212,7 @@ def _decision_field_mismatches(
         ("intended_quantity", int(row["intended_quantity"]) == int(intended_quantity)),
         ("order_type", row["order_type"] == order_type),
         ("intended_notional", _num_close(row["intended_notional"], intended_notional)),
-        ("confidence", int(row["confidence"]) == int(confidence)),
+        ("confidence", _int_equal(row["confidence"], confidence)),
         ("primary_signal", row["primary_signal"] == primary_signal),
         ("technical_basis", row["technical_basis"] == technical_basis),
         ("expected_reward_risk", _num_close(row["expected_reward_risk"], expected_reward_risk)),
@@ -200,7 +235,7 @@ async def _record_decision(
     intended_quantity: int,
     intended_notional: float,
     order_type: str,
-    confidence: int,
+    confidence: int | None,
     primary_signal: str,
     expected_reward_risk: float,
     invalidation_condition: str,
@@ -251,7 +286,7 @@ async def _record_decision(
         decision_id, ticker, action, intended_quantity, intended_notional,
         order_type, limit_price, confidence, primary_signal, technical_basis,
         expected_reward_risk, invalidation_condition, strategy_notes,
-        json.dumps(data_timestamps) if data_timestamps else None,
+        json.dumps(_normalize_data_timestamps(data_timestamps)) if data_timestamps else None,
         stop_price, target_price, run_id, execution_mode,
     )
     if row is None:

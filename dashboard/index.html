@@ -323,7 +323,12 @@ const money = n => (n == null) ? "—" : "$" + Number(n).toLocaleString(undefine
 const pctSigned = n => (n == null) ? "—" : (n >= 0 ? "+" : "") + Number(n).toFixed(2) + "%";
 const pctPlain  = n => (n == null) ? "—" : Number(n).toFixed(2) + "%";
 const time = iso => new Date(iso).toLocaleString(undefined, { month:"short", day:"numeric", hour:"2-digit", minute:"2-digit" });
-const esc = s => (s ?? "").toString().replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+// 2026-08-29 correctness pass #4 hygiene: also escapes quotes, not just
+// &/</>` -- defensive hardening for any future attribute-context use of
+// esc() (a bare " or ' in text content isn't itself exploitable, but a
+// helper named "esc" that silently doesn't escape quotes is a trap for
+// whoever reaches for it next).
+const esc = s => (s ?? "").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
 const el = id => document.getElementById(id);
 
 /* Pair each BUY with the SELL that closed it. RULES.md §9.1 (never average
@@ -700,6 +705,31 @@ async function refresh(withSkeletons = false) {
     // than fetching everything and hoping it happens to belong to one run.
     const latest = await q("portfolio_snapshots", `?mode=eq.${m.snapshots}&order=created_at.desc&limit=1`);
     const currentRunId = latest[0]?.run_id ?? null;
+
+    // 2026-08-29 correctness pass #4 (item 10): backtest mode has a real
+    // run concept -- every backtest row carries run_id. With zero
+    // snapshots there is no "current run" to scope to at all, and the
+    // queries below running unfiltered would silently mix EVERY past
+    // discarded run's rows together instead of showing a clean empty
+    // state. Live has no run_id concept (every live row's run_id is
+    // always NULL), so its unfiltered fallback is correct and stays
+    // unchanged -- this only short-circuits for backtest.
+    if (currentMode === "backtest" && !currentRunId) {
+      el("summary").innerHTML = `<span class="kv-key">No run scoped yet — training hasn't started (or the run was just reset). This view populates as soon as the first cycle runs.</span>`;
+      renderStats([], 0, [], null);
+      renderBars([]);
+      renderUsageStats([], 0);
+      renderFeed([]);
+      renderChart([]);
+      renderAnalysis([], []);
+      renderPositions([], []);
+      renderClosed([]);
+      renderDecisions([]);
+      renderInsights([]);
+      el("status-line").innerHTML = `<span class="dot"></span>${currentMode.toUpperCase()} · no run scoped`;
+      return;
+    }
+
     const runFilter = currentRunId ? `&run_id=eq.${currentRunId}` : "";
 
     const [trades, activity, snaps, blockedActivity, insights, failedCount, lastFailed] = await Promise.all([
@@ -711,7 +741,12 @@ async function refresh(withSkeletons = false) {
       // faithful whole-run total, and must never be presented as one.
       // risk_check (decision-time) + order_rejected (execution-time) are
       // the two event types a real rejection is ever logged under.
-      qAll("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=in.(risk_check,order_rejected)`),
+      // 2026-08-29 correctness pass #4 hygiene: explicit order=, matching
+      // every other qAll() call -- without it, PostgREST gives no
+      // guarantee of stable row ordering across paginated offset/limit
+      // requests, which can duplicate or skip rows across pages on a
+      // large blocked-activity dataset.
+      qAll("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=in.(risk_check,order_rejected)&order=created_at.desc`),
       q("insight_log", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=20`),
       qCount("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed`),
       q("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed&order=created_at.desc&limit=1`),

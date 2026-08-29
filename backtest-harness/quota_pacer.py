@@ -123,10 +123,24 @@ class QuotaPacer:
         """Call exactly once per real Hermes invocation, immediately after
         it completes (not before -- a cycle that never ran should never be
         counted). Returns the new count for this week, so the caller can
-        log/alert as it approaches budget without a separate query."""
+        log/alert as it approaches budget without a separate query.
+
+        2026-08-29 correctness pass #4 (item 6): called AFTER a real
+        Hermes call already happened -- an unreadable state file used to
+        crash here with a bare AttributeError (`None.get`), with no
+        indication the failure was quota-state corruption specifically,
+        right after real quota was already spent. Named and explicit
+        instead: `can_run_cycle`/`used_this_week` already fail closed on
+        the same unreadable state (see `_load`); this raises the same
+        signal loudly rather than crashing blind.
+        """
         today = today or date.today()
         key = _week_key(today)
         state = self._load()
+        if state is None:
+            raise RuntimeError(
+                "quota state unreadable — repair or delete the file; failing closed"
+            )
         state[key] = state.get(key, 0) + 1
         self._save(state)
         return state[key]

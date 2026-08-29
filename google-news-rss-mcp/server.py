@@ -14,7 +14,9 @@ keeping this tool a pure data-fetcher means there's no earlier point in the
 pipeline that could itself be misled by injected text (see the project's
 Category B eval #1: injected instructions in a news article).
 """
+import urllib.error
 import urllib.parse
+import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
@@ -24,6 +26,21 @@ from fastmcp import FastMCP
 mcp = FastMCP("google-news-rss")
 
 BASE_URL = "https://news.google.com/rss/search"
+
+
+def _fetch_feed_bytes(url: str) -> bytes:
+    """Fetch `url` with an explicit timeout -- feedparser's own fetch (had
+    it been handed the raw URL directly) has no timeout by default and
+    can hang indefinitely on a stalled connection. A stuck news veto call
+    should fail closed within a bounded time (2026-08-29 correctness pass
+    #4 hygiene), not block the whole cycle forever. A separate, directly
+    patchable function so tests never need a real network call."""
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            return response.read()
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"Google News RSS fetch failed: {exc}") from exc
 
 
 @mcp.tool()
@@ -48,8 +65,7 @@ def fetch_headlines(query: str, freshness_hours: int = 1, max_results: int = 15)
     search_term = f"{query} when:{freshness_hours}h"
     params = {"q": search_term, "hl": "en-US", "gl": "US", "ceid": "US:en"}
     url = f"{BASE_URL}?{urllib.parse.urlencode(params)}"
-
-    feed = feedparser.parse(url)
+    feed = feedparser.parse(_fetch_feed_bytes(url))
 
     # News is a safety veto. A broken feed must not look identical to a
     # successful search that found no adverse headlines -- but `bozo` alone

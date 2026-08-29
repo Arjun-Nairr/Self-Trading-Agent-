@@ -336,6 +336,32 @@ async def _fetch_clock() -> dict[str, Any]:
     return {"is_open": False, "minutes_since_open": None, "minutes_until_close": None}
 
 
+async def _fetch_calendar_day(day: str) -> dict[str, Any] | None:
+    """Real Alpaca trading-calendar entry for `day` (YYYY-MM-DD), or None
+    if `day` is not a trading day at all (weekend or market holiday).
+    `/v2/calendar` only ever lists genuine trading days in the requested
+    range -- an empty result IS the "not a trading day" answer, not an
+    error to work around.
+
+    2026-08-29 correctness pass #4 (item 3): this is what lets the
+    backtest harness tell a real holiday apart from a data OUTAGE on a
+    genuine trading day -- previously `if not bars:` treated both
+    identically as "skip this day," silently hiding an outage as a
+    no-op instead of failing the cycle. Also the source of a real half
+    session's actual close time (item 4) -- the returned `close` is the
+    genuine early close (e.g. "13:00" the day after Thanksgiving), never
+    assumed to be 16:00.
+    """
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{BASE_URL}/v2/calendar", params={"start": day, "end": day},
+            headers=_headers(), timeout=10,
+        )
+        resp.raise_for_status()
+        rows = resp.json()
+    return rows[0] if rows else None
+
+
 @mcp.tool()
 async def get_account() -> dict[str, Any]:
     """

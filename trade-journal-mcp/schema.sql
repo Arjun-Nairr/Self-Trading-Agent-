@@ -248,10 +248,44 @@ ALTER TABLE trades ENABLE ROW LEVEL SECURITY;
 ALTER TABLE insight_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE agent_activity ENABLE ROW LEVEL SECURITY;
 ALTER TABLE portfolio_snapshots ENABLE ROW LEVEL SECURITY;
-CREATE POLICY anonymous_read_trades ON trades FOR SELECT TO anonymous USING (true);
-CREATE POLICY anonymous_read_insight_log ON insight_log FOR SELECT TO anonymous USING (true);
-CREATE POLICY anonymous_read_agent_activity ON agent_activity FOR SELECT TO anonymous USING (true);
-CREATE POLICY anonymous_read_portfolio_snapshots ON portfolio_snapshots FOR SELECT TO anonymous USING (true);
+-- 2026-08-29 correctness pass #4 hygiene: CREATE POLICY has no IF NOT
+-- EXISTS in Postgres (unlike CREATE TABLE/INDEX above), so re-running
+-- this file against a database that already has these policies used to
+-- fail outright. Guarded via pg_policies so the whole file is safely
+-- re-runnable -- NOT a signal to actually re-apply it to Neon; the
+-- policies already exist there (see the module-level note above).
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'trades' AND policyname = 'anonymous_read_trades'
+    ) THEN
+        CREATE POLICY anonymous_read_trades ON trades FOR SELECT TO anonymous USING (true);
+    END IF;
+END $$;
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'insight_log' AND policyname = 'anonymous_read_insight_log'
+    ) THEN
+        CREATE POLICY anonymous_read_insight_log ON insight_log FOR SELECT TO anonymous USING (true);
+    END IF;
+END $$;
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'agent_activity' AND policyname = 'anonymous_read_agent_activity'
+    ) THEN
+        CREATE POLICY anonymous_read_agent_activity ON agent_activity FOR SELECT TO anonymous USING (true);
+    END IF;
+END $$;
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'portfolio_snapshots' AND policyname = 'anonymous_read_portfolio_snapshots'
+    ) THEN
+        CREATE POLICY anonymous_read_portfolio_snapshots ON portfolio_snapshots FOR SELECT TO anonymous USING (true);
+    END IF;
+END $$;
 
 -- ---------------------------------------------------------------------------
 -- Migration (2026-08-28) -- dashboard-correctness pass. CREATE TABLE IF NOT

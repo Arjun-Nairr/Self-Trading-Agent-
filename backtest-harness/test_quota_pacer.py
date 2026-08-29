@@ -140,6 +140,34 @@ def test_interrupted_write_never_corrupts_the_previous_valid_state():
     assert not p2.can_run_cycle(today)
 
 
+def test_record_cycle_fails_closed_with_a_named_error_on_corrupt_state():
+    """2026-08-29 correctness pass #4, item 6: record_cycle is called
+    AFTER a real Hermes call already happened -- an unreadable state file
+    used to crash here with a bare AttributeError (None.get), with no
+    indication the failure was quota-state corruption specifically, right
+    after real quota was already spent. Must raise a NAMED RuntimeError
+    instead, and can_run_cycle must still report closed."""
+    tmp = Path(tempfile.mktemp(suffix=".json"))
+    tmp.write_text("{not valid json")
+    p = QuotaPacer(budget=3, state_path=tmp)
+    today = date(2026, 8, 17)
+
+    try:
+        p.record_cycle(today)
+        raise AssertionError("expected record_cycle to raise on unreadable state")
+    except RuntimeError as exc:
+        assert "quota state unreadable" in str(exc)
+    except AttributeError as exc:
+        raise AssertionError(
+            f"record_cycle crashed with a bare AttributeError instead of a "
+            f"named error: {exc}"
+        ) from exc
+
+    # can_run_cycle must still report closed -- the failed record_cycle
+    # call didn't somehow leave the pacer thinking budget is available.
+    assert not p.can_run_cycle(today)
+
+
 def test_next_week_starts_returns_the_coming_monday():
     p = _pacer()
     # Wednesday -> next Monday is 5 days later.

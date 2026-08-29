@@ -22,8 +22,8 @@ from unittest.mock import patch
 # existing pattern.
 from run_backtest import (
     DEFAULT_MASKING_SEED, Holding, Portfolio, QueuedOrder, ResponseValidationError,
-    _atomic_write_json, _clear_checkpoint, _load_checkpoint, _resolve_seed,
-    _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
+    _atomic_write_json, _clear_checkpoint, _expected_session_bar_times, _load_checkpoint,
+    _resolve_seed, _resolve_window, _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
     build_decision_time_context, build_prompt,
     evaluate_bar_stop_target, evaluate_opening_gap, make_decision_id,
     require_intraday_coverage, resolve_queued_order, run_day, simulate_trading_day,
@@ -1144,6 +1144,239 @@ def test_build_prompt_renders_fresh_evidence_for_held_positions():
     # shows its base entry/current/stop/target line -- never fabricated.
     assert "BRAVO: 50 @ $50.00" in prompt
     print("  ok  a held position without fresh evidence still shows its base line, nothing invented")
+
+
+# --------------------------------------------------------------------------
+# 2026-08-29 correctness pass #4
+# --------------------------------------------------------------------------
+
+def test_stopped_out_today_resets_unconditionally_even_on_a_quiet_day():
+    """Item 1 -- the reset used to live INSIDE `if needed:`; on a day with
+    no holdings and no pending orders (a genuinely quiet day), a stop-out
+    from a PRIOR day was never cleared, so §9.4's same-day re-entry block
+    kept firing on every subsequent quiet day instead of expiring after
+    the day it actually happened. Exercises the real run_day, only the
+    true I/O boundary mocked."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    run_start = date(2026, 2, 17)
+    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
+                         seed=DEFAULT_MASKING_SEED)
+    pacer = QuotaPacer(state_path=tmp_dir / "quota_pacer_state.json")
+    # Portfolio ENTERING today already carries a PRIOR day's stop-out --
+    # exactly the leftover state the bug failed to clear, with no
+    # holdings/pending orders (a quiet day -- needed=[]).
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6,
+                          stopped_out_today=["OLN"])
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
+
+    fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
+    fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
+                               "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
+                               "support": [95.0], "resistance": [110.0]}}
+
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, on_invoked=None):
+        if on_invoked is not None:
+            on_invoked()
+        return {"decisions": [], "no_action_reason": "nothing qualifies today"}
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
+         patch("run_backtest.fetch_news", return_value={"OLN": []}), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes):
+        working, summary, _do_observability = run_day(
+            run_start, 0, portfolio, masking, watchlist, {}, pacer, str(uuid.uuid4()),
+        )
+
+    assert working.stopped_out_today == [], (
+        f"a quiet day (no holdings, no pending orders) failed to clear a PRIOR "
+        f"day's stop-out: {working.stopped_out_today}"
+    )
+    print("  ok  stopped_out_today resets unconditionally even on a quiet day "
+          "with no holdings and no pending orders")
+
+    ctx = build_decision_time_context(working, {}, ["OLN"], {})
+    assert ctx.stopped_out_today == [], (
+        "the decision-time context still carries a stale prior-day stop-out"
+    )
+    print("  ok  a later day's decision-time context no longer blocks re-entry "
+          "on a stop-out from a prior day")
+
+
+def test_stopped_out_today_persists_across_a_process_restart():
+    """Item 1 -- stopped_out_today was previously omitted from
+    to_dict/from_dict entirely; a resumed process (a fresh
+    Portfolio.from_dict call, exactly what happens on every real restart
+    between --days-limited invocations) always reset it to [] regardless
+    of what the prior process actually recorded."""
+    original = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6,
+                         stopped_out_today=["OLN", "DINO"])
+    restored = Portfolio.from_dict(original.to_dict())
+    assert restored.stopped_out_today == ["OLN", "DINO"]
+    print("  ok  stopped_out_today round-trips through to_dict/from_dict exactly")
+
+    legacy_dict = original.to_dict()
+    del legacy_dict["stopped_out_today"]
+    legacy_restored = Portfolio.from_dict(legacy_dict)
+    assert legacy_restored.stopped_out_today == []
+    print("  ok  a legacy state file missing the field falls back safely to []")
+
+
+def test_make_decision_id_disambiguates_duplicate_decisions_in_one_reply():
+    """Item 2 -- two IDENTICAL decisions (same ticker/action) at different
+    positions in the SAME response must get DIFFERENT decision_ids --
+    previously both resolved to the same id, so if the first resolved
+    rejected and the second filled, the fill's resolution found the row
+    already claimed by the first rejection and was silently dropped."""
+    id_0 = make_decision_id("run-x", 5, "OLN", "BUY", "queued_proposal[0]")
+    id_1 = make_decision_id("run-x", 5, "OLN", "BUY", "queued_proposal[1]")
+    assert id_0 != id_1
+    print("  ok  two identical (ticker, action) decisions at different list "
+          "positions get distinct decision_ids")
+
+    # Stable under checkpointed replay -- the SAME response (same
+    # positions) regenerates the IDENTICAL ids, not fresh ones.
+    assert make_decision_id("run-x", 5, "OLN", "BUY", "queued_proposal[0]") == id_0
+    assert make_decision_id("run-x", 5, "OLN", "BUY", "queued_proposal[1]") == id_1
+    print("  ok  a checkpointed replay of the same response regenerates the "
+          "IDENTICAL ids for each position")
+
+
+def test_duplicate_identical_decisions_journal_both_outcomes_with_distinct_ids():
+    """Item 2 -- the actual behavioral regression: two queued BUY orders
+    for the SAME ticker (as Hermes proposing two identical decisions in
+    one reply would produce, now disambiguated by occurrence index -- see
+    the STEP D loop in run_day) must resolve INDEPENDENTLY, each keeping
+    its own decision_id through to its own outcome event, even when the
+    first is rejected and the second fills."""
+    decision_id_0 = make_decision_id("run-x", 8, "OLN", "BUY", "queued_proposal[0]")
+    decision_id_1 = make_decision_id("run-x", 8, "OLN", "BUY", "queued_proposal[1]")
+    assert decision_id_0 != decision_id_1
+
+    # Order 0: oversized -- breaches §2b and is rejected. Order 1: same
+    # ticker, modest size -- passes and fills. Both queued in the same
+    # batch, as two identical-looking Hermes decisions would be.
+    order_0 = _buy_order(ticker="OLN", quantity=2000, stop_price=93.0, target_price=115.0,
+                         decision_id=decision_id_0)
+    order_1 = _buy_order(ticker="OLN", quantity=50, stop_price=93.0, target_price=115.0,
+                         decision_id=decision_id_1)
+
+    plan = simulate_trading_day(
+        holdings={}, pending_orders=[order_0, order_1],
+        intraday={"OLN": _flat_session()}, day_index=8, trading_days_elapsed=5,
+        limits_ctx={}, watchlist=["OLN"], closed_pnl=[], starting_cash=100_000.0,
+        equity_curve=[100_000.0] * 6,
+    )
+    buy_events = [e for e in plan.events if e["stage"] == "buy_945"]
+    assert len(buy_events) == 2, buy_events
+
+    rejected = [e for e in buy_events if e["kind"] == "rejected"]
+    filled = [e for e in buy_events if e["kind"] == "fill"]
+    assert len(rejected) == 1 and len(filled) == 1, buy_events
+    assert rejected[0]["order"].decision_id == decision_id_0
+    assert filled[0]["order"].decision_id == decision_id_1
+    assert rejected[0]["order"].decision_id != filled[0]["order"].decision_id
+    print("  ok  two identical-ticker queued BUYs keep their own distinct "
+          "decision_ids through to their own outcome (one rejected, one filled)")
+
+
+def test_outage_vs_holiday_distinguished_via_the_trading_calendar():
+    """Item 3 -- `if not bars:` alone used to treat a genuine outage on a
+    real trading day identically to an actual holiday. Now cross-checked
+    against Alpaca's real trading calendar."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    run_start = date(2026, 2, 17)
+    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
+                         seed=DEFAULT_MASKING_SEED)
+    pacer = QuotaPacer(state_path=tmp_dir / "quota_pacer_state.json")
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value={}), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": "2026-02-17", "open": "09:30", "close": "16:00"}):
+        try:
+            run_day(run_start, 0, portfolio, masking, watchlist, {}, pacer, "run-x")
+            raise AssertionError("expected an outage on a real trading day to halt, not skip")
+        except RuntimeError as exc:
+            assert "outage" in str(exc).lower()
+    print("  ok  a data outage on a real trading day (per the calendar) halts the cycle")
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value={}), \
+         patch("run_backtest.fetch_trading_calendar_day", return_value=None):
+        working, summary, _do = run_day(run_start, 0, portfolio, masking, watchlist, {}, pacer, "run-x")
+    assert "skipped" in summary and working is portfolio
+    print("  ok  a confirmed real holiday/weekend still skips, unchanged behavior")
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value={}), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               side_effect=RuntimeError("container unreachable")):
+        try:
+            run_day(run_start, 0, portfolio, masking, watchlist, {}, pacer, "run-x")
+            raise AssertionError("expected an unavailable calendar source to fail closed")
+        except RuntimeError as exc:
+            assert "calendar could not be checked" in str(exc)
+    print("  ok  an unavailable calendar source itself fails closed with a clear message")
+
+
+def test_expected_session_bar_times_standard_and_half_day():
+    """Item 4 -- the full session grid is derived from the REAL session
+    boundaries, not hardcoded to 09:30-16:00, so a genuine half day gets
+    its own correct, shorter grid."""
+    standard = _expected_session_bar_times("09:30", "16:00")
+    assert standard[0] == "09:30" and standard[-1] == "15:45" and len(standard) == 26
+    half_day = _expected_session_bar_times("09:30", "13:00")
+    assert half_day[0] == "09:30" and half_day[-1] == "12:45" and len(half_day) == 14
+    print("  ok  _expected_session_bar_times builds the correct grid for a standard "
+          "and a half-day session")
+
+
+def test_require_intraday_coverage_fails_closed_on_a_truncated_afternoon_feed():
+    """Item 4 -- a feed silently missing afternoon bars used to let the
+    walk stage iterate only what was there and the close mark trust
+    intraday[t][-1] as if it were the real close. The full session grid
+    (not just 09:30/09:45) must now be required."""
+    full_grid = tuple(_expected_session_bar_times("09:30", "16:00"))
+    truncated = {"OLN": _flat_session()[:18]}  # missing the last 8 afternoon bars
+    try:
+        require_intraday_coverage(["OLN"], truncated, required_times=full_grid)
+        raise AssertionError("expected a truncated afternoon feed to fail closed")
+    except RuntimeError as exc:
+        assert "OLN" in str(exc)
+    print("  ok  a feed missing afternoon bars fails closed against the full session grid")
+
+    complete = {"OLN": _flat_session()}
+    require_intraday_coverage(["OLN"], complete, required_times=full_grid)  # must not raise
+    print("  ok  a genuinely complete feed passes the full session grid check")
+
+
+def test_resolve_window_resume_and_mismatch():
+    """Item 5 -- --start/--end persistence, mirroring _resolve_seed's own
+    style/test."""
+    assert _resolve_window("2026-02-17", "2026-08-14", "2026-02-17", "2026-08-14") == \
+        ("2026-02-17", "2026-08-14")
+    print("  ok  a resumed run with a matching --start/--end proceeds")
+
+    try:
+        _resolve_window("2026-02-17", "2026-08-14", "2026-03-01", "2026-08-14")
+        raise AssertionError("expected a changed --start to fail closed")
+    except SystemExit as exc:
+        assert "2026-02-17" in str(exc) and "2026-03-01" in str(exc)
+    print("  ok  a resumed run with a conflicting --start fails loudly, naming both values")
+
+    try:
+        _resolve_window("2026-02-17", "2026-08-14", "2026-02-17", "2026-09-01")
+        raise AssertionError("expected a changed --end to fail closed")
+    except SystemExit as exc:
+        assert "2026-08-14" in str(exc) and "2026-09-01" in str(exc)
+    print("  ok  a resumed run with a conflicting --end fails loudly, naming both values")
+
+    assert _resolve_window(None, None, "2026-02-17", "2026-08-14") == ("2026-02-17", "2026-08-14")
+    print("  ok  a fresh/legacy run with no stored window establishes the requested one")
 
 
 def main():

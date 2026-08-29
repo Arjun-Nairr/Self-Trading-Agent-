@@ -443,8 +443,123 @@ containers rebuilt from the current source, restarted, and confirmed up
 with clean startup logs; all backtest Neon tables confirmed empty before
 and after.
 
+### 2026-08-29 correctness pass #4
+
+A pre-training audit found 10 verified backtest-path defects where the
+harness/journal/dashboard could silently produce wrong state, or fail by
+crash instead of a named error. No rule, architecture, or live-path
+changes.
+
+**Ten repairs (`backtest-harness/run_backtest.py` unless noted):**
+1. `stopped_out_today` (§9.4 same-day re-entry) now resets unconditionally
+   every real trading day, not only inside `if needed:` — a stop-out no
+   longer blocks re-entry on days after the one it happened on. Also
+   persisted in `backtest_state.json` (was omitted entirely).
+2. `make_decision_id`'s `kind` now includes each decision's own position
+   in the response's decisions list — two identical decisions in one
+   Hermes reply (same ticker/action) no longer collide on one
+   `decision_id`; a rejected-then-filled identical pair now journals both
+   outcomes independently. Stable under a checkpointed replay (same list,
+   same positions, same ids).
+3. `if not bars:` now cross-checks Alpaca's real trading calendar
+   (`alpaca-mcp`'s new `_fetch_calendar_day`, same container-call
+   mechanism as every other tool call) before deciding holiday vs.
+   outage: a real trading day with no bars now halts the cycle like any
+   other failure; a confirmed holiday/weekend still skips; a calendar
+   source itself unavailable fails closed with a named message.
+4. `require_intraday_coverage` now requires the FULL 15-minute session
+   grid (`_expected_session_bar_times`, derived from the real session's
+   own open/close — including a genuine half day) for every needed
+   ticker, not just the 09:30/09:45 boundaries — a feed silently missing
+   afternoon bars now fails closed instead of letting the walk stage
+   iterate a truncated feed and the close mark trust a stale last bar.
+5. `--start`/`--end` are now persisted in `backtest_state.json`; a
+   resumed run with a conflicting value fails loudly (`SystemExit`,
+   names all four values) before any fetch or Hermes call, mirroring
+   `_resolve_seed`'s style (`_resolve_window`).
+6. `quota_pacer.py`'s `record_cycle` now raises a named `RuntimeError`
+   ("quota state unreadable...") on a corrupt state file instead of
+   crashing with a bare `AttributeError` — this fires AFTER a real Hermes
+   call already happened, so the failure needs to be legible.
+   `can_run_cycle` already correctly reported closed in this case.
+7. `trade-journal-mcp/server.py`: `data_timestamps` empty-dict/None
+   asymmetry fixed — the write path already collapsed `{}` to `NULL`;
+   the compare path (`_json_equal`) now does too
+   (`_normalize_data_timestamps`), so an identical retry carrying `{}`
+   is a genuine no-op instead of a false payload-mismatch.
+8. `_decision_field_mismatches`'s confidence comparator is now
+   None-safe (`_int_equal`) like every other comparator there — a
+   collision against a NULL-confidence row reports a named mismatch,
+   not a crash.
+9. `record_exit` now journals mechanical exits (stop/target/time-stop)
+   with `confidence=None` instead of a fabricated `confidence=5` —
+   `_validate_decision_fields` skips all report-card checks when
+   `confidence is None`. Stops polluting the confidence-calibration
+   dataset with non-decisions; the dashboard's calibration view already
+   reads from the entry side, unaffected.
+10. `dashboard/index.html`: backtest mode with zero snapshots (no
+    current run to scope to) now renders an explicit "no run scoped"
+    empty state and skips the data queries entirely, instead of running
+    them unfiltered and silently mixing every past discarded run's rows
+    together. Live mode's unfiltered fallback is unchanged (live has no
+    run_id concept).
+
+**Hygiene (same pass):** `execution-sim` now has its own bridge network
+(`net-execution-sim`), no longer sharing `net-execution` with
+`alpaca-mcp` — the hub-and-spoke claim is now actually true for those
+two. `alpaca-mcp` now gets explicit `environment:` for only its two
+`ALPACA_*` vars instead of `env_file: .env` (was also handed
+`NEON_DATABASE_URL` it never uses). `google-news-rss-mcp` fetches with
+an explicit ~10s timeout (`_fetch_feed_bytes`) instead of an unbounded
+`feedparser.parse(url)`. `trade-journal-mcp/schema.sql`'s `CREATE
+POLICY` statements are now guarded (`pg_policies` existence check) so
+the file is safely re-runnable — **not re-applied to Neon**, the
+policies already exist there. `dashboard/index.html`: the blocked-
+activity pagination query now has an explicit `order=`; `esc()` now
+also escapes quotes. `trade-journal-mcp/test_idempotency.py`'s inline
+execution-result test is now wrapped in `try/finally` so a failed
+assertion can't strand a row in Neon.
+
+**Regression tests:** items 1-5 in `backtest-harness/
+test_execution_semantics.py` (9 new tests: stop-out reset/persistence,
+duplicate-decision-id disambiguation + behavioral proof, outage-vs-
+holiday, session-grid + truncated-feed coverage, `--start`/`--end`
+resume/mismatch); item 6 in `test_quota_pacer.py`; items 7-9 in the
+journal tests (`test_idempotency.py`: empty-`data_timestamps` no-op,
+NULL-confidence collision; `test_decision_fields.py`: confidence=None
+skips validation); item 10 verified live in a browser (no test
+framework exists for the dashboard) — see below.
+
+**Exact verification results (2026-08-29):** all touched files compile
+clean. `backtest-harness/test_execution_semantics.py` (125 checks,
+including all 9 new item 1-5 regressions), `test_anonymize.py`,
+`test_quota_pacer.py` (including the new item-6 test),
+`risk-checker/test_risk_checker.py`, `execution-sim-mcp/test_fill_logic.py`,
+`alpaca-mcp/test_account_math.py`, `test_status_mapping.py`,
+`test_historical_news.py` (real Alpaca API), `maverick-mcp/tests/
+market_data/test_fetchers.py` (22 tests), and the full trade-journal
+suite (`test_decision_fields.py`, `test_idempotency.py` extended,
+`test_run_isolation.py`, `test_dashboard_fields.py`, `test_mode_isolation.py`
+— real, self-cleaning Neon) — all PASS. The new `alpaca-mcp` calendar
+path (`_fetch_calendar_day`/`fetch_trading_calendar_day`) verified
+end-to-end against the real Alpaca API: a real trading day, a weekend,
+and a real holiday all resolved correctly. `docker compose config -q`
+valid; `google-news-rss-mcp` and `alpaca-mcp`/`execution-sim` rebuilt/
+recreated for the network and Dockerfile changes, all confirmed up with
+clean startup logs. Baseline untouched: `backtest_state.json` still
+cursor `2026-02-17`, zero trading days, no checkpoint file; quota state
+unchanged (`{"2026-W34": 34, "2026-W35": 6}`); all backtest Neon tables
+confirmed empty before and after. Dashboard checked live in a browser:
+Training mode with zero snapshots shows the new "no run scoped" empty
+state (status line: `BACKTEST · NO RUN SCOPED`); Live mode's normal
+unfiltered fallback is unchanged (`LIVE · LIVE @ NEON · updated ...`);
+zero console errors in either mode. `git status` shows only the 13
+files this pass touched.
+
+**Remaining blocker: none.**
+
 **Start the controlled training run only after explicit human approval.**
-The stack is training-ready — every repair through 2026-08-28 passed its
+The stack is training-ready — every repair through 2026-08-29 passed its
 own tests, the baseline above is verified clean, and no blocking issue is
 currently known. Nothing in this file authorizes starting it.
 
