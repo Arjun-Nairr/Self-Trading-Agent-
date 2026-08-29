@@ -7,7 +7,8 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY server.py test_idempotency.py test_decision_fields.py ./
+COPY server.py test_idempotency.py test_decision_fields.py test_mode_isolation.py \
+     test_run_isolation.py test_dashboard_fields.py ./
 
 RUN groupadd -g 1000 mcp && useradd -u 1000 -g mcp -s /bin/sh -m mcp && chown -R mcp:mcp /app
 USER mcp

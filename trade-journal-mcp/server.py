@@ -163,6 +163,7 @@ def _decision_field_mismatches(
     expected_reward_risk: float, invalidation_condition: str, strategy_notes: str | None,
     data_timestamps: dict[str, Any] | None, stop_price: float | None,
     target_price: float | None, limit_price: float | None, run_id: str | None,
+    execution_mode: str,
 ) -> list[str]:
     """Every field that DEFINES the decision -- not only the four
     (ticker/action/quantity/order_type) the prior check compared. A genuine
@@ -188,6 +189,7 @@ def _decision_field_mismatches(
         ("limit_price", _num_close(row["limit_price"], limit_price)),
         ("data_timestamps", _json_equal(row["data_timestamps"], data_timestamps)),
         ("run_id", _uuid_equal(row["run_id"], run_id)),
+        ("execution_mode", row["execution_mode"] == execution_mode),
     ]
     return [name for name, ok in checks if not ok]
 
@@ -210,6 +212,7 @@ async def _record_decision(
     stop_price: float | None = None,
     target_price: float | None = None,
     run_id: str | None = None,
+    execution_mode: str = "simulated",
 ) -> dict[str, Any]:
     """decision_id: optional caller-supplied id. Live Hermes never passes
     one (always gets a fresh uuid4, unchanged behavior). The backtest
@@ -240,8 +243,8 @@ async def _record_decision(
                              confidence, primary_signal, technical_basis,
                              expected_reward_risk, invalidation_condition,
                              strategy_notes, data_timestamps, stop_price,
-                             target_price, run_id)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                             target_price, run_id, execution_mode)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
         ON CONFLICT (decision_id) DO NOTHING
         RETURNING *
         """,
@@ -249,7 +252,7 @@ async def _record_decision(
         order_type, limit_price, confidence, primary_signal, technical_basis,
         expected_reward_risk, invalidation_condition, strategy_notes,
         json.dumps(data_timestamps) if data_timestamps else None,
-        stop_price, target_price, run_id,
+        stop_price, target_price, run_id, execution_mode,
     )
     if row is None:
         # A caller-supplied decision_id that already exists -- a retry of
@@ -270,7 +273,7 @@ async def _record_decision(
             technical_basis=technical_basis, expected_reward_risk=expected_reward_risk,
             invalidation_condition=invalidation_condition, strategy_notes=strategy_notes,
             data_timestamps=data_timestamps, stop_price=stop_price, target_price=target_price,
-            limit_price=limit_price, run_id=run_id,
+            limit_price=limit_price, run_id=run_id, execution_mode=execution_mode,
         )
         if mismatches:
             raise ValueError(
@@ -521,6 +524,7 @@ async def record_decision(
         confidence, primary_signal, expected_reward_risk, invalidation_condition,
         limit_price, technical_basis, strategy_notes, data_timestamps,
         stop_price=stop_price, target_price=target_price,
+        execution_mode="alpaca",
     ))
 
 
@@ -528,21 +532,18 @@ async def record_decision(
 async def record_execution_result(
     decision_id: str, status: str, broker_order_id: str | None = None,
     fill_price: float | None = None, fill_quantity: int | None = None,
-    rejection_reason: str | None = None, execution_mode: str = "simulated",
+    rejection_reason: str | None = None,
 ) -> dict[str, Any]:
     """Record the outcome of attempting to execute decision_id. Safe to call
     more than once with the same decision_id — only the first call that finds
     the row still 'pending' writes; later calls return the resolved result.
-    execution_mode: 'alpaca' (real broker), 'backtest' (execution-sim-mcp's
-    historical-fill mode, real backtest volume), or 'simulated' (execution-
-    sim-mcp used ad hoc for manual dev testing, NOT backtest data) — tag
-    honestly and don't default to 'simulated' during a real backtest run,
-    or its rows become indistinguishable from stray manual-test rows. This
-    is how a future reflection review tells which trades were shaped by
-    the simulator's simplified fill logic."""
+    This public tool is live-only and tags the result 'alpaca'
+    automatically. Backtest and manual simulator callers use the internal
+    helper with their explicit mode, so the model cannot relabel a live
+    result through this interface."""
     return _jsonable(await _record_execution_result(
         decision_id, status, broker_order_id, fill_price, fill_quantity,
-        rejection_reason, execution_mode,
+        rejection_reason, "alpaca",
     ))
 
 
@@ -552,7 +553,9 @@ async def get_trade_history(
 ) -> list[dict[str, Any]]:
     """List past trades, optionally filtered by ticker/status. Use
     status="pending" on startup to reconcile against real broker state."""
-    return _jsonable(await _get_trade_history(ticker, status, limit))
+    return _jsonable(await _get_trade_history(
+        ticker=ticker, status=status, limit=limit, execution_mode="alpaca",
+    ))
 
 
 @mcp.tool()
@@ -569,7 +572,9 @@ async def log_insight(cycle_type: str, insight_text: str) -> dict[str, Any]:
 @mcp.tool()
 async def get_insight_history(cycle_type: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
     """List past insight-log entries, optionally filtered by cycle_type."""
-    return _jsonable(await _get_insight_history(cycle_type, limit))
+    return _jsonable(await _get_insight_history(
+        cycle_type=cycle_type, limit=limit, mode="live",
+    ))
 
 
 @mcp.tool()

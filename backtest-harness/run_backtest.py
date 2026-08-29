@@ -1112,6 +1112,7 @@ from server import _record_decision, _record_execution_result
 async def main():
     d = await _record_decision(
         decision_id={decision_id!r},
+        execution_mode="backtest",
         ticker={real_ticker!r}, action={decision["action"]!r},
         intended_quantity={int(decision["quantity"])},
         intended_notional={float(decision["quantity"]) * float(decision["entry_price"])},
@@ -1163,6 +1164,7 @@ from server import _record_decision
 async def main():
     await _record_decision(
         decision_id={decision_id!r},
+        execution_mode="backtest",
         ticker={real_ticker!r}, action={decision["action"]!r},
         intended_quantity={int(decision["quantity"])},
         intended_notional={float(decision["quantity"]) * float(decision["entry_price"])},
@@ -1250,6 +1252,7 @@ from server import _record_decision, _record_execution_result
 async def main():
     d = await _record_decision(
         decision_id={decision_id!r},
+        execution_mode="backtest",
         ticker={real_ticker!r}, action="SELL",
         intended_quantity={int(quantity)},
         intended_notional={float(quantity) * float(exit_price)},

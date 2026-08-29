@@ -91,7 +91,9 @@ hold:
 3. Identify the target. If reward:risk is below the §6b minimum, skip it.
    The setup does not pay enough for what it risks.
 4. Check headlines. Adverse news vetoes the entry. Positive news is never a
-   reason to enter — it can only fail to block you.
+   reason to enter — it can only fail to block you. If the headline feed
+   errors or is unavailable, the veto cannot be evaluated: skip the entry
+   rather than treating missing evidence as "no adverse news."
 5. Size the position per §2 — the *smaller* of the stop-based size and the
    concentration cap — then confirm it still fits the exposure and cash
    limits in §3.

@@ -411,6 +411,38 @@ proposed change to a hard number needs to go through the user explicitly.
 
 ## Exact next step
 
+### 2026-08-29 plugin-guided pre-training audit
+
+The TDD/diagnosis pass found and repaired two first-party boundary defects,
+then a follow-up code review caught and fixed one over-broad condition in
+the first:
+
+- `google-news-rss-mcp` now fails closed when its RSS fetch/parser
+  genuinely fails (a bad HTTP status, or a malformed feed that also came
+  back with zero entries); an unavailable veto feed can no longer
+  masquerade as "no adverse news." The initial fix over-triggered on
+  feedparser's `bozo` flag alone, which real Google News RSS responses
+  set routinely even when entries parse fine — narrowed to only fail
+  closed when the feed ALSO returned nothing, or it would have silently
+  vetoed almost every live entry. `AGENTS.md` explicitly tells live
+  Hermes to skip an entry when the feed errors.
+- Trade-journal mode isolation is enforced at write and read boundaries:
+  live decisions/results are tagged `alpaca` immediately, backtest decisions
+  are tagged `backtest` when queued, and live history/reflection calls cannot
+  read backtest rows.
+
+Regression coverage lives in `google-news-rss-mcp/test_news_fetch.py`
+(three cases: success, genuine failure, and bozo-with-real-entries-is-not-
+a-failure) and `trade-journal-mcp/test_mode_isolation.py` (two cases,
+both pure/mocked, no Neon). Verified 2026-08-29: both files' own suites
+pass, plus the existing `test_idempotency.py`, `test_run_isolation.py`,
+`test_decision_fields.py`, and `test_dashboard_fields.py` (real,
+self-cleaning Neon) still pass unchanged against the new `execution_mode`
+field. All are plain `python test_*.py` scripts, not pytest. Both
+containers rebuilt from the current source, restarted, and confirmed up
+with clean startup logs; all backtest Neon tables confirmed empty before
+and after.
+
 **Start the controlled training run only after explicit human approval.**
 The stack is training-ready — every repair through 2026-08-28 passed its
 own tests, the baseline above is verified clean, and no blocking issue is

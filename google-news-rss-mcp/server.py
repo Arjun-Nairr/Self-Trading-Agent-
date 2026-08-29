@@ -51,6 +51,19 @@ def fetch_headlines(query: str, freshness_hours: int = 1, max_results: int = 15)
 
     feed = feedparser.parse(url)
 
+    # News is a safety veto. A broken feed must not look identical to a
+    # successful search that found no adverse headlines -- but `bozo` alone
+    # is too broad a trigger: feedparser sets it for plenty of non-fatal XML
+    # quirks (encoding pragmas, namespace/self-closing-tag oddities) that
+    # Google News RSS trips routinely while still returning real entries.
+    # Only treat this as a genuine fetch failure -- the actual ambiguity
+    # this guards against -- when it ALSO came back with nothing to show
+    # for it; a malformed-but-non-empty feed already isn't the "identical
+    # to zero adverse headlines" case this exists to catch.
+    status = getattr(feed, "status", 200)
+    if (getattr(feed, "bozo", False) or status >= 400) and not feed.entries:
+        raise RuntimeError(f"Google News RSS fetch failed (status={status})")
+
     headlines = []
     for entry in feed.entries[:max_results]:
         headlines.append({
