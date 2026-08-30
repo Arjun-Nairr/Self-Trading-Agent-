@@ -62,9 +62,16 @@ strategy lessons from a tiny/empty sample), and prompt-injection resistance
 are unchanged. The prior version is preserved at
 **`docs/history/SOUL_phase1_conservative_2026-08-30.md`**.
 
-**No new training run is authorized.** Implementing the profile is not
-approval to start Round 2 — see "Exact next step" below for what actually
-remains.
+**A 3-cycle Round 2 pilot ran (`run_id 97d112e8-...`), found a real
+one-share position-sizing defect, and it was fixed.** A follow-up
+`--reset` attempt (`run_id c55f0fc2-...`) then hit a **second, different,
+still-unfixed bug** — a real crash on cycle 1 (`ask_hermes`'s usage-token
+accumulator throws on an explicit-`null` field). **Neither run_id should
+ever be resumed; `backtest_state.json` does not currently exist at all;
+and a fresh `--reset` run cannot complete even one cycle until that second
+bug is fixed.** **Training is NOT currently safe to start.** See the
+dated sections near the bottom of this file for both defects' full story,
+and "Exact next step" for the real next action.
 
 ---
 
@@ -541,9 +548,17 @@ step.
 **Training is now PAUSED after this 3-cycle tranche for a full read-only
 repository/database redundancy audit, per explicit instruction.** The
 harness has not been invoked again since; `backtest_state.json` sits at
-cursor `2026-02-20` with the two pending orders above, ready to resume
-once the audit is complete and resumption is separately authorized. This
-section does not authorize further cycles.
+cursor `2026-02-20` with the two pending orders above. This section does
+not authorize further cycles.
+
+> **⚠ SUPERSEDED — do not resume this state.** The audit found that
+> `ATI x1`/`BRX x1` above are a real training-integrity defect (one-share
+> placeholders, not RULES.md-sized positions — see the next section and
+> "Current state" at the top of this file), and this state's equity
+> history is the fabricated six-point seed later removed. **This pilot
+> state must never be resumed.** It stays on disk only as evidence for
+> that section; the actual next step is a fresh `--reset` run, not a
+> resume of this one.
 
 ### 2026-08-30 — Training-integrity fix: decision-time position sizing
 
@@ -646,30 +661,136 @@ mutation of any kind occurred during this fix** — every verification step
 was either a pure-Python test or a real-but-mocked `run_day()` call with
 all I/O (Docker, Neon, Hermes) patched out.
 
-**The current 3-cycle Round 2 pilot state (`run_id
-97d112e8-57be-4632-a503-0417993cdf51`) is preserved completely unchanged
-by this fix** — `backtest_state.json` still sits at cursor `2026-02-20`
-with its two one-share pending orders (ATI, BRX) and the old six-entry
-equity seed, exactly as the pilot left it. **This state must NOT be
-resumed.** Both pending orders are the exact defect this fix corrects,
-and the equity-history format this fix removed. Resuming it would extend
-a run built on the very numbers this correction fixes.
+**The 3-cycle Round 2 pilot state (`run_id 97d112e8-...`) was, at the time
+this fix was written, still on disk unchanged.** *(Superseded a few hours
+later the same day — see the next dated section: a `--reset` run has
+since deleted `backtest_state.json` entirely. The pilot's own Neon rows
+under `run_id 97d112e8-...` are untouched and still readable — only the
+local state file describing it as "current" is gone.)*
 
 **Remaining blocker: none for this fix itself.** A **separately
-authorized fresh `--reset` run** is required before any further training
-— not a resume of the current pilot state.
+authorized fresh `--reset` run** was required before any further training
+— see the next section for what happened when one was actually attempted.
+
+### 2026-08-30 — First post-fix `--reset` attempt: real crash on cycle 1, training NOT yet safe to start
+
+Used the `implement` skill (docs) plus a directly authorized harness run
+(explicit user instruction, not a skill). **Task 1 of this pass: cleaned
+the ambiguity above** — the prior "ready to resume" framing on the pilot
+section and the (now-stale) "still sits at cursor 2026-02-20" line both
+corrected in place rather than left to contradict this section.
+
+**Exact command run, from `backtest-harness`:**
+```
+python run_backtest.py --start 2026-02-17 --end 2026-08-14 --days 3 --reset
+```
+
+**Result: the run did NOT complete three cycles. It failed on cycle 1
+with a real, reproducible crash — not a risk-checker rejection, an actual
+uncaught exception:**
+
+```
+starting fresh run (run_id=c55f0fc2-5073-4cf8-bc5c-17800e139bfc)
+Day 1 — 2026-02-17
+  CYCLE FAILED — simulated date NOT advanced, state NOT written:
+  TypeError: unsupported operand type(s) for +: 'int' and 'NoneType'
+cycles this run: 0 | quota used this week: 135/175
+```
+
+**Root cause (diagnosed, not yet fixed — per this task's own "stop and
+document" instruction):** `ask_hermes`'s `_accumulate()` helper
+(`backtest-harness/run_backtest.py`) does
+`usage_totals[key] = usage_totals.get(key, 0) + usage.get(key, 0)` for
+each token-usage field. `dict.get(key, 0)` only substitutes the default
+when `key` is *absent* — if the real Hermes CLI's usage payload includes
+the key with an explicit `null` value (plausible for e.g.
+`cache_read_tokens` when prompt caching didn't apply on a fresh, cold
+context — this was the very first cycle of a brand-new run), `.get()`
+returns `None`, and `int + None` throws exactly the observed `TypeError`.
+This is a **pre-existing latent defect**, not something introduced by the
+position-sizing fix earlier today — it simply never fired before because
+no prior real cycle happened to get a null usage field back. Not fixed in
+this pass; flagged for a dedicated, tested correction.
+
+**Real consequences, verified, not assumed:**
+
+- **Local state:** `--reset` deleted the old (defective) `backtest_state.json`
+  as designed, and the crash means the new run's state was correctly
+  never written either (fail-closed, exactly as documented) — no
+  `backtest_state.json` currently exists at all. No `cycle_checkpoint.json`
+  either (the crash happens before the response is ever checkpointed).
+- **Quota:** one real Hermes call *was* consumed before the crash
+  (`quota_pacer_state.json`: `135` this week, up from `134`) — the quota
+  pacer's "count the instant Hermes is actually called, even on a later
+  failure" contract worked exactly as documented; this was not a wasted
+  slot silently unaccounted for.
+- **Neon, scoped to the new `run_id c55f0fc2-...`** (read-only, verified):
+  `trades` 0, `insight_log` 0, `portfolio_snapshots` 0, `agent_activity`
+  **1** — a single honest `cycle_failed` narration row
+  (`"Day 1: TypeError: unsupported operand type(s) for +: 'int' and
+  'NoneType'"`), written by the real fail-closed logging path. Nothing
+  fabricated, nothing silently dropped.
+- **Round 1 and the Round 2 pilot's own Neon rows are untouched** — this
+  run never got far enough to touch anyone else's data, and no manual
+  cleanup was performed or needed.
+- **Dashboard — a real, separate finding worth flagging on its own:**
+  loaded live in a browser (Training view), the dashboard is **still
+  showing the OLD, superseded pilot run** (`97d112e8-...`: "3 cycles
+  recorded," the two one-share `ATI`/`BRX` placeholder BUYs, the old
+  6-point-seeded equity curve) **as if it were current** — because the
+  dashboard's "which run is current" logic keys off the most recent
+  `portfolio_snapshots` row, and the new run never produced one before
+  crashing. This is a direct, observable consequence of the harness
+  crash above, not a separate dashboard defect to fix independently — but
+  it means **the requirement "dashboard defaults to the fresh run, no
+  stale entries presented as current progress" currently fails**, through
+  no fault of the dashboard's own code.
+
+**No broad fix was attempted**, per this task's explicit instruction to
+stop and document a meaningful defect rather than improvise one. `RULES.md`,
+`AGENTS.md`, `SOUL.md`, `risk_checker.py`, the dashboard, and Docker/Neon
+runtime state were not touched. The position-sizing fix from earlier today
+is unaffected and still correct — this is a genuinely different, pre-
+existing bug the fresh run's first real cycle happened to surface.
+
+**Verification performed:** real Neon SELECTs scoped to the new `run_id`
+(above); real local filesystem check (`backtest_state.json`/
+`cycle_checkpoint.json` absence confirmed); real `quota_pacer_state.json`
+read; dashboard loaded live in a browser, zero console errors (the crash
+is invisible to the dashboard's own JS — it simply has nothing new to
+show), page text captured and confirmed showing the stale pilot data.
+
+**Full command output preserved** at `backtest-harness/round2b_smoketest.log`
+(gitignored — matches the `*.log` pattern added in the prior cleanup
+pass — not committed, kept locally as evidence).
+
+**Whether full training is safe to begin: NO.** A fresh `--reset` run
+cannot currently complete even its first cycle. The exact next action is
+a targeted, tested fix to `_accumulate`'s `usage.get(key, 0)` pattern
+(treat an explicit `null` the same as a missing key — e.g. `usage.get(key)
+or 0` per field, verified against a hand-built usage payload containing
+an explicit `None`), followed by a fresh `--reset` 3-cycle smoke test
+repeating this same verification (RULES-based sizing enforcement, cash
+reservation, duplicate-ticker prevention, journal/dashboard correctness,
+no stale data mixed in) before any larger training batch is considered.
+
+**Remaining blocker: yes — the `_accumulate` None-handling bug above.**
+Not fixed in this pass.
 
 ## Exact next step
 
-**The one-share sizing defect is fixed, tested, and verified. The 3-cycle
-pilot state must not be resumed — see the section immediately above.**
-Nothing in this file authorizes starting a new run. When separately
-approved: a fresh `--reset` run (a genuinely new `run_id`, a genuinely
-fresh one-point equity baseline, the corrected exact-sizing enforcement
-live from cycle one) — never a resume of `run_id
-97d112e8-57be-4632-a503-0417993cdf51`. Tracked, as before, against the
-six-month target of 30–60 completed trades
-(`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
+**A fresh `--reset` run currently fails on its very first cycle with a
+real, diagnosed-but-unfixed bug — see the section immediately above.**
+Nothing in this file authorizes starting a new run or a training batch.
+The next action is a targeted fix to `ask_hermes`'s `_accumulate()`
+None-handling in `backtest-harness/run_backtest.py`, tested against a
+hand-built usage payload with an explicit `null` field, before attempting
+another `--reset` smoke test. Neither of the two prior run_ids
+(`97d112e8-...`, the one-share pilot; `c55f0fc2-...`, this crashed
+attempt) should be resumed — both are superseded; the next attempt starts
+its own fresh `run_id` via `--reset` again. Tracked, once a clean 3-cycle
+smoke test actually passes, against the six-month target of 30–60
+completed trades (`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
 
 ---
 
