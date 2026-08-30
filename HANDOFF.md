@@ -381,6 +381,18 @@ files this pass touched.
   RULES.md's own weakest-grounded number), the just-revised time stop
   (10→15 trading days), total exposure cap (60%) and max positions (8).
   See `RULES.md` §10 for the full list.
+  **Early tuning-window evidence on §6b (2:1 minimum reward:risk)**,
+  observed 2026-08-29, run `26f1d371-08db-4885-ab24-b42200792fb7`, 83
+  real trading days elapsed (window day 120/179), **zero fills**: only 4
+  proposals were made in total, all 4 rejected. Three of four missed the
+  2.0 floor by a hair (ALGM 1.95, ATI 1.97, DINO 1.92 — ATI also
+  oversized, §2b 15.70% vs. 10%); the fourth (SFM) passed decision-time
+  review, was queued, and then failed at real next-day execution when
+  its reward:risk collapsed to 0.91 against the actual open. No rule
+  changed — flagged here as the evidence this open question already
+  asked for, not a recommendation. Worth revisiting once more of the
+  window has run; a single early stretch could still be this specific
+  slice of the market, not necessarily the threshold.
 
 **Ground rule for any of the above:** `RULES.md`'s hard limits are not up
 for negotiation via "better performance" arguments alone — even Hermes
@@ -555,6 +567,61 @@ state (status line: `BACKTEST · NO RUN SCOPED`); Live mode's normal
 unfiltered fallback is unchanged (`LIVE · LIVE @ NEON · updated ...`);
 zero console errors in either mode. `git status` shows only the 13
 files this pass touched.
+
+**Remaining blocker: none.**
+
+### 2026-08-30 round-2 prep — judgment-layer fixes, geometry diagnostic, counterfactual engine
+
+Run 1 (`26f1d371-08db-4885-ab24-b42200792fb7`, 125 cycles, zero fills — see
+`backtest-harness/run1_evaluation_extract.md`) showed flawless infrastructure and
+judgment-layer failures: every proposal aimed at the bare-minimum §6b R:R (1.92–2.00) and
+died to rounding or a next-day gap; two proposals breached the §2b concentration cap by
+skipping the smaller-of-two sizing check; 25 reflections on zero closed trades entrenched
+a no-trade prior; no-action reasons cited "location" without a measured distance. No
+RULES.md number changed — every fix below is judgment-layer (`AGENTS.md`) or offline
+analysis.
+
+**Part A — `AGENTS.md` edits** (five, all inside the existing entry/reflection procedure):
+R:R headroom doctrine (aim ~2.5:1, a ratio that only clears by rounding is treated as a
+fail — cites SFM's real 2.00→0.91 collapse); a gap stress-test before proposing; a
+mandatory dual sizing check (state both the stop-based and concentration-cap sizes
+explicitly — cites ATI's 15.70% and DINO's 19.80% real breaches); a reflection guard for
+`sample_size=0` (process-only, no strategy conclusions from zero outcomes); quantified
+location rejections (a measured % distance, not "pressed into resistance").
+
+**Part B — `backtest-harness/geometry_scan.py`** (new, read-only, human-eval-only):
+classifies every (day, ticker) pair in the real window by whether maverick's own real
+support/resistance algorithm offered a 2:1-or-better setup with a valid 5–10% stop.
+Real result: **79.6% GEOMETRY-VALID, 20.4% CLOSE, 0% INVALID** across all 1,250 pairs —
+but see the report's methodology note: maverick's synthetic ±5%/±10% resistance/support
+levels make "geometry exists" true almost by construction, verified/corrected against
+SFM's real ground-truth trade (an initial naive "nearest resistance" definition classified
+100% of the window as INVALID, which is provably wrong).
+
+**Part C — `backtest-harness/counterfactual.py`** (new, read-only, human-eval-only):
+mechanically replays real fill/exit rules (same functions `run_backtest.py` uses,
+imported not reimplemented) against SFM's real proposal and all 995 GEOMETRY-VALID pairs.
+Real result: SFM would have stopped out at **-1.00R**; the 995 geometry-valid population
+resolved at a **24.5% win rate, average -0.11R** — well below 2:1's ~33% breakeven. Reading:
+**Hermes' caution in run 1 was directionally justified** — the geometry maverick's simple
+algorithm flags as "available" mostly does not hold up as real resistance. (ALGM/ATI/DINO's
+exact stop/target were never journaled — decision-time rejections don't persist geometry —
+reported honestly as unreplayable rather than fabricated.)
+
+Full numbers, methodology, and the real bug caught mid-build (a cycle-date-mapping
+off-by-one between `agent_activity` events and `trades` rows, since `cycle_start`
+narration is written at the END of its own cycle, not the start) are in
+`backtest-harness/run2_prep_analysis.md`. New tests: `test_geometry_scan.py` (28 checks,
+including a ground-truth regression against SFM's real trade) and
+`test_counterfactual.py` (32 checks, including a regression for the date-mapping fix) —
+both plain-python, no network/Neon/Hermes/Docker, all PASS.
+
+**Verification:** both new modules run against real data for the full window (1,250
+geometry pairs, 995 counterfactual simulations, 0 fetch errors). `docker compose config
+-q` valid. No RULES.md/`risk_checker.py`/`run_backtest.py` enforcement-path changes.
+`backtest_state.json`/`quota_pacer_state.json` untouched — no run started, resumed, or
+reset. Neon: SELECT-only, scoped to run 1's own `run_id`, to recover its 5 proposals' real
+dates/stop/target.
 
 **Remaining blocker: none.**
 

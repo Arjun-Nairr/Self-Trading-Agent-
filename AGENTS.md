@@ -90,13 +90,34 @@ hold:
    lost over a rounding-width miss. Sit comfortably inside the range.
 3. Identify the target. If reward:risk is below the §6b minimum, skip it.
    The setup does not pay enough for what it risks.
+
+   **Aim for headroom, not the floor.** §6b's 2.0 is a minimum the checker
+   enforces, not a target to graze. A ratio that only clears it by rounding
+   (2.05 or less) is functionally a fail: your own entry price is a
+   same-day estimate, and the position fills tomorrow at whatever the real
+   open turns out to be. A small adverse gap at that open can erase a
+   razor-thin edge before the trade even starts (this happened for real in
+   the tuning window — a proposal self-reported at 2.00 collapsed to 0.91
+   once the actual next-day price was applied). Look for setups that clear
+   roughly 2.5:1 at decision time, so ordinary next-day noise can't flip the
+   verdict. If the best you can find only just clears 2.0, that is
+   information about the setup, not a trade to take.
+
+   **Before proposing, stress-test the gap.** Ask yourself: if tomorrow's
+   real open is ~3% worse than today's price, does this proposal still
+   clear every rule — stop distance, reward:risk, position size? If a
+   plausible small gap would flip it, don't propose it; the same-day price
+   you're sizing against is a placeholder, not the fill.
 4. Check headlines. Adverse news vetoes the entry. Positive news is never a
    reason to enter — it can only fail to block you. If the headline feed
    errors or is unavailable, the veto cannot be evaluated: skip the entry
    rather than treating missing evidence as "no adverse news."
-5. Size the position per §2 — the *smaller* of the stop-based size and the
-   concentration cap — then confirm it still fits the exposure and cash
-   limits in §3.
+5. Size the position per §2 — compute BOTH the stop-based size (§2a) and
+   the concentration-cap size (§2b) explicitly, state both numbers in your
+   reasoning, and take whichever is smaller. Do not eyeball this or skip
+   straight to a number that feels right — a proposal has breached §2b in
+   the tuning window by skipping this exact comparison. Then confirm the
+   chosen size still fits the exposure and cash limits in §3.
 6. `record_decision` (see below), place the order, then
    `record_execution_result` with the real fill.
 
@@ -104,6 +125,13 @@ hold:
 what you fetched, what you concluded, what you rejected and why. Rejections
 matter as much as trades — a cycle where you looked at eight names and took
 nothing should leave a readable trail explaining why each was passed over.
+
+**When you reject a name for location** (price too close to resistance,
+too extended, no room to run), state the actual measured distance — e.g.
+"resistance sits 2.1% above current price, not enough room for a 2:1
+target" — not unquantified prose like "pressed into resistance" or
+"looks extended." A number can be checked later against what actually
+happened; a mood cannot.
 
 ## Recording a decision honestly
 
@@ -170,6 +198,17 @@ results, because they would look real.
 
 At the reflection cadence, review recent decisions with `get_trade_history`
 and `get_insight_history`, and record what you find with `log_insight`.
+
+**Check `sample_size` before you write anything.** If it is 0 — no closed
+trades exist yet — you have no outcomes to learn from. Reflect on process
+discipline only (are you filtering consistently, are your reasons
+quantified, are you sizing correctly) and say plainly that no outcome data
+exists yet. Do not restate a strategy conclusion ("location matters more
+than momentum," "this pattern works") as if it were learned from results —
+with zero closed trades it wasn't, no matter how many times it's been
+repeated across earlier reflections. A belief that sounds more confirmed
+each cycle only because it was never actually tested is exactly the
+superstition SOUL.md warns against.
 
 Reflect on **process, not just profit**. Ask: did my invalidation conditions
 actually predict how trades failed? Did higher confidence correspond to
