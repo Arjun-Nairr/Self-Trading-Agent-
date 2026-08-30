@@ -100,7 +100,13 @@ ACTIVITY_BLOCK_TRADING_DAYS = 20   # RULES.md §6b: one block = 20 real trading 
 ACTIVITY_TARGET_TRADES = 5         # completed trades required per block to stay at base
 PROFILE_BASE = "aggressive_v1_base"
 PROFILE_ESCALATED = "aggressive_v1_escalated"
-PROFILE_MIN_REWARD_RISK = {PROFILE_BASE: 1.5, PROFILE_ESCALATED: 1.25}
+# A pending order resumed from a pre-Phase-1 state file was queued under
+# the FORMER conservative minimum (RULES.md §6b before this profile, 2.0)
+# -- never the new base tier's 1.5. Restoring it as PROFILE_BASE/1.5 would
+# misrepresent what it was actually checked against; this distinct label
+# makes that provenance explicit instead. See Portfolio.from_dict.
+PROFILE_LEGACY = "pre_phase1_legacy"
+PROFILE_MIN_REWARD_RISK = {PROFILE_BASE: 1.5, PROFILE_ESCALATED: 1.25, PROFILE_LEGACY: 2.0}
 
 
 def _limits_for_profile(profile_level: str) -> dict:
@@ -396,13 +402,21 @@ class Portfolio:
             # will simply get a fresh decision_id path on its next
             # resolution rather than crash on resume.
             pending_orders=[
-                # .get() on strategy_profile/min_reward_risk_used: old
-                # state files predate Phase 1 -- any such leftover order
-                # was queued under the (only) profile that existed then,
-                # which IS the base tier's own default value, so falling
-                # back to the dataclass defaults here is exactly correct,
-                # not a guess.
-                QueuedOrder(**{**o, "decision_id": o.get("decision_id", "")})
+                # strategy_profile/min_reward_risk_used, explicit .get()
+                # (not folded into **o, which would silently invoke
+                # QueuedOrder's own PROFILE_BASE/1.5 defaults): a pending
+                # order from a pre-Phase-1 state file was queued and risk-
+                # checked under the FORMER conservative minimum (2.0), not
+                # the new base tier (1.5) -- those are different real
+                # thresholds, and reporting it as PROFILE_BASE would
+                # misrepresent what it was actually validated against. See
+                # PROFILE_LEGACY.
+                QueuedOrder(**{
+                    **o, "decision_id": o.get("decision_id", ""),
+                    "strategy_profile": o.get("strategy_profile", PROFILE_LEGACY),
+                    "min_reward_risk_used": o.get(
+                        "min_reward_risk_used", PROFILE_MIN_REWARD_RISK[PROFILE_LEGACY]),
+                })
                 for o in d.get("pending_orders", [])
             ],
             # .get(): old state files predate this field -- a legacy resume
@@ -411,10 +425,22 @@ class Portfolio:
             stopped_out_today=d.get("stopped_out_today", []),
             # .get(): old (pre-Phase-1) state files predate activity
             # escalation entirely -- a legacy resume correctly starts at
-            # the base tier with a fresh block, never a crash on a missing
-            # key.
+            # the base tier, never a crash on a missing key.
             profile_level=d.get("profile_level", PROFILE_BASE),
-            block_start_trading_day=d.get("block_start_trading_day", 0),
+            # block_start_trading_day: if the key is genuinely absent (a
+            # pre-Phase-1 state file), do NOT default to 0 -- a run already
+            # `trading_days_elapsed` real days in would then have every one
+            # of those historical days counted toward the FIRST block's
+            # 20-day window, and could land mid-block (or already past a
+            # boundary) the instant Phase 1 code starts running, escalating
+            # (or not) off activity that happened before this mechanism
+            # even existed. Falling back to the CURRENT trading_days_elapsed
+            # instead starts a genuinely fresh block from today -- matching
+            # "resumed" semantics, not silently rewriting history. A file
+            # that already has this key (any Phase 1 file, including one
+            # freshly created via Portfolio()'s own default of 0) uses its
+            # real stored value untouched.
+            block_start_trading_day=d.get("block_start_trading_day", d.get("trading_days_elapsed", 0)),
             block_completed_trades=d.get("block_completed_trades", 0),
         )
 
@@ -2216,11 +2242,17 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     working = copy.deepcopy(portfolio)
     tickers = [t["symbol"] for t in watchlist]
     # Phase 1 aggressive profile (RULES.md §6b): the reward:risk floor
-    # actually binding THIS cycle, computed once and reused for the
-    # prompt Hermes sees, the decision-time risk check, and the queued
-    # order's own stashed threshold -- one number, one place, never
-    # recomputed differently in each spot. Falls back to RiskLimits()'s
-    # own base-tier default for direct/test callers passing limits_ctx={}.
+    # binding at the START of today's cycle -- used for the intraday
+    # exit/fill resolution below (which itself only reads a PREVIOUSLY
+    # queued order's own stored threshold, never this value -- see
+    # resolve_queued_order). Falls back to RiskLimits()'s own base-tier
+    # default for direct/test callers passing limits_ctx={}.
+    #
+    # RE-DERIVED LATER, after _maybe_advance_activity_block: if today
+    # closes out a slow block, working.profile_level changes mid-function,
+    # and everything from that point on (tonight's prompt, tonight's own
+    # new decisions) must use the just-updated tier, not this early value
+    # -- see the re-derivation right after that call, below.
     active_limits = limits_ctx.get("limits") or RiskLimits()
     active_min_rr = active_limits.min_reward_risk
     summary = {"day": str(day), "exits": [], "decisions": [], "blocked": [], "usage": {}}
@@ -2427,6 +2459,26 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # whether `needed` was non-empty, so the block clock must run
     # regardless too.
     _maybe_advance_activity_block(working)
+
+    # Re-derive the binding threshold from working.profile_level AFTER the
+    # block check above, not before. `active_limits`/`active_min_rr` (and
+    # the `limits_ctx` they came from) were computed at the TOP of this
+    # function, from YESTERDAY's profile -- on a day that closes out a
+    # slow block, _maybe_advance_activity_block just flipped
+    # working.profile_level to escalated, and everything below this point
+    # (tonight's prompt, tonight's decision-time risk check, tonight's
+    # queued orders and journal rows -- all for entries that fill THE NEXT
+    # trading day) must see that new tier immediately. Leaving the stale
+    # pre-transition values in place would label a decision
+    # "aggressive_v1_escalated" while actually enforcing/journaling the
+    # old 1.5 threshold -- exactly the mismatch this exists to prevent.
+    # Previously QUEUED orders are unaffected: they already resolved
+    # earlier in this same function (see the fill/reject loop above),
+    # using resolve_queued_order's own per-order override
+    # (order.min_reward_risk_used), never this cycle-level value.
+    limits_ctx = _limits_for_profile(working.profile_level)
+    active_limits = limits_ctx["limits"]
+    active_min_rr = active_limits.min_reward_risk
 
     # End of day: mark to the REAL market close (each held ticker's last
     # regular-session bar). Legitimate now that the day's chronological

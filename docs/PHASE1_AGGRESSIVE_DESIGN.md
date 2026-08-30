@@ -61,6 +61,17 @@ through your own reasoning").
   (`QueuedOrder.strategy_profile`/`min_reward_risk_used`) and
   `resolve_queued_order` uses THAT stored value at execution, never
   whatever tier happens to be "current" on the day it resolves.
+- **Precisely when the following block's profile becomes active:** the
+  block boundary is evaluated inside `run_day`, once per real trading day,
+  AFTER that day's exits/fills are resolved but BEFORE that same evening's
+  new decisions are considered. So on the exact day a block closes out
+  below target, `working.profile_level` flips immediately, and every
+  decision Hermes makes *later that same cycle* — the prompt it's shown,
+  the decision-time risk check, the resulting `QueuedOrder`, and the
+  journaled fields — already reflects the new tier. A `QueuedOrder`
+  already pending FROM AN EARLIER DAY is unaffected by this same-day flip:
+  it resolves earlier in that day's `run_day` call, against its own
+  already-stored threshold, before the boundary check even runs.
 - **Hermes never sees a trade count, a block-progress figure, or anything
   that reads as a quota.** Its prompt shows exactly one line: the
   currently-binding minimum reward:risk and the profile label
@@ -75,9 +86,18 @@ through your own reasoning").
   restored exactly on resume; a checkpoint replay cannot double-count a
   completion or escalate twice (see `run_day`'s essential/best-effort
   commit ordering, unchanged by this profile).
-- Every decision (queued or rejected) is journaled with its own
-  `strategy_profile`/`min_reward_risk_used` — see the `trades` table's
-  additive migration.
+- **Accepted (queued) decisions** get a real `trades` row with structured
+  `strategy_profile`/`min_reward_risk_used` fields — see the `trades`
+  table's additive migration.
+- **Decision-time rejections are NOT trade rows at all** — a proposal that
+  fails the decision-time risk check is never journaled to `trades` (only
+  what passes both the decision-time check and, the next trading day, the
+  execution-time check gets a row). A rejection is recorded only as an
+  `agent_activity` narration line, with the profile/threshold appended in
+  a fixed, consistently parseable form —
+  `[profile=aggressive_v1_base min_rr=1.5]` at the end of the line — so
+  later analysis can extract it without parsing Hermes' free-text
+  reasoning.
 
 ## What stays mandatory, unconditionally
 

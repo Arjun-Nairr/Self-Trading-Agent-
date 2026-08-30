@@ -399,17 +399,85 @@ clean. `backtest_state.json`/`quota_pacer_state.json` confirmed untouched
 (unmodified timestamps, gitignored either way); no run started, resumed,
 or reset.
 
+**Follow-up fix, same day — day-20 escalation boundary and legacy resume.**
+The implementation above shipped a real bug: `active_min_rr`/`active_limits`
+were computed once at the TOP of `run_day`, before that day's block
+transition could run — so on the exact trading day a block escalates,
+`working.profile_level` flipped to `aggressive_v1_escalated` but that
+evening's own new decisions were still enforced/journaled against the
+stale base 1.5, a real profile/threshold mismatch. Root cause fixed by
+re-deriving `limits_ctx`/`active_limits`/`active_min_rr` from
+`working.profile_level` a second time, immediately after
+`_maybe_advance_activity_block` runs — so the prompt, the decision-time
+check, the queued order, and its journaled fields all see the new tier
+the instant it takes effect, for every decision made later that same
+cycle. A previously-queued order is unaffected (it already resolved
+earlier in that same `run_day` call, against its own stored threshold,
+before the boundary check runs at all).
+
+Also fixed `Portfolio.from_dict`'s legacy-resume handling: a pending order
+restored from a pre-Phase-1 state file now gets an explicit
+`PROFILE_LEGACY`/2.0 label (it was really checked against the FORMER 2.0
+minimum, not the new 1.5 base — reporting it as the base tier would have
+misrepresented what it was actually validated against); and a legacy
+portfolio that already has real `trading_days_elapsed` history but
+predates block tracking now starts its first activity block AT that
+stored elapsed-day value, not at day 0 (which would have counted
+pre-Phase-1 history toward the very first block's 20-day window). A
+genuinely present `block_start_trading_day` — including a real 0 from a
+freshly-created Phase 1 `Portfolio()` — is always used as-is, never
+overridden by this fallback.
+
+Also corrected a misleading test docstring:
+`test_checkpoint_replay_cannot_double_count_or_re_escalate` previously
+implied `_record_trade_completion` was itself idempotent under double-
+invocation. It is not — it is a plain `+= 1`, and the test's own body
+proves two calls really do produce a count of 2. Checkpoint-replay safety
+comes entirely from `run_day`'s working-copy-and-commit-only-on-success
+architecture, not from this function deduplicating anything.
+`_maybe_advance_activity_block` genuinely is safe to call twice for the
+same day (guarded by its own boundary check) — the docstring now
+distinguishes the two claims instead of conflating them.
+
+Corrected `docs/PHASE1_AGGRESSIVE_DESIGN.md`: only accepted (queued)
+decisions get a real `trades` row with `strategy_profile`/
+`min_reward_risk_used`; a decision-time rejection is never a trade row at
+all, only a tagged `agent_activity` line
+(`[profile=... min_rr=...]`). Also documents precisely when the following
+block's profile becomes active: inside `run_day`, after that day's exits/
+fills resolve but before that same evening's new decisions are considered.
+
+**Exact verification of the fix:** all touched Python files
+(`backtest-harness/run_backtest.py`, `test_execution_semantics.py`)
+compile clean. The full `test_execution_semantics.py` suite — 158 checks,
+including one new real-orchestration-boundary regression that drives
+`run_day()` itself (not the pure helpers in isolation) across the exact
+day-20 transition, proving pre-boundary stays base/1.5 everywhere,
+post-boundary is escalated/1.25 everywhere (prompt, decision-time check,
+journaled queue call, and the resulting `QueuedOrder` object), and a
+previously-queued order keeps its own stored 1.5 across that same
+transition — plus 6 new legacy-resume regressions
+(`test_reset_returns_to_base_resume_preserves_the_tier`, extended) — all
+PASS. `git diff --check` clean; `git status` shows only the two touched
+files (`run_backtest.py`, `test_execution_semantics.py`) plus this
+handoff and the design-doc correction.
+`backtest_state.json`/`quota_pacer_state.json` confirmed untouched. No
+run started, resumed, or reset. `RULES.md`, `AGENTS.md`, `SOUL.md`,
+`risk_checker.py`, the journal schema/server, and the dashboard were not
+touched by this fix — out of scope, and untouched.
+
 **Remaining blocker: none for the implementation itself.**
 
 ## Exact next step
 
-**The synchronized implementation is done and verified. Round 2 itself
-still requires separate, explicit human approval before it starts** —
-implementing the profile is not that approval. Nothing in this file
-authorizes starting it. When approved: a fresh backtest run (`--reset`, a
-new `run_id`) under the now-synchronized `RULES.md`/`risk_checker.py`/
-`AGENTS.md`/`SOUL.md`, tracked against the six-month target of 30–60
-completed trades (`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
+**The synchronized implementation, including the day-20 boundary fix, is
+done and verified. Round 2 itself still requires separate, explicit human
+approval before it starts** — implementing the profile is not that
+approval. Nothing in this file authorizes starting it. When approved: a
+fresh backtest run (`--reset`, a new `run_id`) under the now-synchronized
+`RULES.md`/`risk_checker.py`/`AGENTS.md`/`SOUL.md`, tracked against the
+six-month target of 30–60 completed trades
+(`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
 
 ---
 

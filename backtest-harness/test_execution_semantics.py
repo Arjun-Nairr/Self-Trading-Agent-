@@ -13,7 +13,7 @@ Run: python test_execution_semantics.py
 import json
 import tempfile
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -22,7 +22,8 @@ from unittest.mock import patch
 # existing pattern.
 from run_backtest import (
     ACTIVITY_BLOCK_TRADING_DAYS, ACTIVITY_TARGET_TRADES, DEFAULT_MASKING_SEED,
-    PROFILE_BASE, PROFILE_ESCALATED, PROFILE_MIN_REWARD_RISK, TIME_STOP_TRADING_DAYS,
+    PROFILE_BASE, PROFILE_ESCALATED, PROFILE_LEGACY, PROFILE_MIN_REWARD_RISK,
+    TIME_STOP_TRADING_DAYS,
     Holding, Portfolio, QueuedOrder, ResponseValidationError,
     _atomic_write_json, _clear_checkpoint, _expected_session_bar_times, _limits_for_profile,
     _load_checkpoint, _maybe_advance_activity_block, _record_trade_completion,
@@ -1526,28 +1527,116 @@ def test_reset_returns_to_base_resume_preserves_the_tier():
     assert legacy_restored.profile_level == PROFILE_BASE
     print("  ok  a legacy state file missing these fields falls back to the base tier safely")
 
+    # A legacy portfolio that already has REAL trading history
+    # (trading_days_elapsed > 0) but predates block tracking must start a
+    # genuinely FRESH block from where it stands today -- not from 0,
+    # which would count every one of those historical days toward the
+    # very first block's 20-day window and could escalate (or not) off
+    # activity that happened before Phase 1 code even existed.
+    legacy_with_history = {"cash": 100_000.0, "holdings": {},
+                           "equity_curve": [100_000.0] * 6, "closed_pnl": [],
+                           "trading_days_elapsed": 83}
+    restored_with_history = Portfolio.from_dict(legacy_with_history)
+    assert restored_with_history.profile_level == PROFILE_BASE
+    assert restored_with_history.block_start_trading_day == 83, (
+        f"a legacy resume with real history must start its first block AT the current "
+        f"trading_days_elapsed (83), not 0 -- got {restored_with_history.block_start_trading_day}"
+    )
+    assert restored_with_history.block_completed_trades == 0
+    print("  ok  a legacy portfolio with existing elapsed days starts a fresh block "
+          "at that elapsed value, not at day 0")
+
+    # A genuinely NEW Phase 1 state file's block_start_trading_day=0 (its
+    # own real, freshly-written value, not a missing key) must be used
+    # AS-IS, never overridden by trading_days_elapsed -- the fallback
+    # above only applies when the KEY is truly absent.
+    new_format_early = {"cash": 100_000.0, "holdings": {},
+                        "equity_curve": [100_000.0] * 6, "closed_pnl": [],
+                        "trading_days_elapsed": 5, "block_start_trading_day": 0,
+                        "block_completed_trades": 1, "profile_level": PROFILE_BASE}
+    restored_new = Portfolio.from_dict(new_format_early)
+    assert restored_new.block_start_trading_day == 0, (
+        "a genuinely present block_start_trading_day=0 must never be overridden "
+        "by trading_days_elapsed"
+    )
+    assert restored_new.block_completed_trades == 1
+    print("  ok  a real Phase 1 state file's own block_start_trading_day=0 is preserved, "
+          "not confused with a missing key")
+
+    # A pending order from a pre-Phase-1 state file was queued and risk-
+    # checked under the FORMER conservative minimum (2.0) -- restoring it
+    # as PROFILE_BASE/1.5 would misrepresent what it was actually
+    # validated against.
+    legacy_order = {
+        "ticker": "OLN", "alias": "ALPHA", "action": "BUY", "quantity": 90,
+        "stop_price": 93.0, "target_price": 130.0, "entry_price": 100.0,
+        "queued_day_index": 3, "decision": {"action": "BUY", "quantity": 90},
+        "decision_id": "legacy-decision-id",
+        # deliberately no "strategy_profile"/"min_reward_risk_used" keys --
+        # exactly what a pre-Phase-1 state file's pending_orders looks like.
+    }
+    legacy_portfolio = {"cash": 100_000.0, "holdings": {},
+                        "equity_curve": [100_000.0] * 6, "closed_pnl": [],
+                        "pending_orders": [legacy_order]}
+    restored_order = Portfolio.from_dict(legacy_portfolio).pending_orders[0]
+    assert restored_order.strategy_profile == PROFILE_LEGACY, restored_order.strategy_profile
+    assert restored_order.min_reward_risk_used == PROFILE_MIN_REWARD_RISK[PROFILE_LEGACY] == 2.0, (
+        restored_order.min_reward_risk_used
+    )
+    print("  ok  a legacy pending order restores as PROFILE_LEGACY with its real "
+          "former minimum (2.0), not the new base tier's 1.5")
+
+    # A pending order that DOES carry these fields (any real Phase 1 file)
+    # must use its own real stored values, never overridden.
+    phase1_order = dict(legacy_order, strategy_profile=PROFILE_ESCALATED,
+                        min_reward_risk_used=1.25)
+    restored_phase1_order = Portfolio.from_dict(
+        {**legacy_portfolio, "pending_orders": [phase1_order]}
+    ).pending_orders[0]
+    assert restored_phase1_order.strategy_profile == PROFILE_ESCALATED
+    assert restored_phase1_order.min_reward_risk_used == 1.25
+    print("  ok  a real Phase 1 pending order's own stored profile/threshold is preserved")
+
 
 def test_checkpoint_replay_cannot_double_count_or_re_escalate():
-    """A retried cycle re-processes the SAME real trading day's events --
-    _record_trade_completion/_maybe_advance_activity_block must reflect
-    that a genuine retry replays the checkpointed response and its
-    resulting exits exactly once per real attempt that actually commits,
-    never twice for the same committed day. This is a property of run_day
-    itself (working is a deep copy, only adopted by the caller on success
-    -- see Portfolio's own docstring) rather than of these two pure
-    functions in isolation, but the pure functions must still be provably
-    idempotent under DIRECT double-invocation for the SAME day (guards
-    against a future caller mistakenly invoking either one twice)."""
+    """A checkpoint retry re-processes the SAME real trading day. Two
+    genuinely different properties are being proven here, and they are
+    NOT the same claim:
+
+    1. `_record_trade_completion` is a plain `+= 1` -- it is NOT itself
+       idempotent, and calling it twice on the SAME Portfolio object
+       really does double-count (proven directly below). Replay safety
+       does not come from this function -- it comes entirely from
+       `run_day`'s own architecture: `working` is a fresh `copy.deepcopy`
+       of the portfolio on every attempt, and only the CALLER (`main()`)
+       adopts a returned `working` as the new committed portfolio, and
+       only after that attempt's atomic state write succeeds (see
+       Portfolio's own docstring / run_day's essential-vs-best-effort
+       contract). A retry of a HALTED attempt starts over from the last
+       genuinely COMMITTED portfolio and replays the same checkpointed
+       Hermes response against a FRESH copy -- it does not call this
+       function again on an already-committed object, so there is no
+       second increment to double-count.
+    2. `_maybe_advance_activity_block` IS safe to call more than once for
+       the same `trading_days_elapsed` value -- it's guarded by the
+       block's own day-boundary check -- proven directly below too. This
+       one genuinely is idempotent under direct double-invocation.
+    """
     p = Portfolio()
     _record_trade_completion(p)
     _record_trade_completion(p)
-    assert p.block_completed_trades == 2, "two distinct completions must both count"
-    print("  ok  two distinct real completions both count (sanity: the counter isn't stuck)")
+    assert p.block_completed_trades == 2, (
+        "two calls really do add up to two -- this function has no dedup logic of its own; "
+        "see the docstring above for where replay safety actually comes from"
+    )
+    print("  ok  _record_trade_completion is NOT idempotent by itself (2 calls -> count of 2) "
+          "-- replay safety is run_day's job, not this function's")
 
     # _maybe_advance_activity_block called twice for the SAME
     # trading_days_elapsed value (simulating an accidental double-call,
     # which run_day's real control flow never does) must not advance the
-    # block a second time or re-escalate.
+    # block a second time or re-escalate -- THIS function genuinely is
+    # idempotent under direct double-invocation.
     p.trading_days_elapsed = ACTIVITY_BLOCK_TRADING_DAYS
     _maybe_advance_activity_block(p)
     tier_after_first = p.profile_level
@@ -1557,7 +1646,7 @@ def test_checkpoint_replay_cannot_double_count_or_re_escalate():
     assert p.block_start_trading_day == start_after_first, (
         "a same-day double-call must not advance the block window twice"
     )
-    print("  ok  calling the block check twice for the same day is a no-op the second time")
+    print("  ok  _maybe_advance_activity_block genuinely is idempotent for a repeat same-day call")
 
 
 def test_queued_orders_use_their_stored_threshold_at_execution():
@@ -1595,6 +1684,166 @@ def test_queued_orders_use_their_stored_threshold_at_execution():
         f"a base-tier order must stay held to 1.5 even under a looser ctx: {outcome2.reason}"
     )
     print("  ok  a base-tier order stays held to its own 1.5 floor even under a looser ctx")
+
+
+# ============================================================================
+# Real orchestration-boundary regression for the day-20 profile-mismatch bug
+# (see HANDOFF.md's Phase 1 fix section). Drives run_day() itself -- not the
+# pure helpers in isolation -- with only the true I/O boundary mocked, same
+# template as test_real_lifecycle_checkpoint_commit_then_best_effort_
+# observability. A single scenario proves all three "done when" cases at
+# once: pre-boundary stays base/1.5, post-boundary is escalated/1.25
+# everywhere (prompt, decision-time check, queued order, journal), and a
+# PREVIOUSLY queued order keeps its own stored (stricter) threshold across
+# the very same transition.
+# ============================================================================
+
+def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlist,
+                           decisions_to_propose, tmp_dir):
+    """Runs one real run_day() cycle with only true I/O mocked. Returns
+    (working, captured_prompts, queued_decision_calls, rejected_lines)."""
+    captured_prompts = []
+    queued_decision_calls = []
+
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, on_invoked=None):
+        captured_prompts.append(prompt)
+        if on_invoked is not None:
+            on_invoked()
+        usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
+        return {"decisions": decisions_to_propose, "no_action_reason": "n/a" if decisions_to_propose else "nothing today"}
+
+    def fake_record_queued_decision(decision, real_ticker, decision_id, run_id=None,
+                                    strategy_profile=None, min_reward_risk_used=None):
+        queued_decision_calls.append({
+            "ticker": real_ticker, "strategy_profile": strategy_profile,
+            "min_reward_risk_used": min_reward_risk_used,
+        })
+
+    fake_bars = {t["symbol"]: {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0}
+                for t in watchlist}
+    fake_technicals = {t["symbol"]: {"price": 100.0, "rsi": 50.0, "rsi_signal": "neutral",
+                                     "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
+                                     "support": [95.0], "resistance": [110.0]}
+                       for t in watchlist}
+    fake_news = {t["symbol"]: [] for t in watchlist}
+    intraday_needed = sorted(set(portfolio.holdings) | {o.ticker for o in portfolio.pending_orders})
+    fake_intraday = {t: _flat_session(price=100.0) for t in intraday_needed}
+    fake_calendar_day = {"open": "09:30", "close": "16:00"}
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_intraday_bars", return_value=fake_intraday), \
+         patch("run_backtest.fetch_trading_calendar_day", return_value=fake_calendar_day), \
+         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
+         patch("run_backtest.fetch_news", return_value=fake_news), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_queued_decision", side_effect=fake_record_queued_decision), \
+         patch("run_backtest.resolve_trade_fill", return_value=None), \
+         patch("run_backtest.resolve_trade_rejection", return_value=None), \
+         patch("run_backtest.record_snapshot_once", return_value=True), \
+         patch("run_backtest.log_activity", return_value=None):
+        pacer = QuotaPacer(state_path=tmp_dir / "quota_pacer_state.json")
+        todays_limits_ctx = _limits_for_profile(portfolio.profile_level)
+        working, summary, _do_observability = run_day(
+            day, day_index, portfolio, masking, watchlist, todays_limits_ctx, pacer, run_key,
+        )
+
+    return working, captured_prompts, queued_decision_calls, summary["blocked"]
+
+
+def test_activity_escalation_transition_at_the_real_orchestration_boundary():
+    tmp_dir = Path(tempfile.mkdtemp())
+    run_start = date(2026, 2, 17)
+    run_key = str(uuid.uuid4())
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}, {"symbol": "DINO", "sector": "Energy"}]
+    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"], "DINO": ["HF Sinclair", "Sinclair"]},
+                         run_start=run_start, seed=DEFAULT_MASKING_SEED)
+    dino_alias = masking.alias("DINO")
+
+    # A marginal proposal: ratio 1.3 -- fails the base 1.5 floor (even with
+    # its 0.02 tolerance), clears the escalated 1.25 floor comfortably.
+    marginal_decision = {
+        "alias": dino_alias, "action": "BUY", "quantity": 90, "entry_price": 100.0,
+        "stop_price": 92.0, "target_price": 110.4, "confidence": 3,
+        "primary_signal": "technical", "technical_basis": "rsi",
+        "expected_reward_risk": 1.3, "invalidation_condition": "closes below $92",
+        "reasoning": "marginal setup, ratio 1.3",
+    }
+
+    # -- PRE-boundary: trading_days_elapsed will become 10, well short of
+    #    the 20-day block -- everything must stay base/1.5. ------------------
+    pre_boundary = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6,
+                             trading_days_elapsed=9, profile_level=PROFILE_BASE,
+                             block_start_trading_day=0, block_completed_trades=0)
+    working_pre, prompts_pre, queued_pre, blocked_pre = _run_backtest_scenario(
+        pre_boundary, run_start, 0, run_key, masking, watchlist, [marginal_decision], tmp_dir,
+    )
+    assert working_pre.trading_days_elapsed == 10
+    assert working_pre.profile_level == PROFILE_BASE, "10 trading days must not trigger escalation"
+    assert f"strategy profile: {PROFILE_BASE}" in prompts_pre[0], (
+        "the pre-boundary prompt must show the base tier"
+    )
+    assert "minimum reward:risk this cycle: 1.5:1" in prompts_pre[0]
+    assert not queued_pre, "a 1.3 ratio must NOT queue under the base 1.5 floor"
+    assert any("§6b" in line and f"min_rr={PROFILE_MIN_REWARD_RISK[PROFILE_BASE]}" in line
+              for line in blocked_pre), blocked_pre
+    print("  ok  pre-boundary: prompt, decision-time check, and queued orders all stay base/1.5")
+
+    # -- THE boundary day itself: trading_days_elapsed becomes 20. A
+    #    PREVIOUSLY queued OLN order (queued under the base tier, stored
+    #    threshold 1.5) must resolve using ITS OWN stored value -- its real
+    #    execution ratio is 1.3, which fails 1.5 -- even though today ALSO
+    #    escalates the run to 1.25 by the time DINO's new proposal is
+    #    considered later THIS SAME cycle. -----------------------------------
+    old_order = QueuedOrder(
+        ticker="OLN", alias=masking.alias("OLN"), action="BUY", quantity=90,
+        stop_price=92.0, target_price=110.4, entry_price=100.0,
+        queued_day_index=18, decision={"action": "BUY", "quantity": 90},
+        decision_id="preexisting-decision-id",
+        strategy_profile=PROFILE_BASE, min_reward_risk_used=1.5,
+    )
+    boundary_portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6,
+                                   trading_days_elapsed=19, profile_level=PROFILE_BASE,
+                                   block_start_trading_day=0, block_completed_trades=0,
+                                   pending_orders=[old_order])
+    boundary_day = run_start + timedelta(days=1)
+    working_post, prompts_post, queued_post, blocked_post = _run_backtest_scenario(
+        boundary_portfolio, boundary_day, 1, run_key, masking, watchlist,
+        [marginal_decision], tmp_dir,
+    )
+    assert working_post.trading_days_elapsed == 20
+    assert working_post.profile_level == PROFILE_ESCALATED, (
+        "a block completing with 0 trades must escalate exactly on its 20th trading day"
+    )
+    print("  ok  the block transitions to the escalated tier exactly on trading day 20")
+
+    # The PRE-EXISTING OLN order must have been rejected against its OWN
+    # 1.5 -- not silently upgraded to today's newly-escalated 1.25.
+    assert "OLN" not in working_post.holdings, (
+        "the pre-existing order's real ratio (1.3) must fail its OWN stored 1.5 floor"
+    )
+    print("  ok  the previously-queued OLN order was rejected at its OWN stored 1.5 threshold, "
+          "unaffected by today's later escalation")
+
+    # DINO's NEW proposal, considered AFTER today's transition, must be
+    # escalated/1.25 everywhere: the prompt, the journaled queue call, and
+    # the resulting QueuedOrder object.
+    assert f"strategy profile: {PROFILE_ESCALATED}" in prompts_post[0], (
+        "the post-boundary prompt must show the escalated tier"
+    )
+    assert "minimum reward:risk this cycle: 1.25:1" in prompts_post[0]
+    assert len(queued_post) == 1 and queued_post[0]["ticker"] == "DINO", queued_post
+    assert queued_post[0]["strategy_profile"] == PROFILE_ESCALATED
+    assert queued_post[0]["min_reward_risk_used"] == 1.25
+    print("  ok  the decision queued AFTER the transition (for DINO) is escalated/1.25 in the "
+          "prompt, the decision-time check, and the journaled queue call")
+
+    dino_order = next(o for o in working_post.pending_orders if o.ticker == "DINO")
+    assert dino_order.strategy_profile == PROFILE_ESCALATED
+    assert dino_order.min_reward_risk_used == 1.25
+    print("  ok  the resulting QueuedOrder object itself stores escalated/1.25 -- no decision "
+          "can carry a profile label that disagrees with its enforced/stored threshold")
 
 
 def main():
