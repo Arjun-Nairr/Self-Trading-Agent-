@@ -1,14 +1,13 @@
-# Phase 1 aggressive paper-trading profile — approved design
+# Phase 1 aggressive paper-trading profile — implemented
 
-**Status: approved design, not yet implemented.** This document records the
-numeric trading profile approved for the next backtest round, as a target
-for `RULES.md` and `risk-checker/risk_checker.py` to implement together
-(synchronized, per that module's own drift-risk warning — a number changed
-in one and not the other is silently unenforced). **No enforcement file
-currently reflects these numbers.** `RULES.md`, `risk_checker.py`,
-`AGENTS.md`, and the harness all still encode the conservative Round-1
-profile as of this document's creation (2026-08-30) — see `HANDOFF.md` for
-the exact current state and the pending implementation step.
+**Status: implemented.** `RULES.md`, `risk-checker/risk_checker.py`,
+`AGENTS.md`, and `backtest-harness/run_backtest.py` all now encode this
+profile together, synchronized in one change (per `risk_checker.py`'s own
+drift-risk warning — a number changed in one and not the other is silently
+unenforced). `SOUL.md`'s Phase 2 temperament and this numeric profile are
+now in sync — see `HANDOFF.md` for exact verification results and the
+real next step (Round 2 itself still requires separate, explicit human
+approval to start — implementing the profile is not that approval).
 
 This is a **permanent paper-money sandbox**, not a path toward real capital.
 The point of the aggressive profile is to generate more real trading
@@ -17,31 +16,74 @@ simulate what a live account should risk.
 
 ## The profile
 
-| Parameter | Value | Replaces (Round 1 / RULES.md today) |
+| Parameter | Value | Replaces (Round 1 / RULES.md before) |
 |---|---|---|
-| Minimum reward:risk | **1.5:1** | 2.0:1 (§6b) |
+| Minimum reward:risk | **1.5:1 base, 1.25:1 escalated** (see below) | 2.0:1 (§6b) |
 | Risk budget per trade | **2% of equity** | 1.0% (§2a) |
 | Max single position | **20% of equity** | 10% (§2b) |
-| Exposure limit | **available cash only; no margin** | 60% of equity, 5% min cash (§3) |
+| Exposure limit | **available cash only; no margin, cash cannot go negative** | 60% of equity, 5% min cash (§3) |
 | Position-count / daily-entry limit | **none** | 8 max positions (§3) |
 | Same-ticker concurrency | **one open position per ticker** | (unchanged — already the rule) |
 | Stop distance | **3–12% from entry** | 5–10% (§6a) |
 | Time stop | **5 trading days maximum hold** | 15 trading days (§6c) |
 | Circuit breaker | **only a catastrophic −30% drawdown pause** | −3% daily / −6% weekly / −10% drawdown (§4) |
-| Activity target | **≥5 completed trades per 20-trading-day period** | none |
-| Escalation | **if activity stays below target, propose loosening the next period's minimum R:R to 1.25:1** | n/a |
-| Six-month target | **30–60 completed trades** | n/a (Round 1 produced 1) |
+| Losing-streak de-risking | **removed entirely** (former §4a) | cut position size 25% after 3 losses |
+| Market-hours entry buffers | **removed entirely** — any minute the market is open permits an entry | no entries in the first 15min / last 30min (§7) |
+| Activity target | **≥5 completed trades per 20-trading-day block** | none |
+| Escalation | **automatic, deterministic, harness-controlled** — see below | n/a |
+| Six-month target | **30–60 completed trades** | n/a (Round 1 produced zero fills) |
 
-**"Proposed escalation" is exactly that — proposed, not automatic.**
-Whatever mechanism eventually implements it must surface the loosening as a
-recommendation a human approves before it takes effect, not a rule Hermes
-or the harness applies to itself. This mirrors `RULES.md`'s own standing
-rule that Hermes may never loosen a limit through its own reasoning.
+## The escalation mechanism, exactly as implemented
+
+Approved by the user in advance — this is **not** Hermes loosening its own
+rules (RULES.md §9's one deliberate exception to "never loosen a limit
+through your own reasoning").
+
+- A fresh or `--reset` run always starts at the base tier
+  (`aggressive_v1_base`, min R:R 1.5).
+- The run is divided into fixed blocks of **20 real trading days**
+  (`ACTIVITY_BLOCK_TRADING_DAYS`), counted from the run's own start —
+  weekends and holidays never count.
+- A trade counts toward a block's activity only once **fully completed**
+  — a filled entry later closed by a filled exit (mechanical stop/target/
+  time-stop, or a discretionary SELL fill). A rejected or merely-queued
+  proposal never counts.
+- Evaluated exactly on a block's own 20th real trading day, after that
+  day's exits are recorded (so a completion on the block's last day still
+  counts). If the block completed **fewer than 5** trades, the
+  *following* block's minimum reward:risk becomes 1.25:1
+  (`aggressive_v1_escalated`) instead of 1.5:1.
+- Escalation never reverses and never re-evaluates once triggered — the
+  run stays at 1.25:1 for the rest of its life. Never changes mid-block.
+- **The exact threshold and profile label used to decide, queue, and
+  execute a given order are the same number, always** — a queued order
+  stores the tier that was binding when it was decided
+  (`QueuedOrder.strategy_profile`/`min_reward_risk_used`) and
+  `resolve_queued_order` uses THAT stored value at execution, never
+  whatever tier happens to be "current" on the day it resolves.
+- **Hermes never sees a trade count, a block-progress figure, or anything
+  that reads as a quota.** Its prompt shows exactly one line: the
+  currently-binding minimum reward:risk and the profile label
+  (`aggressive_v1_base`/`aggressive_v1_escalated`) — nothing else. The
+  entire mechanism lives in `backtest-harness/run_backtest.py`
+  (`_maybe_advance_activity_block`, `_record_trade_completion`,
+  `_limits_for_profile`); `risk_checker.py` itself has no concept of
+  blocks or tiers, only whichever single `min_reward_risk` value it's
+  handed for one check.
+- State (`profile_level`, `block_start_trading_day`,
+  `block_completed_trades`) is persisted in `backtest_state.json` and
+  restored exactly on resume; a checkpoint replay cannot double-count a
+  completion or escalate twice (see `run_day`'s essential/best-effort
+  commit ordering, unchanged by this profile).
+- Every decision (queued or rejected) is journaled with its own
+  `strategy_profile`/`min_reward_risk_used` — see the `trades` table's
+  additive migration.
 
 ## What stays mandatory, unconditionally
 
-Every one of the following stays exactly as it is today — this profile
-changes numeric thresholds, not the safety architecture around them:
+Every one of the following stayed exactly as it was before this profile —
+it changed numeric thresholds and removed specific limit checks, not the
+safety architecture around them:
 
 - **Lookahead prevention and point-in-time masking** — `as_of`-gated data
   fetches, reshuffled ticker/company aliases, next-day queued execution.
@@ -53,19 +95,25 @@ changes numeric thresholds, not the safety architecture around them:
 - **Missing-data fail-closed behavior** — a genuine data gap on a real
   trading day halts the cycle; it is never silently skipped or fabricated.
 - **Queue-time journaling and idempotency** — every decision journaled the
-  instant it's queued, `decision_id` collision detection, no fabricated
+  instant it's queued, `decision_id` collision detection (now also
+  comparing `strategy_profile`/`min_reward_risk_used`), no fabricated
   fills.
 - **Anti-fabrication discipline generally** — no invented price, level,
   stop, or outcome, anywhere in the stack, under any profile.
 - **Sentiment-as-veto-only (§5a)** — the prompt-injection defense described
-  there does not change with this profile.
+  there did not change with this profile.
 - **`RULES.md`'s hard prohibitions (§9)** — no averaging down, no widened
-  stops, no off-watchlist trading, no same-day re-entry after a stop-out.
+  stops, no off-watchlist trading, no same-day re-entry after a stop-out,
+  one open position per ticker.
 
-## What this document does not do
+## Verification
 
-It does not edit `RULES.md`'s numbers, `risk_checker.py`'s `RiskLimits`,
-`AGENTS.md`'s procedure, or any test. It does not authorize starting a new
-backtest run. Implementing it is a synchronized change across `RULES.md`,
-`risk_checker.py`, `AGENTS.md`, and the harness's own tests together — see
-`HANDOFF.md`'s "Exact next step" for that pending work.
+See `HANDOFF.md`'s dated section for the exact test results, migration
+confirmation, and `docker compose config -q` output. Summary: risk-checker,
+harness (execution semantics, quota), and trade-journal (decision fields,
+idempotency — including new profile-field collision cases, mode isolation,
+run isolation, dashboard fields) suites all pass against the new numbers;
+the additive Neon migration (`trades.strategy_profile`,
+`trades.min_reward_risk_used`) applied cleanly, Round 1's own row remains
+readable with both fields NULL; `backtest_state.json`/
+`quota_pacer_state.json` untouched; no run started, resumed, or reset.

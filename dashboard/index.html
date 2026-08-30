@@ -627,8 +627,15 @@ function renderPositions(trades, snaps) {
       const value = current * t.fill_quantity;
       const upl = d ? Number(d.unrealized_pl) : null;
       const uplPct = d ? Number(d.unrealized_pl_pct) : null;
+      // Phase 1 aggressive profile: unobtrusive -- a title tooltip on the
+      // ticker cell, not a new column. Null on every pre-Phase-1 row
+      // (nothing shown, not a placeholder dash), same "never invented"
+      // discipline as the rest of this table.
+      const profileTip = t.strategy_profile
+        ? ` title="${esc(t.strategy_profile)} · min reward:risk ${t.min_reward_risk_used ?? "?"}:1"`
+        : "";
       return `<tr>
-      <td class="ticker">${esc(t.ticker)}</td><td>${t.fill_quantity}</td>
+      <td class="ticker"${profileTip}>${esc(t.ticker)}</td><td>${t.fill_quantity}</td>
       <td>${money(t.fill_price)}</td><td>${money(current)}</td><td>${money(value)}</td>
       <td class="${upl==null?"":upl>=0?"pos":"neg"}">${upl==null?"—":`${upl>=0?"+":""}${money(upl)} (${pctSigned(uplPct)})`}</td>
       <td>${d ? money(d.stop_price) : (t.stop_price != null ? money(t.stop_price) : "—")}</td>

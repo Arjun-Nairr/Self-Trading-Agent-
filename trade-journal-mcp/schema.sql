@@ -72,6 +72,13 @@ CREATE TABLE IF NOT EXISTS trades (
     -- §6c: source-of-truth timestamps for whatever data justified this
     -- decision (technical/sentiment feed timestamps), not just created_at.
     data_timestamps     JSONB,
+    -- Phase 1 aggressive profile (docs/PHASE1_AGGRESSIVE_DESIGN.md) --
+    -- which numeric tier produced this decision, and the actual threshold
+    -- used. See the "Migration -- Phase 1 aggressive profile" ALTER TABLE
+    -- block below for the full rationale; listed here too so a genuinely
+    -- fresh database (CREATE TABLE, not ALTER) gets the same columns.
+    strategy_profile     TEXT,
+    min_reward_risk_used NUMERIC(6, 2),
     -- Which backtest run this row belongs to (NULL for live -- a run is a
     -- backtest-only concept). Filtering, not identity: decision_id is
     -- already the real idempotency key. Lets the dashboard and reflection
@@ -341,3 +348,22 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 CREATE INDEX IF NOT EXISTS idx_trades_run_id ON trades(run_id);
 CREATE INDEX IF NOT EXISTS idx_agent_activity_run_cycle ON agent_activity(run_id, cycle_id);
+
+-- ---------------------------------------------------------------------------
+-- Migration -- Phase 1 aggressive profile (docs/PHASE1_AGGRESSIVE_DESIGN.md).
+-- Additive only, same idempotent ADD COLUMN pattern as above. Nullable: every
+-- pre-existing row (Round 1 and earlier) genuinely has no profile/threshold
+-- to report -- NULL is the honest value, not backfilled to a guess.
+-- ---------------------------------------------------------------------------
+-- Which numeric tier produced this decision -- 'aggressive_v1_base' (1.5:1
+-- min reward:risk) or 'aggressive_v1_escalated' (1.25:1, after a slow
+-- 20-trading-day activity block -- see run_backtest.py's deterministic,
+-- harness-controlled escalation mechanic, RULES.md §6b). Free text, not a
+-- CHECK enum -- a future profile version (v2, v3, ...) should be able to
+-- write its own label here without a schema migration every time.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy_profile TEXT;
+-- The ACTUAL minimum reward:risk this decision was validated against --
+-- lets later analysis distinguish base- from escalated-tier decisions by a
+-- single query instead of parsing Hermes' prose or cross-referencing which
+-- block a decision's date fell into.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS min_reward_risk_used NUMERIC(6, 2);

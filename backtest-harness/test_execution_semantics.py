@@ -21,8 +21,11 @@ from unittest.mock import patch
 # effect -- must be imported first, matching test_execution_path.py's
 # existing pattern.
 from run_backtest import (
-    DEFAULT_MASKING_SEED, Holding, Portfolio, QueuedOrder, ResponseValidationError,
-    _atomic_write_json, _clear_checkpoint, _expected_session_bar_times, _load_checkpoint,
+    ACTIVITY_BLOCK_TRADING_DAYS, ACTIVITY_TARGET_TRADES, DEFAULT_MASKING_SEED,
+    PROFILE_BASE, PROFILE_ESCALATED, PROFILE_MIN_REWARD_RISK, TIME_STOP_TRADING_DAYS,
+    Holding, Portfolio, QueuedOrder, ResponseValidationError,
+    _atomic_write_json, _clear_checkpoint, _expected_session_bar_times, _limits_for_profile,
+    _load_checkpoint, _maybe_advance_activity_block, _record_trade_completion,
     _resolve_seed, _resolve_window, _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
     build_decision_time_context, build_prompt,
     evaluate_bar_stop_target, evaluate_opening_gap, make_decision_id,
@@ -107,22 +110,22 @@ def test_buy_risk_check_slippage_price_matches_execution_sim_rule():
 def test_buy_risk_check_uses_slippage_adjusted_price_not_raw_open():
     """2026-08-28 correctness pass, item 5 -- boundary regression. A BUY
     sized to land EXACTLY at the §2b concentration cap on the raw open
-    (100 shares @ $100 = $10,000 = exactly 10% of $100k equity, allowed --
+    (200 shares @ $100 = $20,000 = exactly 20% of $100k equity, allowed --
     §2b is a strict '>', not '>=') must be REJECTED once the same 5bps
     slippage execution will actually apply pushes the real notional over
     the cap."""
     bar = {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}
-    order = _order(action="BUY", ticker="OLN", quantity=100, stop_price=93.0, target_price=115.0)
+    order = _order(action="BUY", ticker="OLN", quantity=200, stop_price=93.0, target_price=115.0)
 
     # Sanity: the RAW open lands exactly at the cap and is allowed --
     # confirms this is a genuine boundary case, not just an oversized trade.
-    raw_trade = ProposedTrade(ticker="OLN", action="BUY", quantity=100,
+    raw_trade = ProposedTrade(ticker="OLN", action="BUY", quantity=200,
                               entry_price=bar["open"], stop_price=93.0, target_price=115.0)
     raw_verdict = check_trade(raw_trade, _ctx())
     assert raw_verdict.allowed, (
         f"test scenario itself must pass at the raw open to be a real boundary case: {raw_verdict.violations}"
     )
-    print("  ok  the scenario passes §2b exactly at the raw open (10.00% == the 10% cap)")
+    print("  ok  the scenario passes §2b exactly at the raw open (20.00% == the 20% cap)")
 
     outcome = resolve_queued_order(order, bar, _ctx())
     assert not outcome.accepted, (
@@ -130,14 +133,14 @@ def test_buy_risk_check_uses_slippage_adjusted_price_not_raw_open():
     )
     assert "§2b" in outcome.reason, outcome.reason
     print("  ok  the SAME BUY is rejected once risk-checked against the slippage-adjusted "
-          "fill price (10.005% > the 10% cap)")
+          "fill price (20.01% > the 20% cap)")
 
     # And the reverse must never happen: a genuinely oversized SELL is not
     # made MORE lenient by staying at the raw open (SELL is unaffected by
     # this fix on purpose -- see resolve_queued_order's docstring).
     sell_bar = {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0}
-    sell_order = _sell_order(ticker="OLN", quantity=100)
-    sell_ctx = _ctx(positions=[Position(ticker="OLN", quantity=100, market_value=10_000.0)])
+    sell_order = _sell_order(ticker="OLN", quantity=200)
+    sell_ctx = _ctx(positions=[Position(ticker="OLN", quantity=200, market_value=20_000.0)])
     sell_outcome = resolve_queued_order(sell_order, sell_bar, sell_ctx)
     assert sell_outcome.accepted, sell_outcome.reason
     print("  ok  a full-exit SELL at the same price is unaffected by the BUY-only slippage fix")
@@ -161,7 +164,10 @@ def test_sequential_945_buys_see_the_first_fills_real_state():
 
     buy_a = _buy_order(ticker="TICKER_A", alias="ALPHA", quantity=100,
                        stop_price=93.0, target_price=115.0)
-    buy_b = _buy_order(ticker="TICKER_B", alias="BRAVO", quantity=105,
+    # 210 @ ~$100 = ~21% of the REAL post-TICKER_A equity -- breaches the
+    # 20% cap against real state, but would have PASSED against the OLD
+    # inflated (09:30-close-marked) equity this regression guards against.
+    buy_b = _buy_order(ticker="TICKER_B", alias="BRAVO", quantity=210,
                        stop_price=93.0, target_price=115.0)
 
     plan = simulate_trading_day(
@@ -416,7 +422,8 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
     journal_calls = []
     remaining_failures = {"n": 1}  # attempt 1's essential journal write fails; attempt 2's succeeds
 
-    def fake_record_queued_decision(decision, real_ticker, decision_id, run_id=None):
+    def fake_record_queued_decision(decision, real_ticker, decision_id, run_id=None,
+                                    strategy_profile=None, min_reward_risk_used=None):
         journal_calls.append(decision_id)
         if remaining_failures["n"] > 0:
             remaining_failures["n"] -= 1
@@ -815,21 +822,24 @@ def test_entry_day_stops_only_consider_bars_after_entry():
 
 def test_combined_morning_stop_losses_trip_breaker_before_945_buy():
     """2026-08-28 correctness pass, item 1 -- the actual regression this
-    repair targets. Two held positions each gap through their stop at the
-    09:30 open, realising a combined ~6.6% loss BEFORE a third ticker's
-    queued BUY is considered at 09:45. The daily (-3%) and weekly (-6%)
-    circuit breakers must see that real, same-morning loss and reject the
-    BUY -- not the stale, pre-session percentages the bug used to pass."""
+    repair targets, updated for the Phase 1 aggressive profile's single
+    -30% drawdown breaker (RULES.md §4). Two held positions each gap
+    catastrophically through their stop at the 09:30 open, realising a
+    combined ~32% loss BEFORE a third ticker's queued BUY is considered at
+    09:45. The breaker must see that real, same-morning loss and reject
+    the BUY -- not the stale, pre-session percentages the original bug
+    used to pass."""
     equity_curve = [100_000.0] * 6  # yesterday's close, flat baseline
     holdings = {
-        "OLN": Holding(ticker="OLN", quantity=100, entry_price=100.0,
+        "OLN": Holding(ticker="OLN", quantity=200, entry_price=100.0,
                        stop_price=95.0, target_price=130.0, entry_day=1, entry_trading_day=1),
-        "DINO": Holding(ticker="DINO", quantity=100, entry_price=100.0,
+        "DINO": Holding(ticker="DINO", quantity=200, entry_price=100.0,
                         stop_price=95.0, target_price=130.0, entry_day=1, entry_trading_day=1),
     }
-    # Both gap well through their stop at the open -- fills at the gapped
-    # open (worse than the stop itself), $33/share below entry each.
-    gapped_open = {"time": "09:30", "open": 67.0, "high": 67.0, "low": 65.0, "close": 67.0}
+    # Both gap catastrophically through their stop at the open -- fills at
+    # the gapped open (worse than the stop itself), $80/share below entry
+    # each -- $16,000 x 2 = $32,000, well past the -30% breaker.
+    gapped_open = {"time": "09:30", "open": 20.0, "high": 20.0, "low": 18.0, "close": 20.0}
     buy_order = _buy_order(ticker="TSLA", alias="ECHO", stop_price=90.0, target_price=115.0)
     plan = simulate_trading_day(
         holdings=holdings, pending_orders=[buy_order],
@@ -839,13 +849,13 @@ def test_combined_morning_stop_losses_trip_breaker_before_945_buy():
             "TSLA": _flat_session(price=100.0),
         },
         day_index=8, trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN", "DINO", "TSLA"],
-        closed_pnl=[], starting_cash=80_000.0,  # 80k cash + 2x(100@$100) holdings == 100k equity yday
+        closed_pnl=[], starting_cash=60_000.0,  # 60k cash + 2x(200@$100) holdings == 100k equity yday
         equity_curve=equity_curve,
     )
     gap_exits = [e for e in plan.events if e["stage"] == "opening_gap" and e["kind"] == "exit"]
     assert len(gap_exits) == 2, plan.events
     realized_loss = sum(e["quantity"] * (e["entry_price"] - e["exit_price"]) for e in gap_exits)
-    assert realized_loss >= 6_000, f"test scenario itself must realise a real >=6% loss, got ${realized_loss}"
+    assert realized_loss >= 30_000, f"test scenario itself must realise a real >=30% loss, got ${realized_loss}"
     print(f"  ok  two morning gap stops realised a combined ${realized_loss:,.0f} loss before 09:45")
 
     buy_events = [e for e in plan.events if e["ticker"] == "TSLA"]
@@ -854,8 +864,9 @@ def test_combined_morning_stop_losses_trip_breaker_before_945_buy():
         f"loss already realised -- breaker values leaked stale pre-session numbers: {buy_events}"
     )
     assert "§4" in buy_events[0]["reason"], buy_events[0]["reason"]
-    print("  ok  the queued 09:45 BUY is rejected by §4 -- this morning's own stop losses "
-          "are reflected in the breaker check, not the stale pre-session figures")
+    print("  ok  the queued 09:45 BUY is rejected by §4's -30% drawdown breaker -- this "
+          "morning's own catastrophic stop losses are reflected in the check, not stale "
+          "pre-session figures")
 
 
 def test_resolve_seed_resume_and_mismatch():
@@ -1377,6 +1388,213 @@ def test_resolve_window_resume_and_mismatch():
 
     assert _resolve_window(None, None, "2026-02-17", "2026-08-14") == ("2026-02-17", "2026-08-14")
     print("  ok  a fresh/legacy run with no stored window establishes the requested one")
+
+
+# ============================================================================
+# Phase 1 aggressive profile -- deterministic activity escalation
+# (RULES.md §6b, docs/PHASE1_AGGRESSIVE_DESIGN.md). Pure state-transition
+# tests against _record_trade_completion/_maybe_advance_activity_block --
+# no I/O, mirrors this file's own testing philosophy.
+# ============================================================================
+
+def test_time_stop_is_five_trading_days_not_calendar_days():
+    """RULES.md §6c: 5 TRADING days, counted via trading_days_elapsed --
+    weekends/holidays never count. TIME_STOP_TRADING_DAYS itself is the
+    single source of truth simulate_trading_day reads."""
+    assert TIME_STOP_TRADING_DAYS == 5
+    holding = Holding(ticker="OLN", quantity=100, entry_price=100.0, stop_price=95.0,
+                      target_price=130.0, entry_day=1, entry_trading_day=0)
+    # Exactly 5 real trading days elapsed since entry -> time stop fires at
+    # today's open, regardless of stop/target.
+    plan = simulate_trading_day(
+        holdings={"OLN": holding}, pending_orders=[],
+        intraday={"OLN": _flat_session(price=110.0)},  # well clear of stop/target
+        day_index=10, trading_days_elapsed=5, limits_ctx={}, watchlist=["OLN"],
+        closed_pnl=[], starting_cash=90_000.0, equity_curve=[100_000.0] * 6,
+    )
+    time_stops = [e for e in plan.events if e["stage"] == "time_stop"]
+    assert len(time_stops) == 1 and time_stops[0]["ticker"] == "OLN", plan.events
+    print("  ok  a position open exactly TIME_STOP_TRADING_DAYS (5) trading days is closed")
+
+    # One trading day short of that must NOT time-stop yet.
+    plan2 = simulate_trading_day(
+        holdings={"OLN": holding}, pending_orders=[],
+        intraday={"OLN": _flat_session(price=110.0)},
+        day_index=10, trading_days_elapsed=4, limits_ctx={}, watchlist=["OLN"],
+        closed_pnl=[], starting_cash=90_000.0, equity_curve=[100_000.0] * 6,
+    )
+    assert not [e for e in plan2.events if e["stage"] == "time_stop"], plan2.events
+    print("  ok  one trading day short of the time stop does not fire yet")
+
+
+def test_activity_block_is_twenty_real_trading_days():
+    """A block only evaluates on its own 20th real trading day -- never
+    mid-block."""
+    p = Portfolio()
+    assert p.profile_level == PROFILE_BASE and p.block_start_trading_day == 0
+    for day in range(1, ACTIVITY_BLOCK_TRADING_DAYS):
+        p.trading_days_elapsed = day
+        _maybe_advance_activity_block(p)
+        assert p.block_start_trading_day == 0, (
+            f"block boundary fired early, on trading day {day}"
+        )
+    print("  ok  the block never advances before its own 20th trading day")
+
+    p.trading_days_elapsed = ACTIVITY_BLOCK_TRADING_DAYS
+    _maybe_advance_activity_block(p)
+    assert p.block_start_trading_day == ACTIVITY_BLOCK_TRADING_DAYS, (
+        "the block must advance exactly on trading day 20"
+    )
+    print("  ok  the block advances exactly on its 20th real trading day")
+
+
+def test_five_completed_trades_keep_the_base_tier():
+    p = Portfolio()
+    for _ in range(ACTIVITY_TARGET_TRADES):
+        _record_trade_completion(p)
+    p.trading_days_elapsed = ACTIVITY_BLOCK_TRADING_DAYS
+    _maybe_advance_activity_block(p)
+    assert p.profile_level == PROFILE_BASE, (
+        f"exactly {ACTIVITY_TARGET_TRADES} completed trades must keep the base tier, "
+        f"got {p.profile_level}"
+    )
+    assert p.block_completed_trades == 0, "the new block must start with a fresh count"
+    print(f"  ok  exactly {ACTIVITY_TARGET_TRADES} completed trades in a block keeps the base tier")
+
+
+def test_fewer_than_five_escalates_only_the_following_block():
+    p = Portfolio()
+    for _ in range(ACTIVITY_TARGET_TRADES - 1):  # one short of the target
+        _record_trade_completion(p)
+    p.trading_days_elapsed = ACTIVITY_BLOCK_TRADING_DAYS - 1
+    _maybe_advance_activity_block(p)
+    assert p.profile_level == PROFILE_BASE, "must never change level mid-block"
+    p.trading_days_elapsed = ACTIVITY_BLOCK_TRADING_DAYS
+    _maybe_advance_activity_block(p)
+    assert p.profile_level == PROFILE_ESCALATED, (
+        f"a block with only {ACTIVITY_TARGET_TRADES - 1} completions must escalate "
+        f"the FOLLOWING block, got {p.profile_level}"
+    )
+    print("  ok  fewer than 5 completed trades escalates the following block, never mid-block")
+
+    # Once escalated, a later slow block must NOT change anything further
+    # (no de-escalation, no re-evaluation) -- min R:R stays 1.25 forever.
+    p.trading_days_elapsed = 2 * ACTIVITY_BLOCK_TRADING_DAYS
+    _maybe_advance_activity_block(p)
+    assert p.profile_level == PROFILE_ESCALATED, "escalation must never reverse"
+    assert PROFILE_MIN_REWARD_RISK[p.profile_level] == 1.25
+    print("  ok  escalation never reverses, even after another slow block")
+
+
+def test_rejections_and_queued_only_proposals_do_not_count():
+    """_record_trade_completion is only ever called by run_day at a REAL
+    exit fill -- a rejected or merely-queued proposal never reaches it.
+    This test asserts the CONTRACT directly: only completions move the
+    counter, nothing else does (there is no other function that can)."""
+    p = Portfolio()
+    assert p.block_completed_trades == 0
+    # Simulate a full block of activity with ZERO completions (everything
+    # rejected/queued-only, in spirit) -- the counter must stay at 0 and
+    # the run must escalate, exactly as if nothing had ever been proposed.
+    p.trading_days_elapsed = ACTIVITY_BLOCK_TRADING_DAYS
+    _maybe_advance_activity_block(p)
+    assert p.block_completed_trades == 0
+    assert p.profile_level == PROFILE_ESCALATED
+    print("  ok  a block with zero real completions (all rejected/queued-only) escalates")
+
+
+def test_reset_returns_to_base_resume_preserves_the_tier():
+    escalated = Portfolio(profile_level=PROFILE_ESCALATED, block_start_trading_day=40,
+                          block_completed_trades=2)
+    restored = Portfolio.from_dict(escalated.to_dict())
+    assert restored.profile_level == PROFILE_ESCALATED
+    assert restored.block_start_trading_day == 40
+    assert restored.block_completed_trades == 2
+    print("  ok  resume restores the exact block counters and active tier deterministically")
+
+    fresh = Portfolio()  # a --reset run always starts a genuinely new Portfolio()
+    assert fresh.profile_level == PROFILE_BASE
+    assert fresh.block_start_trading_day == 0
+    assert fresh.block_completed_trades == 0
+    print("  ok  a fresh/--reset run always starts at the base tier with a clean block")
+
+    # A legacy (pre-Phase-1) state file predates these fields entirely --
+    # must fall back to the base tier, never crash.
+    legacy = {"cash": 100_000.0, "holdings": {}, "equity_curve": [100_000.0] * 6,
+             "closed_pnl": []}
+    legacy_restored = Portfolio.from_dict(legacy)
+    assert legacy_restored.profile_level == PROFILE_BASE
+    print("  ok  a legacy state file missing these fields falls back to the base tier safely")
+
+
+def test_checkpoint_replay_cannot_double_count_or_re_escalate():
+    """A retried cycle re-processes the SAME real trading day's events --
+    _record_trade_completion/_maybe_advance_activity_block must reflect
+    that a genuine retry replays the checkpointed response and its
+    resulting exits exactly once per real attempt that actually commits,
+    never twice for the same committed day. This is a property of run_day
+    itself (working is a deep copy, only adopted by the caller on success
+    -- see Portfolio's own docstring) rather than of these two pure
+    functions in isolation, but the pure functions must still be provably
+    idempotent under DIRECT double-invocation for the SAME day (guards
+    against a future caller mistakenly invoking either one twice)."""
+    p = Portfolio()
+    _record_trade_completion(p)
+    _record_trade_completion(p)
+    assert p.block_completed_trades == 2, "two distinct completions must both count"
+    print("  ok  two distinct real completions both count (sanity: the counter isn't stuck)")
+
+    # _maybe_advance_activity_block called twice for the SAME
+    # trading_days_elapsed value (simulating an accidental double-call,
+    # which run_day's real control flow never does) must not advance the
+    # block a second time or re-escalate.
+    p.trading_days_elapsed = ACTIVITY_BLOCK_TRADING_DAYS
+    _maybe_advance_activity_block(p)
+    tier_after_first = p.profile_level
+    start_after_first = p.block_start_trading_day
+    _maybe_advance_activity_block(p)  # same trading_days_elapsed, called again
+    assert p.profile_level == tier_after_first, "a same-day double-call must not re-escalate"
+    assert p.block_start_trading_day == start_after_first, (
+        "a same-day double-call must not advance the block window twice"
+    )
+    print("  ok  calling the block check twice for the same day is a no-op the second time")
+
+
+def test_queued_orders_use_their_stored_threshold_at_execution():
+    """RULES.md §6b's own 'done when': the SAME threshold at decision,
+    queue, and execution -- an order queued under the escalated 1.25 tier
+    must be checked at execution against 1.25, even if `ctx.limits` (the
+    generic per-cycle default) says something else -- see
+    resolve_queued_order's own docstring."""
+    bar = {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0}
+    # ratio 1.3: fails the base 1.5 floor, but clears the escalated 1.25
+    # floor -- entry $100 (slipped ~100.05), stop $92 (~8%), target $110.4.
+    order = _order(action="BUY", ticker="OLN", quantity=50, stop_price=92.0,
+                   target_price=110.4, strategy_profile=PROFILE_ESCALATED,
+                   min_reward_risk_used=1.25)
+    # ctx.limits here is the ordinary base-tier default (1.5) -- this
+    # order's OWN stored 1.25 must win, not ctx's.
+    outcome = resolve_queued_order(order, bar, _ctx())
+    assert outcome.accepted, (
+        f"a queued order must be checked against ITS OWN stored escalated threshold, "
+        f"not today's generic default: {outcome.reason}"
+    )
+    print("  ok  a queued order is checked at execution against its own stored threshold, "
+          "not whatever ctx.limits happens to carry")
+
+    # And the reverse: an order queued under the BASE tier must still be
+    # held to 1.5, even if resolved with limits_ctx that (hypothetically)
+    # carries something looser -- proves the order's own value is
+    # authoritative in both directions, not just a fallback.
+    base_order = _order(action="BUY", ticker="OLN", quantity=50, stop_price=92.0,
+                        target_price=110.4, strategy_profile=PROFILE_BASE,
+                        min_reward_risk_used=1.5)
+    loose_ctx = _ctx(limits=_limits_for_profile(PROFILE_ESCALATED)["limits"])
+    outcome2 = resolve_queued_order(base_order, bar, loose_ctx)
+    assert not outcome2.accepted and "§6b" in outcome2.reason, (
+        f"a base-tier order must stay held to 1.5 even under a looser ctx: {outcome2.reason}"
+    )
+    print("  ok  a base-tier order stays held to its own 1.5 floor even under a looser ctx")
 
 
 def main():

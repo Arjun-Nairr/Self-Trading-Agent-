@@ -183,13 +183,13 @@ This is `AGENTS.md`'s live-mode cycle, in order. The **backtest** mode follows t
 1. **Reconcile** — check for any `pending` journal row from a crashed prior cycle against the real broker state before doing anything else (`AGENTS.md` Step 0).
 2. **Read the rules** — `RULES.md`, fresh, every cycle — never from memory (`AGENTS.md` Step 1).
 3. **Fetch account/position state** — from the broker, not the journal (`AGENTS.md` Step 2).
-4. **Check circuit breakers** — a null P&L figure is treated as a tripped breaker, not a clear one (`AGENTS.md` Step 2, `RULES.md` §4).
+4. **Check the circuit breaker** — a null drawdown figure is treated as tripped, not clear. Phase 1 aggressive profile: the only breaker left is a catastrophic −30% peak-drawdown pause — daily/weekly loss halts and losing-streak de-risking are both removed, not widened (`AGENTS.md` Step 2, `RULES.md` §4, `docs/PHASE1_AGGRESSIVE_DESIGN.md`).
 5. **Manage existing positions first** — stops/targets/thesis checks outrank looking for anything new (`AGENTS.md` Step 3).
 6. **Evaluate unheld watchlist candidates** — only tickers not already held (`AGENTS.md` Step 4).
 7. **Read technical indicators** — RSI/MACD/support-resistance/trend from `maverick-mcp` — this is where model judgment about "is there a setup" actually happens (`AGENTS.md` Step 4.1).
 8. **Apply the news veto** — adverse news can block; positive news can never trigger (`RULES.md` §5a).
-9. **Choose stop and target** — a real technical level, within `RULES.md` §6a's 5–10% band (`AGENTS.md` Step 4.2).
-10. **Calculate position size and reward:risk** — the smaller of two independent caps (§2a/§2b), and reward:risk must clear 2:1 (`AGENTS.md` Step 4.3/4.5, `RULES.md` §6b).
+9. **Choose stop and target** — a real technical level, within `RULES.md` §6a's 3–12% band (`AGENTS.md` Step 4.2).
+10. **Calculate position size and reward:risk** — the smaller of two independent caps (§2a/§2b), and reward:risk must clear whichever floor is currently binding (1.5:1 base, or 1.25:1 after a slow 20-trading-day activity block — `AGENTS.md` Step 4.3/4.5, `RULES.md` §6b, `docs/PHASE1_AGGRESSIVE_DESIGN.md`).
 11. **Run deterministic risk checks** — `risk_checker.py`, unconditional, can reject regardless of confidence (`AGENTS.md`, `risk_checker.py`).
 12. **Record the decision** — `record_decision`, before attempting execution (`AGENTS.md` "Recording a decision honestly").
 13. **Execute (live) or queue (backtest)** — live orders go straight to the broker; backtest decisions are **queued for the next trading day's open**, never filled the same day (see §6, `run_backtest.py`).
@@ -201,7 +201,7 @@ This is `AGENTS.md`'s live-mode cycle, in order. The **backtest** mode follows t
 | Kind | Examples |
 |---|---|
 | Model judgment | Is there a real setup? How confident? What would invalidate the thesis? |
-| Hard-coded rules | Stop must be 5–10% away; reward:risk ≥ 2:1; max 8 positions; sentiment can only veto |
+| Hard-coded rules | Stop must be 3–12% away; reward:risk ≥ 1.5:1 (or 1.25:1 escalated); no position-count cap; sentiment can only veto |
 | Broker facts | Current equity, current positions, whether the order actually filled and at what price |
 | Mechanical execution | Stops/targets/time-stops fire without anyone "deciding" anything, once set |
 

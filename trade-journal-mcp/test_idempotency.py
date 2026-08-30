@@ -229,12 +229,77 @@ async def test_execution_result_retry_does_not_double_write():
         await pool.execute("DELETE FROM trades WHERE decision_id = $1", decision_id)
 
 
+async def test_strategy_profile_collision_and_null_rows_stay_readable():
+    """Phase 1 aggressive profile (docs/PHASE1_AGGRESSIVE_DESIGN.md):
+    strategy_profile/min_reward_risk_used are additive, nullable columns.
+    Proves both directions -- a real (non-null) pair round-trips and
+    detects a genuine mismatch, and an OLD (pre-Phase-1) row with both
+    NULL remains fully readable and its own identical-retry stays a
+    no-op, never misread as a mismatch against the new fields."""
+    kwargs = dict(
+        ticker="TEST.NS", action="BUY", intended_quantity=10,
+        intended_notional=1000.0, order_type="MARKET",
+        confidence=3, primary_signal="technical", technical_basis="rsi",
+        expected_reward_risk=1.6, invalidation_condition="closes below $93",
+        strategy_notes="phase 1 profile-field collision test",
+        stop_price=93.0, target_price=115.0,
+        strategy_profile="aggressive_v1_base", min_reward_risk_used=1.5,
+        decision_id=str(uuid.uuid4()),
+    )
+    decision = await _record_decision(**kwargs)
+    decision_id = decision["decision_id"]
+    print(f"created pending decision {decision_id} with strategy_profile=aggressive_v1_base")
+
+    try:
+        again = await _record_decision(**kwargs)
+        assert str(again["decision_id"]) == str(decision_id)
+        assert again["strategy_profile"] == "aggressive_v1_base"
+        assert float(again["min_reward_risk_used"]) == 1.5
+        print("  ok  an identical retry with real profile fields is a no-op and round-trips them")
+
+        for field, override in (
+            ("strategy_profile", {"strategy_profile": "aggressive_v1_escalated"}),
+            ("min_reward_risk_used", {"min_reward_risk_used": 1.25}),
+        ):
+            bad_kwargs = dict(kwargs, **override)
+            try:
+                await _record_decision(**bad_kwargs)
+                raise AssertionError(f"expected a collision error for changed {field}")
+            except ValueError as exc:
+                assert field in str(exc), f"error for changed {field} did not name it: {exc}"
+                print(f"  ok  a changed {field} under the same decision_id fails loudly, naming it")
+    finally:
+        pool = await get_pool()
+        await pool.execute("DELETE FROM trades WHERE decision_id = $1", decision_id)
+
+    # A pre-Phase-1-shaped row (both fields genuinely NULL, exactly what
+    # every historical row -- including Run 1's own -- looks like) must
+    # remain readable and its own identical retry must stay a no-op, not
+    # a false mismatch against the new nullable columns.
+    null_kwargs = dict(kwargs, decision_id=str(uuid.uuid4()),
+                       strategy_profile=None, min_reward_risk_used=None)
+    null_decision = await _record_decision(**null_kwargs)
+    null_id = null_decision["decision_id"]
+    print(f"created pending decision {null_id} with NULL profile fields (pre-Phase-1 shape)")
+    try:
+        assert null_decision["strategy_profile"] is None
+        assert null_decision["min_reward_risk_used"] is None
+        again_null = await _record_decision(**null_kwargs)
+        assert str(again_null["decision_id"]) == str(null_id)
+        print("  ok  a pre-Phase-1 row (NULL profile fields) stays readable and its "
+              "identical retry is still a no-op")
+    finally:
+        pool = await get_pool()
+        await pool.execute("DELETE FROM trades WHERE decision_id = $1", null_id)
+
+
 async def main():
     await test_decision_collision_detects_every_field()
     await test_identical_retry_with_real_run_id_is_a_no_op()
     await test_empty_data_timestamps_retry_is_a_no_op()
     await test_null_confidence_collision_reports_named_mismatch_not_typeerror()
     await test_execution_result_retry_does_not_double_write()
+    await test_strategy_profile_collision_and_null_rows_stay_readable()
 
 
 if __name__ == "__main__":

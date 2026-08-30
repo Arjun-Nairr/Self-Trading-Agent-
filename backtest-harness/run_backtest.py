@@ -59,7 +59,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as dataclass_replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
@@ -69,7 +69,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "risk-checker"))
 from anonymize import RunMasking                                    # noqa: E402
 from quota_pacer import QuotaPacer                                  # noqa: E402
 from risk_checker import (                                          # noqa: E402
-    AccountState, Context, MarketClock, Position, ProposedTrade, check_trade,
+    AccountState, Context, MarketClock, Position, ProposedTrade, RiskLimits,
+    check_trade,
 )
 
 REPO = Path(__file__).resolve().parent.parent
@@ -84,17 +85,33 @@ STARTING_EQUITY = 100_000.0
 # (a fresh or --reset run) -- was argparse's own default before item 7's
 # seed-persistence fix; unchanged in value, only in where it lives.
 DEFAULT_MASKING_SEED = 42
-# RULES.md §6c, revised from 10 -> 15 trading days. The original 10-day
-# figure, paired with the 5% stop floor (§6a) and the 2:1 target minimum
-# (§6b), asks for a 10%+ move inside a window whose typical 10-day
-# excursion (for ~30% annualized-vol mid-caps, sigma*sqrt(10)) is roughly
-# 6% -- the target was rarely reachable before the clock ran out regardless
-# of setup quality. 15 days gives the same target real room to play out
-# without touching the stop-placement math §2b's gap-protection derivation
-# depends on. [JUDGMENT, revised] -- flagged in RULES.md §10 for a real
-# second opinion once tuning-window results exist, same as every other
-# number there.
-TIME_STOP_TRADING_DAYS = 15
+# RULES.md §6c, Phase 1 aggressive profile (docs/PHASE1_AGGRESSIVE_DESIGN.md):
+# 5 trading days, revised from 15. Deliberately short, for throughput --
+# see RULES.md §6c's own honest accounting of what this gives up.
+TIME_STOP_TRADING_DAYS = 5
+
+# -- Phase 1 aggressive profile: deterministic activity escalation --------
+# RULES.md §6b. Fixed, harness-controlled, approved by the user in advance
+# -- NOT Hermes loosening its own rules (RULES.md §9.7's one deliberate
+# exception). risk_checker.py has no concept of blocks or tiers; it only
+# ever sees whichever single min_reward_risk value it's handed for a given
+# check -- this module owns the entire escalation mechanic.
+ACTIVITY_BLOCK_TRADING_DAYS = 20   # RULES.md §6b: one block = 20 real trading days
+ACTIVITY_TARGET_TRADES = 5         # completed trades required per block to stay at base
+PROFILE_BASE = "aggressive_v1_base"
+PROFILE_ESCALATED = "aggressive_v1_escalated"
+PROFILE_MIN_REWARD_RISK = {PROFILE_BASE: 1.5, PROFILE_ESCALATED: 1.25}
+
+
+def _limits_for_profile(profile_level: str) -> dict:
+    """The `limits_ctx` dict (see run_day/simulate_trading_day/
+    build_decision_time_context, all of which do `Context(**limits_ctx)`)
+    for whichever profile tier is currently active. Every OTHER RiskLimits
+    field stays at RiskLimits()'s own default (the fixed part of the Phase
+    1 profile) -- only min_reward_risk varies by tier."""
+    return {"limits": dataclass_replace(
+        RiskLimits(), min_reward_risk=PROFILE_MIN_REWARD_RISK[profile_level],
+    )}
 
 # -- name-variant derivation for the masking gate --------------------------
 # The masker only strips terms it's told about (see anonymize.py's own
@@ -243,6 +260,14 @@ class QueuedOrder:
     journal has one continuous row per intended decision from proposal to
     outcome, exactly as the risk-checker's own risk-check activity should
     link back to it.
+
+    strategy_profile/min_reward_risk_used (Phase 1 aggressive profile,
+    docs/PHASE1_AGGRESSIVE_DESIGN.md): the tier and threshold this order
+    was validated against AT DECISION TIME -- resolve_queued_order uses
+    THIS stored value at execution, never whatever tier happens to be
+    "current" the next day (see RULES.md §6b's "done when" requirement:
+    the same threshold at decision, queue, and execution). Defaulted for
+    old (pre-Phase-1) state-file resumes -- see Portfolio.from_dict.
     """
     ticker: str
     alias: str
@@ -254,6 +279,8 @@ class QueuedOrder:
     queued_day_index: int
     decision: dict
     decision_id: str
+    strategy_profile: str = PROFILE_BASE
+    min_reward_risk_used: float = PROFILE_MIN_REWARD_RISK[PROFILE_BASE]
 
 
 @dataclass
@@ -288,6 +315,19 @@ class Portfolio:
     # process restart between the decision day and the fill day cannot
     # lose the order -- Phase 0 repair.
     pending_orders: list[QueuedOrder] = field(default_factory=list)
+    # -- Phase 1 aggressive profile: deterministic activity escalation ----
+    # (RULES.md §6b, docs/PHASE1_AGGRESSIVE_DESIGN.md). All three persisted
+    # (not local loop state) so resume restores the exact same block
+    # counters and active tier deterministically, and a checkpoint replay
+    # cannot double-count a completion or escalate twice -- see
+    # _record_trade_completion / _maybe_advance_activity_block.
+    profile_level: str = PROFILE_BASE
+    # trading_days_elapsed value at which the CURRENT block started (0 for
+    # the first block of a fresh/--reset run).
+    block_start_trading_day: int = 0
+    # Completed trades (filled entry -> filled exit) within the current
+    # block only -- resets to 0 every time a block boundary advances.
+    block_completed_trades: int = 0
 
     def equity(self, prices: dict[str, dict]) -> float:
         held = sum(
@@ -327,6 +367,9 @@ class Portfolio:
             "trading_days_elapsed": self.trading_days_elapsed,
             "pending_orders": [vars(o) for o in self.pending_orders],
             "stopped_out_today": self.stopped_out_today,
+            "profile_level": self.profile_level,
+            "block_start_trading_day": self.block_start_trading_day,
+            "block_completed_trades": self.block_completed_trades,
         }
 
     @classmethod
@@ -353,6 +396,12 @@ class Portfolio:
             # will simply get a fresh decision_id path on its next
             # resolution rather than crash on resume.
             pending_orders=[
+                # .get() on strategy_profile/min_reward_risk_used: old
+                # state files predate Phase 1 -- any such leftover order
+                # was queued under the (only) profile that existed then,
+                # which IS the base tier's own default value, so falling
+                # back to the dataclass defaults here is exactly correct,
+                # not a guess.
                 QueuedOrder(**{**o, "decision_id": o.get("decision_id", "")})
                 for o in d.get("pending_orders", [])
             ],
@@ -360,6 +409,13 @@ class Portfolio:
             # correctly starts with nothing stopped out today (the field's
             # own dataclass default), never a crash on a missing key.
             stopped_out_today=d.get("stopped_out_today", []),
+            # .get(): old (pre-Phase-1) state files predate activity
+            # escalation entirely -- a legacy resume correctly starts at
+            # the base tier with a fresh block, never a crash on a missing
+            # key.
+            profile_level=d.get("profile_level", PROFILE_BASE),
+            block_start_trading_day=d.get("block_start_trading_day", 0),
+            block_completed_trades=d.get("block_completed_trades", 0),
         )
 
 
@@ -432,6 +488,16 @@ def resolve_queued_order(order: QueuedOrder, bar: dict, ctx: Context) -> QueuedO
     open: slippage works AGAINST a seller (lower proceeds), which can
     only make an exit MORE conservative against a cap, never less --
     deliberately BUY-only, not a general simulator redesign.
+
+    Phase 1 aggressive profile (RULES.md §6b, docs/PHASE1_AGGRESSIVE_
+    DESIGN.md): the reward:risk floor used here is `order.
+    min_reward_risk_used` -- the tier ACTUALLY BINDING when this order was
+    decided and queued -- never whatever tier happens to be "current" on
+    the day it resolves (the two are almost always the same, since a block
+    boundary is rare, but this order's own outcome must never depend on
+    which side of a boundary its resolution day happened to land on).
+    Every other limit still comes from `ctx.limits` as given by the
+    caller.
     """
     open_price = bar["open"]
     risk_check_price = _slipped_buy_price(open_price, bar) if order.action == "BUY" else open_price
@@ -439,10 +505,50 @@ def resolve_queued_order(order: QueuedOrder, bar: dict, ctx: Context) -> QueuedO
         ticker=order.ticker, action=order.action, quantity=order.quantity,
         entry_price=risk_check_price, stop_price=order.stop_price, target_price=order.target_price,
     )
-    verdict = check_trade(trade, ctx)
+    execution_ctx = dataclass_replace(
+        ctx, limits=dataclass_replace(ctx.limits, min_reward_risk=order.min_reward_risk_used),
+    )
+    verdict = check_trade(trade, execution_ctx)
     if not verdict.allowed:
         return QueuedOrderOutcome(accepted=False, reason="; ".join(verdict.violations))
     return QueuedOrderOutcome(accepted=True)
+
+
+def _record_trade_completion(working: "Portfolio") -> None:
+    """Call exactly once per genuinely COMPLETED trade -- a filled entry
+    later closed by a filled exit (mechanical stop/target/time-stop, or a
+    discretionary SELL fill). A rejected or merely-queued proposal is
+    never a completion. Feeds RULES.md §6b's activity-escalation block
+    count -- see _maybe_advance_activity_block."""
+    working.block_completed_trades += 1
+
+
+def _maybe_advance_activity_block(working: "Portfolio") -> None:
+    """Phase 1 aggressive profile, deterministic activity escalation
+    (RULES.md §6b, docs/PHASE1_AGGRESSIVE_DESIGN.md). Called exactly once
+    per REAL trading day, after that day's exits have already been
+    recorded (so a completion on a block's own 20th trading day is
+    counted toward that block, per RULES.md §6b's own wording).
+
+    Pure state transition on `working` -- no I/O. Evaluates a block only
+    on its own 20th trading day (never mid-block, never twice for the
+    same day under a checkpoint replay, since this runs once per real
+    run_day call and Portfolio state only advances on a successful
+    commit -- see run_day's own essential/best-effort contract). Escalates
+    at most once, permanently -- once at PROFILE_ESCALATED, this function
+    still resets the block window every 20 days (so future blocks are
+    still tracked, in case that's ever useful for analysis) but never
+    changes `profile_level` again, matching RULES.md §6b's "never
+    de-escalate, never re-evaluate the tier once escalated" contract.
+    """
+    days_in_block = working.trading_days_elapsed - working.block_start_trading_day
+    if days_in_block < ACTIVITY_BLOCK_TRADING_DAYS:
+        return
+    if (working.profile_level == PROFILE_BASE
+            and working.block_completed_trades < ACTIVITY_TARGET_TRADES):
+        working.profile_level = PROFILE_ESCALATED
+    working.block_start_trading_day = working.trading_days_elapsed
+    working.block_completed_trades = 0
 
 
 # --------------------------------------------------------------------------
@@ -1167,7 +1273,8 @@ print(json.dumps(place_order(
 
 
 def record_trade(decision: dict, real_ticker: str, fill: dict, decision_id: str,
-                 run_id: str | None = None) -> str:
+                 run_id: str | None = None, strategy_profile: str | None = None,
+                 min_reward_risk_used: float | None = None) -> str:
     """Journal the REAL ticker, never the alias — the mask exists to keep
     Hermes honest, not to obscure our own records.
 
@@ -1204,6 +1311,8 @@ async def main():
         stop_price={decision.get("stop_price")!r},
         target_price={decision.get("target_price")!r},
         run_id={run_id!r},
+        strategy_profile={strategy_profile!r},
+        min_reward_risk_used={min_reward_risk_used!r},
     )
     await _record_execution_result(
         d["decision_id"], status={fill["status"]!r},
@@ -1222,7 +1331,8 @@ asyncio.run(main())
 
 
 def record_queued_decision(decision: dict, real_ticker: str, decision_id: str,
-                           run_id: str | None = None) -> None:
+                           run_id: str | None = None, strategy_profile: str | None = None,
+                           min_reward_risk_used: float | None = None) -> None:
     """Journal a QUEUED discretionary decision the INSTANT it is queued --
     status stays 'pending' (the trades table's own default) until the next
     trading day resolves it (resolve_trade_fill / resolve_trade_rejection).
@@ -1256,6 +1366,8 @@ async def main():
         stop_price={decision.get("stop_price")!r},
         target_price={decision.get("target_price")!r},
         run_id={run_id!r},
+        strategy_profile={strategy_profile!r},
+        min_reward_risk_used={min_reward_risk_used!r},
     )
 
 asyncio.run(main())
@@ -1791,7 +1903,16 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         f"  equity ${account['equity']:,.2f} | cash ${account['cash']:,.2f} "
         f"| exposure {account['exposure_pct']:.1f}%",
         f"  daily {account['daily_pl_pct']} | weekly {account['weekly_pl_pct']} "
-        f"| drawdown {account['drawdown_pct']}%", "",
+        f"| drawdown {account['drawdown_pct']}%",
+        # Phase 1 aggressive profile (RULES.md §6b): the ONLY thing this
+        # cycle's activity-escalation state ever tells you -- the
+        # currently binding minimum reward:risk and its profile label.
+        # There is no trade count or quota here, and there never will be
+        # -- the harness tracks activity, you never manufacture it.
+        f"  strategy profile: {account.get('strategy_profile', PROFILE_BASE)} "
+        f"(minimum reward:risk this cycle: "
+        f"{account.get('min_reward_risk', PROFILE_MIN_REWARD_RISK[PROFILE_BASE])}:1)",
+        "",
     ]
 
     lines.append("OPEN POSITIONS")
@@ -1993,6 +2114,7 @@ def _execute_exit(working: "Portfolio", ticker: str, quantity: int, entry_price:
     working.cash += proceeds
     working.closed_pnl.append(proceeds - quantity * entry_price)
     del working.holdings[ticker]
+    _record_trade_completion(working)  # RULES.md §6b activity-escalation count
     line = f"{ticker} {reason} @ ${exit_price:.2f} (P&L ${working.closed_pnl[-1]:+,.2f})"
     summary["exits"].append(line)
     exit_id = record_exit(
@@ -2093,6 +2215,14 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     """
     working = copy.deepcopy(portfolio)
     tickers = [t["symbol"] for t in watchlist]
+    # Phase 1 aggressive profile (RULES.md §6b): the reward:risk floor
+    # actually binding THIS cycle, computed once and reused for the
+    # prompt Hermes sees, the decision-time risk check, and the queued
+    # order's own stashed threshold -- one number, one place, never
+    # recomputed differently in each spot. Falls back to RiskLimits()'s
+    # own base-tier default for direct/test callers passing limits_ctx={}.
+    active_limits = limits_ctx.get("limits") or RiskLimits()
+    active_min_rr = active_limits.min_reward_risk
     summary = {"day": str(day), "exits": [], "decisions": [], "blocked": [], "usage": {}}
     day_label = masking.day_index(day)
     # Deterministic per (run, day) -- see record_snapshot_once's docstring.
@@ -2248,7 +2378,11 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                     resolve_trade_fill(decision_id, fill)
                 else:
                     fallback_id = make_decision_id(run_key, day_index, ticker, order.action, "queued_fill")
-                    decision_id = record_trade(order.decision, ticker, fill, decision_id=fallback_id, run_id=run_key)
+                    decision_id = record_trade(
+                        order.decision, ticker, fill, decision_id=fallback_id, run_id=run_key,
+                        strategy_profile=order.strategy_profile,
+                        min_reward_risk_used=order.min_reward_risk_used,
+                    )
                 if order.action == "BUY":
                     cost = fill["fill_price"] * fill["fill_quantity"]
                     working.cash -= cost
@@ -2270,6 +2404,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                     working.closed_pnl.append(proceeds - fill["fill_quantity"] * holding.entry_price)
                     if fill["fill_quantity"] >= holding.quantity:
                         del working.holdings[ticker]
+                        _record_trade_completion(working)  # RULES.md §6b activity-escalation count
                     else:
                         holding.quantity -= fill["fill_quantity"]
                     line = (
@@ -2284,6 +2419,14 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # another (filled, rejected, or superseded) -- never carried forward
     # indefinitely.
     working.pending_orders = []
+
+    # Phase 1 aggressive profile: evaluate the activity-escalation block
+    # boundary AFTER today's exits are recorded (so a completion on the
+    # block's own 20th day still counts toward it), but unconditionally --
+    # every real trading day advances trading_days_elapsed regardless of
+    # whether `needed` was non-empty, so the block clock must run
+    # regardless too.
+    _maybe_advance_activity_block(working)
 
     # End of day: mark to the REAL market close (each held ticker's last
     # regular-session bar). Legitimate now that the day's chronological
@@ -2379,6 +2522,13 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         "daily_pl_pct": working.pct_since(1),
         "weekly_pl_pct": working.pct_since(5),
         "drawdown_pct": working.drawdown_pct(),
+        # Phase 1 aggressive profile: the ONLY activity-escalation
+        # information Hermes' prompt ever receives -- the currently
+        # binding threshold and its label. NEVER a trade count, a block
+        # progress figure, or anything that reads as a quota to chase --
+        # see RULES.md §6b and build_prompt's own rendering below.
+        "strategy_profile": working.profile_level,
+        "min_reward_risk": active_min_rr,
     }
 
     # Nothing leaves for Hermes without passing the leak check.
@@ -2568,18 +2718,30 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         decision_verdict = check_trade(proposal, decision_ctx, validate_timing=False)
         if not decision_verdict.allowed:
             reason = "; ".join(decision_verdict.violations)
-            line = f"{real_ticker}: decision-time risk check rejected -- {reason}"
+            # Profile/threshold appended in a consistently parseable form
+            # (RULES.md §6b, docs/PHASE1_AGGRESSIVE_DESIGN.md item 5) --
+            # `[profile=... min_rr=...]` at a fixed position, so later
+            # analysis can extract it without parsing Hermes' free-text
+            # reasoning.
+            line = (
+                f"{real_ticker}: decision-time risk check rejected -- {reason} "
+                f"[profile={working.profile_level} min_rr={active_min_rr}]"
+            )
             summary["blocked"].append(line)
             activity.append(("risk_check", line, None))
             continue
 
         decision_id = make_decision_id(run_key, day_index, real_ticker, action, f"queued_proposal[{i}]")
-        record_queued_decision(decision, real_ticker, decision_id, run_id=run_key)
+        record_queued_decision(
+            decision, real_ticker, decision_id, run_id=run_key,
+            strategy_profile=working.profile_level, min_reward_risk_used=active_min_rr,
+        )
         order = QueuedOrder(
             ticker=real_ticker, alias=decision["alias"], action=action, quantity=quantity,
             stop_price=proposal.stop_price, target_price=proposal.target_price,
             entry_price=entry_price,  # audit only, never used to fill
             queued_day_index=day_index, decision=decision, decision_id=decision_id,
+            strategy_profile=working.profile_level, min_reward_risk_used=active_min_rr,
         )
         working.pending_orders.append(order)
         line = f"{action} {real_ticker} ({decision['alias']}) x{quantity} queued for next trading day's open"
@@ -2749,8 +2911,13 @@ def main() -> None:
         # journaled trade a no-op on retry; quota was already correctly
         # counted at invocation time regardless of the failure -- see
         # run_day's mark_invoked).
+        # Phase 1 aggressive profile: the reward:risk floor for TODAY's
+        # cycle depends on the portfolio's current activity-escalation
+        # tier (RULES.md §6b) -- computed fresh each cycle from the real,
+        # persisted state, never cached across cycles.
+        todays_limits_ctx = _limits_for_profile(portfolio.profile_level)
         result, halted = _run_cycle_or_halt(
-            lambda: run_day(cursor, day_index, portfolio, masking, watchlist, {}, pacer, run_key),
+            lambda: run_day(cursor, day_index, portfolio, masking, watchlist, todays_limits_ctx, pacer, run_key),
             day_label=masking.day_index(cursor),
             run_id=run_id, pacer=pacer,
         )

@@ -42,19 +42,20 @@ until this is clean.
 broker's numbers, not the journal's, which can drift if something broke.
 
 `get_account` gives you `equity` (the base for every % in RULES.md),
-`exposure_pct` for §3's cap, and `daily_pl_pct` / `weekly_pl_pct` /
-`drawdown_from_peak_pct` for §4's three circuit breakers, already calculated
-— do not recompute them by hand.
+`exposure_pct` (informational — §3 has no percentage cap, only the cash
+check in Step 4), and `drawdown_from_peak_pct` for §4's one circuit
+breaker, already calculated — do not recompute it by hand.
 
 Two things to hold onto here:
 
-- **A null P&L figure means "cannot be determined," not "fine."** Treat any
-  null as a breaker you must assume is tripped: manage exits, open nothing
-  new. A safety check you cannot evaluate has not passed.
-- **Size everything off `equity`.** The account is margin-enabled and the
-  broker will happily report several times your equity as available; §1
-  forbids margin, so that number is never yours to spend. It is deliberately
-  not returned to you.
+- **A null drawdown figure means "cannot be determined," not "fine."**
+  Treat it as a breaker you must assume is tripped: manage exits, open
+  nothing new. A safety check you cannot evaluate has not passed.
+- **Size everything off `equity`, and never spend more than `cash`.** The
+  account is margin-enabled and the broker will happily report several
+  times your equity as available; §1 forbids margin, so that number is
+  never yours to spend — it is deliberately not returned to you. §3's
+  exposure limit is simply "never exceed available cash."
 
 If any breaker is active (or unknown), or `trading_blocked` is true, you may
 still manage exits, but you open nothing new.
@@ -74,40 +75,39 @@ breakers. Getting out is always permitted while the market is open.
 
 **Step 4 — Only then, look for new entries.** Skip this entirely if a
 circuit breaker is active, if the caps in §2/§3 leave no room, or if the
-timing windows in §7 are closed. For each watchlist name you do not already
-hold:
+market is closed (§7). **Actively evaluate every watchlist name you do not
+already hold** — this is a permanent paper-money sandbox built to generate
+real trading evidence; do not wait for something exceptional before you
+look. An ordinary setup that clears every rule below deserves action.
+Confidence 3 (ordinary — see below) is a completely sufficient reason to
+take a trade. Taking more than one qualifying entry in the same cycle is
+normal, not a sign you're overreaching. Reserve "nothing today" for a
+ticker where you genuinely looked and found no setup, or found one that
+fails a specific rule — passing on a real, rule-clearing setup because it
+feels merely ordinary is not the discipline this calls for.
+
+For each such name:
 
 1. Pull technicals. Is there a setup worth acting on? This is your judgment
-   to make — there is deliberately no formula here, and "nothing today" is a
-   perfectly good answer.
+   to make — there is deliberately no formula here. Uncertainty about how
+   the position resolves is not itself a reason to pass; that uncertainty
+   is what makes it a trade. "Nothing today" is a legitimate answer only
+   when you looked and genuinely found no setup, or every candidate fails
+   a specific, nameable rule.
 2. If yes: place the stop at a real technical level within the bounds in
    §6a. If no valid level exists in that range, skip the trade — do not
    stretch the stop to fit the trade you want.
 
    **Leave yourself margin inside those bounds.** They are hard limits
-   checked to two decimal places, not targets to aim at: a stop 4.99% below
-   entry against a 5% floor is rejected outright, and the whole trade is
-   lost over a rounding-width miss. Sit comfortably inside the range.
-3. Identify the target. If reward:risk is below the §6b minimum, skip it.
-   The setup does not pay enough for what it risks.
-
-   **Aim for headroom, not the floor.** §6b's 2.0 is a minimum the checker
-   enforces, not a target to graze. A ratio that only clears it by rounding
-   (2.05 or less) is functionally a fail: your own entry price is a
-   same-day estimate, and the position fills tomorrow at whatever the real
-   open turns out to be. A small adverse gap at that open can erase a
-   razor-thin edge before the trade even starts (this happened for real in
-   the tuning window — a proposal self-reported at 2.00 collapsed to 0.91
-   once the actual next-day price was applied). Look for setups that clear
-   roughly 2.5:1 at decision time, so ordinary next-day noise can't flip the
-   verdict. If the best you can find only just clears 2.0, that is
-   information about the setup, not a trade to take.
-
-   **Before proposing, stress-test the gap.** Ask yourself: if tomorrow's
-   real open is ~3% worse than today's price, does this proposal still
-   clear every rule — stop distance, reward:risk, position size? If a
-   plausible small gap would flip it, don't propose it; the same-day price
-   you're sizing against is a placeholder, not the fill.
+   checked to two decimal places, not targets to aim at: a stop landing a
+   hair inside the floor by a rounding-width miss is rejected outright,
+   and the whole trade is lost over it. Sit comfortably inside the range.
+3. Identify the target. If reward:risk is below the §6b minimum currently
+   binding (your prompt shows it — see below), skip it. The setup does not
+   pay enough for what it risks. A ratio that clears the minimum is a real
+   pass, not a near-miss to be treated with suspicion — do not invent an
+   unwritten stricter bar of your own on top of what RULES.md actually
+   requires.
 4. Check headlines. Adverse news vetoes the entry. Positive news is never a
    reason to enter — it can only fail to block you. If the headline feed
    errors or is unavailable, the veto cannot be evaluated: skip the entry
@@ -115,23 +115,39 @@ hold:
 5. Size the position per §2 — compute BOTH the stop-based size (§2a) and
    the concentration-cap size (§2b) explicitly, state both numbers in your
    reasoning, and take whichever is smaller. Do not eyeball this or skip
-   straight to a number that feels right — a proposal has breached §2b in
-   the tuning window by skipping this exact comparison. Then confirm the
-   chosen size still fits the exposure and cash limits in §3.
+   straight to a number that feels right — a real proposal has breached
+   §2b before by skipping this exact comparison. Then confirm the chosen
+   size still fits the cash available (§3) — you may use all of it, but
+   never more.
 6. `record_decision` (see below), place the order, then
    `record_execution_result` with the real fill.
+
+**Your prompt shows a "strategy profile" line — a currently-binding
+reward:risk floor and a profile label (e.g. `aggressive_v1_base` or
+`aggressive_v1_escalated`).** That is the ONLY thing this mechanism ever
+tells you, and it is entirely harness-controlled: a fixed, deterministic
+rule outside your own judgment decides whether and when the floor changes,
+based on real completed-trade activity in prior 20-trading-day blocks. You
+never see a trade count, a block progress figure, or anything that reads
+as a quota — because there isn't one for you to chase. Use whichever
+threshold your prompt shows for §6b; never reason about why it is what it
+is, and never let it change how aggressively you search for setups. That
+part of the temperament (see `SOUL.md`) does not vary with the tier.
 
 **Step 5 — Narrate as you go.** Call `log_activity` at each meaningful step:
 what you fetched, what you concluded, what you rejected and why. Rejections
 matter as much as trades — a cycle where you looked at eight names and took
 nothing should leave a readable trail explaining why each was passed over.
 
-**When you reject a name for location** (price too close to resistance,
-too extended, no room to run), state the actual measured distance — e.g.
-"resistance sits 2.1% above current price, not enough room for a 2:1
-target" — not unquantified prose like "pressed into resistance" or
-"looks extended." A number can be checked later against what actually
-happened; a mood cannot.
+**When you reject a name, name the specific rule and the specific number.**
+For a location rejection (price too close to resistance, too extended, no
+room to run), state the actual measured distance — e.g. "resistance sits
+2.1% above current price, not enough room for the reward:risk floor this
+cycle" — not unquantified prose like "pressed into resistance" or "looks
+extended." A number can be checked later against what actually happened; a
+mood cannot. **A no-trade cycle is only a valid outcome when every
+candidate you looked at has a concrete, checkable reason like this one** —
+not a vague sense that nothing stood out.
 
 ## Recording a decision honestly
 

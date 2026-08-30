@@ -25,11 +25,10 @@ could not be computed) blocks the trade. An unevaluated safety check has not
 passed. This matches get_account's null-not-zero contract and quota_pacer's
 corrupt-state behaviour.
 
-EXITS ARE PRIVILEGED. Circuit breakers, timing windows, reward:risk and
-exposure caps all restrict *entries only*. A checker that blocked exits
-would trap losing positions open during exactly the conditions those limits
-exist to protect against — strictly worse than no checker. See
-`_check_exit`.
+EXITS ARE PRIVILEGED. The circuit breaker, reward:risk and exposure checks
+all restrict *entries only*. A checker that blocked exits would trap losing
+positions open during exactly the conditions those limits exist to protect
+against — strictly worse than no checker. See `_check_exit`.
 
 # ponytail: the numbers below mirror RULES.md rather than parsing it.
 # Parsing prose markdown for figures would be fragile in a way a safety
@@ -37,6 +36,16 @@ exist to protect against — strictly worse than no checker. See
 # number in RULES.md and you MUST change it here. Kept in one block, with
 # section references, so the sync point is obvious. RULES.md §11 points back
 # here for the same reason.
+
+PHASE 1 AGGRESSIVE PROFILE (implemented per docs/PHASE1_AGGRESSIVE_DESIGN.md
+— see HANDOFF.md for the exact date): `RiskLimits`'s defaults below are the
+BASE tier of that profile (min_reward_risk 1.5). The deterministic activity
+escalation to the 1.25 tier is entirely `run_backtest.py`'s job — it builds
+a per-cycle `RiskLimits` via `dataclasses.replace(RiskLimits(),
+min_reward_risk=...)` and a queued order's OWN stored threshold is what
+`resolve_queued_order` uses at execution time, not whatever is "current"
+that day. This module has no concept of blocks, activity counts, or
+escalation — it only ever sees the single number it's handed.
 """
 
 import math
@@ -46,34 +55,26 @@ from dataclasses import dataclass, field
 @dataclass(frozen=True)
 class RiskLimits:
     """Mirrors RULES.md. The only place numbers live in this module."""
-    risk_budget_pct: float = 1.0          # §2a  max % of equity risked per trade
-    max_position_pct: float = 10.0        # §2b  max % of equity in one name
-    max_exposure_pct: float = 60.0        # §3   max % of equity invested total
-    min_cash_pct: float = 5.0             # §3   trade must leave this much cash
-    max_open_positions: int = 8           # §3
-    daily_halt_pct: float = -3.0          # §4
-    weekly_halt_pct: float = -6.0         # §4
-    drawdown_halt_pct: float = -10.0      # §4
-    streak_losses: int = 3                # §4a
-    streak_size_multiplier: float = 0.75  # §4a  cut sizes 25% after a streak
-    min_stop_pct: float = 5.0             # §6a  stop no closer than this
-    max_stop_pct: float = 10.0            # §6a  stop no further than this
-    min_reward_risk: float = 2.0          # §6b
+    risk_budget_pct: float = 2.0          # §2a  max % of equity risked per trade
+    max_position_pct: float = 20.0        # §2b  max % of equity in one name
+    drawdown_halt_pct: float = -30.0      # §4   the one circuit breaker (catastrophic only)
+    min_stop_pct: float = 3.0             # §6a  stop no closer than this
+    max_stop_pct: float = 12.0            # §6a  stop no further than this
+    min_reward_risk: float = 1.5          # §6b  base tier -- see module docstring
     # Tolerance for §6a/§6b's boundary checks, NOT a loosened rule -- a
     # numerical precision buffer, applied uniformly and symmetrically.
     # Found via a real smoke-test rejection: a stop landed at 4.99% against
-    # the 5.00% floor. That is not float noise in this module's math (the
+    # a 5.00% floor. That is not float noise in this module's math (the
     # comparison itself is exact) -- it is Hermes proposing a real stop
-    # price rounded to the cent, which lands a hair under the floor at
+    # price rounded to the cent, which lands a hair under the floor at the
     # cheap end of the watchlist. §8's price floor is $10; one cent of
     # rounding there is 0.01/10*100 = 0.10 percentage points -- the exact
-    # worst case. stop_tolerance_pct absorbs that; it does not change what
-    # RULES.md requires, only what counts as "close enough" to it.
+    # worst case, independent of exactly where the floor/ceiling sit.
+    # stop_tolerance_pct absorbs that; it does not change what RULES.md
+    # requires, only what counts as "close enough" to it.
     # reward_risk_tolerance mirrors the same reasoning in ratio terms.
     stop_tolerance_pct: float = 0.10
     reward_risk_tolerance: float = 0.02
-    open_buffer_min: int = 15             # §7   no entries just after open
-    close_buffer_min: int = 30            # §7   no entries just before close
 
 
 @dataclass
@@ -118,7 +119,10 @@ class Context:
     clock: MarketClock
     positions: list[Position] = field(default_factory=list)
     watchlist: list[str] = field(default_factory=list)
-    # Most recent CLOSED trades, newest first, True = loss. Drives §4a.
+    # Most recent CLOSED trades, newest first, True = loss. Kept for
+    # anyone reading trade history through this shape; the Phase 1
+    # aggressive profile has no losing-streak de-risking behavior (removed
+    # — RULES.md §4a is gone), so this is no longer read by any check here.
     recent_losses: list[bool] = field(default_factory=list)
     # Tickers stopped out earlier today — §9.4 blocks same-day re-entry.
     stopped_out_today: list[str] = field(default_factory=list)
@@ -148,9 +152,9 @@ def _check_exit(trade: ProposedTrade, ctx: Context, v: list[str], validate_timin
 
     validate_timing: False for decision-TIME proposal validation, where the
     real fill instant isn't known yet -- see check_trade's docstring. Never
-    fake `is_open`/minute values to dodge this; just skip the check that
-    depends on them, and let the real execution-time call (the default,
-    validate_timing=True) remain authoritative.
+    fake `is_open` to dodge this; just skip the check that depends on it,
+    and let the real execution-time call (the default, validate_timing=True)
+    remain authoritative.
     """
     if validate_timing and not ctx.clock.is_open:
         v.append("§7: market is closed")
@@ -191,26 +195,30 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str], validate_timi
         v.append(f"§1/§9.3: {trade.ticker} is not on the watchlist")
 
     # -- §9 prohibitions --------------------------------------------------
+    # §9.1 doubles as the "one open position per ticker" rule -- adding to
+    # an already-held ticker is rejected outright, unconditionally, under
+    # every profile.
     if _held(ctx, trade.ticker) is not None:
         v.append(
-            f"§9.1: already holding {trade.ticker} — adding to an open position "
-            "is averaging down"
+            f"§9.1: already holding {trade.ticker} — one open position per "
+            "ticker; adding to it is averaging down"
         )
     if trade.ticker.upper() in {t.upper() for t in ctx.stopped_out_today}:
         v.append(f"§9.4: {trade.ticker} stopped out earlier today — no same-day re-entry")
 
-    # -- §4 circuit breakers (fail closed on unknowns) --------------------
+    # -- §4 circuit breaker (fail closed on unknown) -----------------------
+    # Phase 1: the ONLY breaker is a catastrophic peak-drawdown pause --
+    # daily/weekly loss halts and losing-streak de-risking (former §4a) are
+    # both removed, not merely widened. See RiskLimits' docstring.
     if acct.trading_blocked:
         v.append("broker reports trading_blocked")
-    for label, value, limit in (
-        ("daily", acct.daily_pl_pct, lim.daily_halt_pct),
-        ("weekly", acct.weekly_pl_pct, lim.weekly_halt_pct),
-        ("drawdown", acct.drawdown_from_peak_pct, lim.drawdown_halt_pct),
-    ):
-        if value is None:
-            v.append(f"§4: {label} P&L could not be determined — treated as tripped")
-        elif value <= limit:
-            v.append(f"§4: {label} circuit breaker tripped ({value}% <= {limit}%)")
+    if acct.drawdown_from_peak_pct is None:
+        v.append("§4: drawdown could not be determined — treated as tripped")
+    elif acct.drawdown_from_peak_pct <= lim.drawdown_halt_pct:
+        v.append(
+            f"§4: drawdown circuit breaker tripped "
+            f"({acct.drawdown_from_peak_pct}% <= {lim.drawdown_halt_pct}%)"
+        )
 
     if acct.equity is None or acct.cash is None:
         v.append("§2: equity/cash unknown — cannot size or verify any limit")
@@ -235,24 +243,12 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str], validate_timi
     equity = acct.equity
     notional = trade.quantity * trade.entry_price
 
-    # -- §4a losing-streak de-risking -------------------------------------
-    # Expressed as tightened caps rather than a separate rule: after a
-    # streak, the ceilings themselves drop 25%.
-    streak = (
-        len(ctx.recent_losses) >= lim.streak_losses
-        and all(ctx.recent_losses[: lim.streak_losses])
-    )
-    multiplier = lim.streak_size_multiplier if streak else 1.0
-    max_position_pct = lim.max_position_pct * multiplier
-    risk_budget_pct = lim.risk_budget_pct * multiplier
-
     # -- §2b concentration cap --------------------------------------------
     position_pct = notional / equity * 100
-    if position_pct > max_position_pct:
-        suffix = " (reduced 25% by the §4a losing streak)" if streak else ""
+    if position_pct > lim.max_position_pct:
         v.append(
             f"§2b: position is {position_pct:.2f}% of equity, cap is "
-            f"{max_position_pct:.2f}%{suffix}"
+            f"{lim.max_position_pct:.2f}%"
         )
 
     # -- §6a stop-loss --------------------------------------------------
@@ -278,11 +274,10 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str], validate_timi
         # -- §2a risk budget ---------------------------------------------
         risk = trade.quantity * (trade.entry_price - trade.stop_price)
         risk_pct = risk / equity * 100
-        if risk_pct > risk_budget_pct:
-            suffix = " (reduced 25% by the §4a losing streak)" if streak else ""
+        if risk_pct > lim.risk_budget_pct:
             v.append(
                 f"§2a: risks {risk_pct:.2f}% of equity, budget is "
-                f"{risk_budget_pct:.2f}%{suffix}"
+                f"{lim.risk_budget_pct:.2f}%"
             )
 
         # -- §6b reward:risk ----------------------------------------------
@@ -301,58 +296,29 @@ def _check_entry(trade: ProposedTrade, ctx: Context, v: list[str], validate_timi
                         f"{lim.min_reward_risk}"
                     )
 
-    # -- §3 exposure, cash floor, position count --------------------------
-    invested = sum(p.market_value for p in ctx.positions)
-    exposure_pct = (invested + notional) / equity * 100
-    if exposure_pct > lim.max_exposure_pct:
+    # -- §3 exposure: available cash only, no margin -----------------------
+    # Phase 1 replaces the old %-of-equity exposure cap, spare-cash buffer,
+    # and max-open-position count with a single check: a trade cannot cost
+    # more than the cash actually on hand. Existing invested capital is
+    # already excluded from `acct.cash` (that's what "settled cash" means),
+    # so this alone is "exposure limited only by available cash" -- no
+    # separate percentage or position-count check needed or wanted.
+    if notional > acct.cash:
         v.append(
-            f"§3: total exposure would be {exposure_pct:.2f}%, cap is "
-            f"{lim.max_exposure_pct}%"
-        )
-
-    remaining_cash_pct = (acct.cash - notional) / equity * 100
-    if remaining_cash_pct < lim.min_cash_pct:
-        v.append(
-            f"§3: would leave {remaining_cash_pct:.2f}% cash, minimum is "
-            f"{lim.min_cash_pct}%"
-        )
-
-    if len(ctx.positions) >= lim.max_open_positions:
-        v.append(
-            f"§3: already holding {len(ctx.positions)} positions, max is "
-            f"{lim.max_open_positions}"
+            f"§3: notional ${notional:,.2f} exceeds available cash "
+            f"${acct.cash:,.2f} — no margin, cash cannot go negative"
         )
 
     # -- §7 market hours ---------------------------------------------------
-    # validate_timing=False: decision-TIME proposal validation, called
-    # before the real fill instant is known (see check_trade's docstring).
-    # Skipping this block is not "assume it passes" -- it means §7 is
-    # simply not this call's job; the real execution-time call (always
-    # validate_timing=True) is what actually enforces it, against the real
-    # clock, and remains authoritative.
-    if validate_timing:
-        if not ctx.clock.is_open:
-            v.append("§7: market is closed — a queued order fills at an unknown price")
-        else:
-            since = ctx.clock.minutes_since_open
-            until = ctx.clock.minutes_until_close
-            # Unknown timing while the market is reported open must fail
-            # closed, not be silently skipped -- an unevaluated §7 check has
-            # not passed, matching this module's own fail-closed contract
-            # for a missing P&L figure elsewhere in this function.
-            if since is None or until is None:
-                v.append("§7: market-hours timing could not be determined — treated as blocking")
-            else:
-                if since < lim.open_buffer_min:
-                    v.append(
-                        f"§7: {since} min after open, no entries for the first "
-                        f"{lim.open_buffer_min}"
-                    )
-                if until < lim.close_buffer_min:
-                    v.append(
-                        f"§7: {until} min before close, no entries in the final "
-                        f"{lim.close_buffer_min}"
-                    )
+    # Phase 1 removes the opening/closing entry buffers -- any minute the
+    # market is genuinely open permits an entry. validate_timing=False
+    # (decision-TIME proposal validation, called before the real fill
+    # instant is known -- see check_trade's docstring) skips this check
+    # entirely; the real execution-time call (always validate_timing=True)
+    # is what actually enforces it, against the real clock, and remains
+    # authoritative.
+    if validate_timing and not ctx.clock.is_open:
+        v.append("§7: market is closed — a queued order fills at an unknown price")
 
 
 def check_trade(trade: ProposedTrade, ctx: Context, validate_timing: bool = True) -> Verdict:
@@ -364,12 +330,11 @@ def check_trade(trade: ProposedTrade, ctx: Context, validate_timing: bool = True
     path, where §1's long-only rule correctly rejects it as a short.
 
     validate_timing: True (default, and the only mode used at real
-    execution -- see simulate_trading_day) enforces §7 market-hours timing
-    against ctx.clock, failing closed on an unknown minute value while the
-    market is reported open. False is for decision-TIME proposal
-    validation (see run_backtest.py's check_decision_time_risk): the real
-    fill instant isn't known yet at proposal time, so §7's timing checks
-    are skipped entirely rather than faked with placeholder clock values --
+    execution -- see simulate_trading_day) enforces §7's "market must be
+    open" requirement against ctx.clock. False is for decision-TIME
+    proposal validation (see run_backtest.py's check_decision_time_risk):
+    the real fill instant isn't known yet at proposal time, so §7 is
+    skipped entirely rather than faked with a placeholder clock value --
     every OTHER rule (§1, §2, §3, §4, §6, §9) still applies in full. The
     real execution-time call, always validate_timing=True, remains the
     sole authority on timing.

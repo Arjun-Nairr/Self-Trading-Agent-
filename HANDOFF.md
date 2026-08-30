@@ -39,32 +39,32 @@ over-cautious). This direction was **superseded before Round 2 started** by
 the decision below. Preserved for comparison, not as current guidance:
 **`docs/history/round2-conservative-draft/run2_prep_analysis.md`**.
 
-**Approved direction: an aggressive Phase 1 profile, implementation
-pending.** Rather than stay conservative, the approved next step loosens
-several numeric limits (1.5:1 min R:R, 2% risk/trade, 20% max position,
-cash-only exposure limit, 5-trading-day time stop, only a −30% drawdown
-breaker, an activity target of ≥5 trades/20 days) specifically to generate
-more real trading evidence — Round 1's near-total inactivity produced too
-little evidence to judge the rules by. Full profile, and what stays
-mandatory regardless (lookahead prevention, execution/slippage mechanics,
-journaling, anti-fabrication): **`docs/PHASE1_AGGRESSIVE_DESIGN.md`**.
-**This is a design only — no enforcement file has been changed to match it
-yet.**
+**Approved aggressive Phase 1 profile — implemented and synchronized.**
+Rather than stay conservative, `RULES.md`, `risk_checker.py`, `AGENTS.md`,
+and `run_backtest.py` now all encode looser numeric limits together (1.5:1
+base / 1.25:1 escalated min R:R, 2% risk/trade, 20% max position, cash-only
+exposure with no margin, no position-count cap, 3–12% stops, 5-trading-day
+time stop, only a −30% drawdown breaker, no losing-streak de-risking, no
+market-hours entry buffers) plus a deterministic, harness-controlled
+activity-escalation mechanism (≥5 completed trades per 20-trading-day
+block, or the next block's floor drops to 1.25:1 — approved by the user in
+advance, never a quota Hermes sees or chases). Full profile, mechanism, and
+what stays mandatory regardless (lookahead prevention, execution/slippage
+mechanics, journaling, anti-fabrication): **`docs/PHASE1_AGGRESSIVE_DESIGN.md`**.
 
-**`SOUL.md` has been rewritten for this direction (Phase 2) and is
-complete.** The prior conservative temperament ("comfortable doing
-nothing... most cycles should end with no trade") is replaced with an
-active one: search every eligible ticker each cycle, ordinary confidence is
-sufficient to act, uncertainty alone is not a veto, a no-trade cycle is
-valid only when every candidate has a concrete rejection reason. Honesty,
-evidence discipline (no strategy lessons from a tiny/empty sample), and
-prompt-injection resistance are unchanged. The prior version is preserved
-at **`docs/history/SOUL_phase1_conservative_2026-08-30.md`**.
+**`SOUL.md` (Phase 2) and this numeric profile are now in sync.** The
+prior conservative temperament ("comfortable doing nothing... most cycles
+should end with no trade") was replaced with an active one: search every
+eligible ticker each cycle, ordinary confidence is sufficient to act,
+uncertainty alone is not a veto, a no-trade cycle is valid only when every
+candidate has a concrete rejection reason. Honesty, evidence discipline (no
+strategy lessons from a tiny/empty sample), and prompt-injection resistance
+are unchanged. The prior version is preserved at
+**`docs/history/SOUL_phase1_conservative_2026-08-30.md`**.
 
-**`RULES.md`, `risk_checker.py`, and `AGENTS.md` still encode the
-conservative numbers.** `SOUL.md`'s temperament and the enforcement layer
-are currently out of sync — that reconciliation is the actual next step,
-below. **No new training run is authorized.**
+**No new training run is authorized.** Implementing the profile is not
+approval to start Round 2 — see "Exact next step" below for what actually
+remains.
 
 ---
 
@@ -152,10 +152,12 @@ broker/news endpoints.
 - **`RULES.md` is the authoritative, locked rules source** — mounted
   read-only into `gateway` (`docker-compose.yml`), re-read by Hermes every
   cycle, never trusted from memory. Hermes may refine judgment through
-  reflection but may **never** loosen a limit. **No number in `RULES.md`
-  has changed yet** — the approved aggressive Phase 1 profile
-  (`docs/PHASE1_AGGRESSIVE_DESIGN.md`) is pending synchronized
-  implementation here and in `risk_checker.py`; see "Current state" above.
+  reflection but may **never** loosen a limit — the one deliberate,
+  human-approved exception is the §6b activity-escalation mechanism (see
+  `docs/PHASE1_AGGRESSIVE_DESIGN.md`), which is harness-controlled, not
+  Hermes' own reasoning. **`RULES.md` now encodes the aggressive Phase 1
+  profile, synchronized with `risk_checker.py`, `AGENTS.md`, and
+  `run_backtest.py`** — see "Current state" above.
 - **`risk_checker.py`** enforces every numeric rule in code, independent
   of the model's own reasoning — pure functions, zero I/O, **fail-closed**
   on any unknown/non-finite/non-positive value.
@@ -228,21 +230,22 @@ SELECT-only — anyone with the endpoint URL can read the same journal rows.
 - **Neon's anonymous-role exposure** and the **pgbouncer statement-cache
   fix's narrow scope** (only `trade-journal-mcp`) — both documented, open
   by design/scope.
-- **Round 1's own real, complete evidence on §6b (2:1 minimum
-  reward:risk)** — see "Current state" above and
+- **Round 1's own real, complete evidence on the (now-superseded)
+  conservative §6b 2:1 minimum** — see "Current state" above and
   `docs/evaluations/run1_evaluation_extract.md` /
   `docs/history/round2-conservative-draft/run2_prep_analysis.md` for the
   full numbers. That analysis argued against loosening §6b in isolation;
-  the approved Phase 1 profile loosens it anyway (to 1.5:1), alongside
-  several other numbers, as a deliberate bet that more real evidence is
-  worth more than this one number staying conservative — see
-  `docs/PHASE1_AGGRESSIVE_DESIGN.md`.
-- **Open questions worth a second opinion**, deliberately unresolved
-  under `RULES.md`'s current (still-conservative) numbers: risk-per-trade,
-  the weekly circuit breaker (`RULES.md`'s own weakest-grounded number),
-  total exposure cap and max positions. See `RULES.md` §10 for the full
-  list — several of these are exactly what the Phase 1 profile proposes
-  to change, once implemented.
+  the implemented Phase 1 profile loosens it anyway (to 1.5:1 base /
+  1.25:1 escalated), alongside several other numbers, as a deliberate bet
+  that more real evidence is worth more than this one number staying
+  conservative — see `docs/PHASE1_AGGRESSIVE_DESIGN.md`.
+- **Open questions worth a second opinion once Phase 1's own real results
+  exist** — the same `RULES.md` §10 questions from before (risk-per-trade,
+  the old weekly circuit breaker's grounding), now reframed: Phase 1 chose
+  a direction on several of them (removing the weekly/daily breakers
+  entirely, raising risk-per-trade to 2%) as a deliberate experiment, not
+  as a resolution — see `RULES.md` §10 for the full, honest accounting of
+  what each change costs.
 
 **Ground rule for any of the above:** `RULES.md`'s hard limits are not up
 for negotiation via "better performance" arguments alone — even Hermes
@@ -255,25 +258,25 @@ proposed change to a hard number needs to go through the user explicitly.
 
 | File | What it is |
 |---|---|
-| `RULES.md` | The authoritative, locked rules — position sizing, caps, circuit breakers, prohibitions. **Still the conservative Round-1 numbers** — Phase 1 implementation pending |
-| `AGENTS.md` | Hermes' operating procedure (the cycle, step by step). Carries the conservative Round-2-draft judgment edits; not yet reconciled with the aggressive profile or Phase 2 `SOUL.md` |
-| `SOUL.md` | Hermes' identity/temperament — **rewritten for Phase 2** (active/experimental), see "Current state" |
-| `backtest-harness/run_backtest.py` | The backtest harness/orchestrator |
+| `RULES.md` | The authoritative, locked rules — position sizing, caps, circuit breaker, prohibitions. **Implements the aggressive Phase 1 profile**, synchronized with `risk_checker.py`/`AGENTS.md`/`run_backtest.py` |
+| `AGENTS.md` | Hermes' operating procedure (the cycle, step by step). **Reconciled for Phase 1/Phase 2** — active-search language, no soft R:R target beyond RULES.md's own, quota-free framing of the strategy-profile prompt line |
+| `SOUL.md` | Hermes' identity/temperament — Phase 2 (active/experimental), in sync with the numeric profile |
+| `backtest-harness/run_backtest.py` | The backtest harness/orchestrator. Owns the entire activity-escalation mechanism (`_maybe_advance_activity_block`, `_record_trade_completion`, `_limits_for_profile`) |
 | `backtest-harness/geometry_scan.py`, `test_geometry_scan.py` | Executable offline diagnostic tooling (not a draft) — geometry classification against real market data |
 | `backtest-harness/counterfactual.py`, `test_counterfactual.py` | Executable offline diagnostic tooling (not a draft) — mechanical counterfactual trade replay |
-| `backtest-harness/backtest_state.json` | Local, gitignored — current in-progress backtest portfolio |
+| `backtest-harness/backtest_state.json` | Local, gitignored — current in-progress backtest portfolio, now also carrying `profile_level`/`block_start_trading_day`/`block_completed_trades` |
 | `backtest-harness/quota_pacer_state.json` | Local, gitignored — real weekly invocation count |
-| `risk-checker/risk_checker.py` | Deterministic rule enforcement, shared by live and backtest. **Still the conservative Round-1 numbers** — Phase 1 implementation pending |
-| `trade-journal-mcp/`, `alpaca-mcp/`, `maverick-mcp/`, `google-news-rss-mcp/`, `execution-sim-mcp/` | The five tool containers |
-| `dashboard/index.html` | The local-only dashboard frontend |
+| `risk-checker/risk_checker.py` | Deterministic rule enforcement, shared by live and backtest. **Implements the aggressive Phase 1 profile** — `RiskLimits`' defaults are the base tier; escalation is applied per-cycle by the harness |
+| `trade-journal-mcp/`, `alpaca-mcp/`, `maverick-mcp/`, `google-news-rss-mcp/`, `execution-sim-mcp/` | The five tool containers. `trade-journal-mcp/schema.sql` carries the additive `trades.strategy_profile`/`trades.min_reward_risk_used` migration |
+| `dashboard/index.html` | The local-only dashboard frontend. Shows the Phase 1 profile/threshold as an unobtrusive tooltip on open positions when present |
 | `docker-compose.yml` | Full stack topology, pinned image digests |
 | `watchlist/watchlist.json` | The fixed 10-ticker eligible universe |
 | `docs/evaluations/run1_evaluation_extract.md` | Full read-only extraction of Round 1's real results (125 cycles, zero fills) |
-| `docs/PHASE1_AGGRESSIVE_DESIGN.md` | The approved aggressive profile — numbers, and what stays mandatory regardless. Design only, not yet implemented |
+| `docs/PHASE1_AGGRESSIVE_DESIGN.md` | The aggressive profile — numbers, the escalation mechanism, and what stays mandatory regardless. **Implemented**, not just a design |
 | `docs/history/round2-conservative-draft/run2_prep_analysis.md` | Archived — the superseded conservative Round-2 direction (geometry/counterfactual numbers, AGENTS.md rationale) |
 | `docs/history/SOUL_phase1_conservative_2026-08-30.md` | Archived — `SOUL.md` as it stood through Round 1, before the Phase 2 rewrite |
 | `docs/history/HANDOFF_FULL_2026-08-28.md` | Full dated repair history, test transcripts, superseded numbers from the pre-Round-1 correctness passes — consult only when a task needs that detail |
-| `PROJECT_FRESH_START.md` | From-zero, code-verified architecture explainer |
+| `PROJECT_FRESH_START.md` | From-zero, code-verified architecture explainer — updated for the Phase 1 numbers where it described specifics |
 
 ---
 
@@ -320,32 +323,93 @@ top of this file for that.
 
 ---
 
+### 2026-08-30 — Phase 1 aggressive profile implemented, synchronized
+
+Used the `implement` skill. Every active layer now agrees: `RULES.md`,
+`risk_checker.py`'s `RiskLimits`, `AGENTS.md`'s procedure, and
+`run_backtest.py` all encode the same numbers together, in one change —
+not piecemeal.
+
+**Corrected factual errors:** `SOUL.md` and `docs/PHASE1_AGGRESSIVE_DESIGN.md`
+both previously said Round 1 produced one filled trade; corrected to the
+verified real result — 125 cycles, zero filled trades (one entry, SFM,
+reached the queue and was rejected at execution).
+
+**Synchronized the profile** across the four files above: 1.5:1 base /
+1.25:1 escalated min reward:risk, 2% risk budget, 20% max position,
+cash-only exposure with no margin (position-count and daily-entry limits
+removed outright), 3–12% stops, 5-trading-day time stop, only a −30%
+drawdown breaker (daily/weekly breakers and losing-streak de-risking
+removed), no market-hours entry buffers. One open position per ticker,
+sentiment-as-veto-only, and every lookahead/masking/execution/slippage/
+missing-data/journaling/anti-fabrication guarantee are all unchanged.
+
+**Implemented the deterministic activity-escalation mechanism**
+(`backtest-harness/run_backtest.py`): fixed 20-trading-day blocks, a
+completed-trade count (filled entry → filled exit only — rejections and
+queued-only proposals never count), automatic escalation to the 1.25:1
+tier when a block completes below 5, never reversing, never mid-block.
+State (`profile_level`, `block_start_trading_day`, `block_completed_trades`)
+persisted in `backtest_state.json`, restored exactly on resume. A queued
+order stores the exact tier/threshold binding when it was decided
+(`QueuedOrder.strategy_profile`/`min_reward_risk_used`) and
+`resolve_queued_order` uses that stored value at execution, never
+whatever's "current" that day. Hermes' prompt shows only the currently
+binding threshold and profile label — never a trade count or anything
+that reads as a quota.
+
+**Recorded the profile structurally**: additive `trades.strategy_profile`/
+`trades.min_reward_risk_used` columns (`ALTER TABLE ... ADD COLUMN IF NOT
+EXISTS`, applied to Neon), populated on every new Round-2 decision,
+included in idempotency collision comparison, exposed unobtrusively on the
+dashboard (a tooltip, not a new column) when present.
+
+**Reconciled `AGENTS.md`**: removed the superseded conservative Round-2
+soft 2.5:1 R:R target and the 3%-gap stress-test veto; kept explicit
+dual-sizing calculations, quantified rejection reasons, and the reflection
+guard for tiny/empty samples; added active-search framing (an ordinary
+setup that clears the rules deserves action, confidence 3 is sufficient,
+multiple entries per cycle are normal, a no-trade cycle needs a concrete
+reason per candidate) and explained the strategy-profile prompt line as
+quota-free and harness-controlled.
+
+**Updated `docs/PHASE1_AGGRESSIVE_DESIGN.md`** from "approved design" to
+implemented status, adding the previously-omitted removals (losing-streak
+de-risking, market-hours buffers) and describing escalation as automatic,
+deterministic, and approved in advance. Updated `PROJECT_FRESH_START.md`
+only where its numeric/behavioral description had gone stale (circuit
+breaker, stop band, reward:risk floor).
+
+**Exact verification (2026-08-30):** all touched Python files compile
+clean. `risk-checker/test_risk_checker.py` (rewritten for the new profile,
+all PASS), `backtest-harness/test_execution_semantics.py` (existing suite
+updated for the new numbers plus 9 new activity-escalation regressions,
+all PASS), `test_quota_pacer.py`, `test_anonymize.py` (unaffected, PASS).
+Trade-journal suite rebuilt and run inside the container:
+`test_decision_fields.py`, `test_idempotency.py` (extended with a new
+profile-field collision + NULL-backward-compat regression),
+`test_mode_isolation.py`, `test_run_isolation.py`, `test_dashboard_fields.py`
+— all PASS against real, self-cleaning Neon. `docker compose config -q`
+valid. The additive Neon migration applied cleanly (verified via real
+`information_schema` query); Round 1's own single trades row remains
+readable with both new fields NULL. Dashboard smoke-checked live in a
+browser (Training view, real Round 1 data) — zero console errors, tooltip
+addition inert on pre-Phase-1 rows exactly as designed. `git diff --check`
+clean. `backtest_state.json`/`quota_pacer_state.json` confirmed untouched
+(unmodified timestamps, gitignored either way); no run started, resumed,
+or reset.
+
+**Remaining blocker: none for the implementation itself.**
+
 ## Exact next step
 
-**Phase 2's `SOUL.md` is done. The Phase 1 aggressive profile
-(`docs/PHASE1_AGGRESSIVE_DESIGN.md`) is approved but not implemented
-anywhere numeric.** The real next step is a synchronized implementation
-pass, together, not piecemeal (a number changed in one place and not
-another is silently unenforced — the same drift risk `risk_checker.py`
-already warns about for the current numbers):
-
-1. **`RULES.md`** — replace the conservative numbers (§2a/§2b/§3/§4/§6a/
-   §6b/§6c) with the Phase 1 profile's values.
-2. **`risk_checker.py`**'s `RiskLimits` — the same values, mirrored exactly
-   as today, plus removing the position-count/daily-entry checks the
-   profile drops and confirming the −30%-only breaker and the cash-only
-   exposure check.
-3. **`AGENTS.md`** — reconcile its still-conservative Round-2-draft
-   judgment edits (R:R headroom aimed at the old 2.0 floor, sizing
-   language keyed to the old caps) against both the new numbers and
-   Phase 2's active `SOUL.md` temperament.
-4. **The harness and its tests** — anything hardcoding the old numbers
-   (`TIME_STOP_TRADING_DAYS`, breaker thresholds, etc.) plus new coverage
-   for the activity-target tracking and escalation proposal mechanic.
-
-**No new training run is authorized until that synchronized pass is done
-and verified** — this document does not authorize starting Round 2 or any
-backtest run.
+**The synchronized implementation is done and verified. Round 2 itself
+still requires separate, explicit human approval before it starts** —
+implementing the profile is not that approval. Nothing in this file
+authorizes starting it. When approved: a fresh backtest run (`--reset`, a
+new `run_id`) under the now-synchronized `RULES.md`/`risk_checker.py`/
+`AGENTS.md`/`SOUL.md`, tracked against the six-month target of 30–60
+completed trades (`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
 
 ---
 

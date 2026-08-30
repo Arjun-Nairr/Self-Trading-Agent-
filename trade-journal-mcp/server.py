@@ -198,7 +198,8 @@ def _decision_field_mismatches(
     expected_reward_risk: float, invalidation_condition: str, strategy_notes: str | None,
     data_timestamps: dict[str, Any] | None, stop_price: float | None,
     target_price: float | None, limit_price: float | None, run_id: str | None,
-    execution_mode: str,
+    execution_mode: str, strategy_profile: str | None = None,
+    min_reward_risk_used: float | None = None,
 ) -> list[str]:
     """Every field that DEFINES the decision -- not only the four
     (ticker/action/quantity/order_type) the prior check compared. A genuine
@@ -225,6 +226,11 @@ def _decision_field_mismatches(
         ("data_timestamps", _json_equal(row["data_timestamps"], data_timestamps)),
         ("run_id", _uuid_equal(row["run_id"], run_id)),
         ("execution_mode", row["execution_mode"] == execution_mode),
+        # Phase 1 aggressive profile (docs/PHASE1_AGGRESSIVE_DESIGN.md):
+        # additive, nullable -- a genuine retry of a pre-Phase-1 row (both
+        # NULL) must compare equal, same as every other nullable field here.
+        ("strategy_profile", row["strategy_profile"] == strategy_profile),
+        ("min_reward_risk_used", _num_close(row["min_reward_risk_used"], min_reward_risk_used)),
     ]
     return [name for name, ok in checks if not ok]
 
@@ -248,6 +254,8 @@ async def _record_decision(
     target_price: float | None = None,
     run_id: str | None = None,
     execution_mode: str = "simulated",
+    strategy_profile: str | None = None,
+    min_reward_risk_used: float | None = None,
 ) -> dict[str, Any]:
     """decision_id: optional caller-supplied id. Live Hermes never passes
     one (always gets a fresh uuid4, unchanged behavior). The backtest
@@ -264,7 +272,14 @@ async def _record_decision(
     below. This should never happen for a genuine retry of the same event
     (deterministic ids are derived from the event's own identity); if it
     does, something is wrong with id derivation itself and silently
-    returning the wrong trade's data would be far worse than an error."""
+    returning the wrong trade's data would be far worse than an error.
+
+    strategy_profile/min_reward_risk_used (Phase 1 aggressive profile,
+    docs/PHASE1_AGGRESSIVE_DESIGN.md): additive, nullable -- which tier
+    ('aggressive_v1_base'/'aggressive_v1_escalated') and threshold this
+    decision was actually validated against. NULL for every pre-Phase-1
+    row and for any caller that doesn't pass them (e.g. live Hermes' own
+    public record_decision tool, unaffected by this profile)."""
     _validate_decision_fields(
         action, confidence, primary_signal, expected_reward_risk,
         invalidation_condition, strategy_notes, technical_basis,
@@ -278,8 +293,9 @@ async def _record_decision(
                              confidence, primary_signal, technical_basis,
                              expected_reward_risk, invalidation_condition,
                              strategy_notes, data_timestamps, stop_price,
-                             target_price, run_id, execution_mode)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+                             target_price, run_id, execution_mode,
+                             strategy_profile, min_reward_risk_used)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
         ON CONFLICT (decision_id) DO NOTHING
         RETURNING *
         """,
@@ -288,6 +304,7 @@ async def _record_decision(
         expected_reward_risk, invalidation_condition, strategy_notes,
         json.dumps(_normalize_data_timestamps(data_timestamps)) if data_timestamps else None,
         stop_price, target_price, run_id, execution_mode,
+        strategy_profile, min_reward_risk_used,
     )
     if row is None:
         # A caller-supplied decision_id that already exists -- a retry of
@@ -309,6 +326,7 @@ async def _record_decision(
             invalidation_condition=invalidation_condition, strategy_notes=strategy_notes,
             data_timestamps=data_timestamps, stop_price=stop_price, target_price=target_price,
             limit_price=limit_price, run_id=run_id, execution_mode=execution_mode,
+            strategy_profile=strategy_profile, min_reward_risk_used=min_reward_risk_used,
         )
         if mismatches:
             raise ValueError(
