@@ -1,20 +1,58 @@
 # Handoff briefing — Hermes trading agent
 
 **Read this if you are an AI assistant being brought in to discuss or advise
-on this project.** The working split: **discussion/strategy/second opinions
-happen in chat; Claude Code handles execution** — reading/editing code,
-running the harness, touching Neon, committing. Don't propose direct code
-edits as if you'll apply them yourself; propose the *decision*, and it gets
-relayed to Claude Code to implement and verify.
+on this project** (Claude, ChatGPT, OpenCode, or otherwise). The working
+split: **discussion/strategy/second opinions happen in chat; Claude Code
+handles execution** — reading/editing code, running the harness, touching
+Neon, committing. Don't propose direct code edits as if you'll apply them
+yourself; propose the *decision*, and it gets relayed to Claude Code to
+implement and verify.
 
 **Context control:** read this compact handoff first, then only the files
 directly relevant to the task you're assigned. Do not load the historical
 archive (`docs/history/`), vendored third-party code (`maverick-mcp/`),
 local backups, generated/state files, or unrelated test files unless the
-task specifically requires them. Full dated repair narratives, test
-transcripts, and superseded numbers live in
-[`docs/history/HANDOFF_FULL_2026-08-28.md`](docs/history/HANDOFF_FULL_2026-08-28.md)
-— link there instead of re-deriving or duplicating that detail here.
+task specifically requires them.
+
+---
+
+## Current state — read this first
+
+**Round 1 has completed: 125 cycles, zero filled trades.** A full six-month
+backtest (`run_id 26f1d371-08db-4885-ab24-b42200792fb7`, window
+2026-02-17 → 2026-08-14) ran to its natural end under the locked model and
+rules below. Full read-only extraction of every decision, rejection, and
+reflection: **`backtest-harness/run1_evaluation_extract.md`**.
+
+**Diagnosis: infrastructure was flawless; the failures were judgment-layer.**
+Every real proposal aimed at the bare-minimum §6b reward:risk (1.92–2.00)
+and died to rounding or a next-day price gap; two proposals breached the
+§2b concentration cap by skipping the smaller-of-two sizing check; 25
+reflections written against zero closed trades entrenched a no-trade prior;
+no-action reasons cited "location" without a measured distance. No
+infrastructure defect, no halted cycle, no data-feed starvation.
+
+**Round 2 preparation is complete. Round 2 itself has not started.**
+Three deliverables, all read-only/judgment-layer, none touching RULES.md:
+
+1. **`AGENTS.md`** — five judgment-layer edits (R:R headroom doctrine
+   targeting ~2.5:1 rather than the 2.0 floor, a pre-proposal gap
+   stress-test, a mandatory dual sizing check, a reflection guard for
+   `sample_size=0`, quantified location rejections).
+2. **`backtest-harness/geometry_scan.py`** — diagnostic: across the full
+   real window, maverick's own support/resistance algorithm offered
+   2:1-or-better geometry on **79.6%** of (day, ticker) pairs, 20.4% CLOSE,
+   0% INVALID.
+3. **`backtest-harness/counterfactual.py`** — mechanical replay of real
+   fill/exit rules against those setups: **24.5% win rate, average -0.11R**
+   across 995 geometry-valid pairs; SFM's real rejected proposal, replayed
+   as if filled, would have stopped out at **-1.00R**.
+
+Full numbers and methodology: **`backtest-harness/run2_prep_analysis.md`**.
+**Reading:** Round 1's caution looks directionally justified, not simply
+over-conservative — the geometry that "existed" mostly did not hold up as
+real resistance. See "Exact next step" at the bottom for what's actually
+pending.
 
 ---
 
@@ -25,24 +63,23 @@ account, swing-trading horizon** (days to weeks) — reasoning over
 technicals and news, gated by a hard-coded risk checker before anything
 executes. Two modes: **backtest** (point-in-time historical simulation,
 identity-masked so the model can't recall what really happened) and
-**live** (real Alpaca paper-trading API). **Currently in the
-backtest/tuning phase — no live trading yet, and the six-month training
-run has not started.**
+**live** (real Alpaca paper-trading API). **Round 1 (backtest) has run and
+completed — see above. Live trading has never run.**
 
 A separate personal study artifact, "The Hermes Ledger," exists as the
 user's own optional deep-dive reading — it is **not** required context for
-an assistant working on this project and was not consulted to write this
-file. Do not treat it as authoritative; this file and the repo's own
-source (`RULES.md`, `AGENTS.md`, `SOUL.md`, actual code) are.
+an assistant working on this project. Do not treat it as authoritative;
+this file and the repo's own source (`RULES.md`, `AGENTS.md`, `SOUL.md`,
+actual code) are.
 
 ---
 
 ## Locked model decision
 
-**`openai-codex` / `gpt-5.4-mini` / medium reasoning — locked for this
-training run.** Originally the tool's shipped default, not a deliberate
-choice, but as of 2026-08-28 stated unambiguously: do not change it
-without an explicit new decision.
+**`openai-codex` / `gpt-5.4-mini` / medium reasoning — locked, and this is
+what Round 1 actually ran.** Originally the tool's shipped default, not a
+deliberate choice, but as of 2026-08-28 stated unambiguously: do not change
+it without an explicit new decision.
 
 **OpenCode Go + DeepSeek V4 Flash was investigated and abandoned.** Both
 the provider and model are real and genuinely supported — but
@@ -70,10 +107,18 @@ by digest** (not `:latest`), rebuilt and confirmed behaviorally identical.
 | `dashboard` | Static frontend, served locally only (see below). |
 
 **Backtest mode:** Hermes never calls a tool directly. `backtest-harness/
-run_backtest.py` fetches everything (technicals, news — now including
-**held** positions, not just unheld candidates), masks tickers/dates, and
-hands Hermes one prompt per simulated day. One "cycle" = one simulated
-trading day, not one trade.
+run_backtest.py` fetches everything (technicals, news, held positions),
+masks tickers/dates, and hands Hermes one prompt per simulated day. One
+"cycle" = one simulated trading day, not one trade. Essential cycle data
+(checkpointed Hermes response, portfolio state, trade decisions, risk
+checks) commits atomically before any best-effort observability (snapshots,
+activity narration) is attempted — a crash after commit can lose dashboard
+detail but never duplicate a trade or a Hermes call. **A consequence worth
+knowing when reading Neon timestamps:** activity narration, including each
+cycle's own `cycle_start` row, is written as one deferred batch at the
+*end* of its cycle — so a `cycle_start` timestamp is not the earliest event
+of its own cycle; a `trades`-table row journaled mid-cycle can have an
+*earlier* timestamp than its own cycle's `cycle_start`.
 
 **Live mode:** Hermes calls MCP tools directly against real (paper)
 broker/news endpoints.
@@ -95,12 +140,12 @@ broker/news endpoints.
 - **`RULES.md` is the authoritative, locked rules source** — mounted
   read-only into `gateway` (`docker-compose.yml`), re-read by Hermes every
   cycle, never trusted from memory. Hermes may refine judgment through
-  reflection but may **never** loosen a limit.
+  reflection but may **never** loosen a limit. **No number in `RULES.md`
+  changed for Round 2** — every Round-2 fix is judgment-layer (`AGENTS.md`)
+  or offline analysis; see "Current state" above.
 - **`risk_checker.py`** enforces every numeric rule in code, independent
   of the model's own reasoning — pure functions, zero I/O, **fail-closed**
-  on any unknown/non-finite/non-positive value (NaN, zero/negative equity,
-  missing P&L, unknown market-hours timing while the market is reported
-  open all block rather than silently pass or crash).
+  on any unknown/non-finite/non-positive value.
 - **Point-in-time masking + lookahead prevention:** masked ticker/company
   identities (reshuffled per run), `as_of`-gated data fetches, and
   next-day queued execution together guarantee a backtest decision never
@@ -113,9 +158,9 @@ broker/news endpoints.
   re-validates everything including timing and is the **sole authority**
   on whether a trade actually happens. A proposal passing decision-time
   can still be correctly rejected at execution time against the real
-  price — this is the intended design, proven in the last real smoke
-  test (a queued BUY passed decision-time, then was rejected the next day
-  against a real price gap).
+  price — Round 1's SFM proposal is the real, observed example: it passed
+  decision-time (self-reported R:R 2.00), then failed execution-time when
+  the real next-day price collapsed it to 0.91.
 - **One-lot model:** a discretionary SELL must close the entire position.
   Rejected outright at both decision and execution time. (Involuntary
   *broker* partial fills — the venue filling fewer shares than requested
@@ -127,8 +172,7 @@ broker/news endpoints.
 - **Queue-time journaling:** a decision is journaled the instant it's
   queued (status `'pending'`), not only once it fills. The *same* row is
   updated to `filled`/`rejected` on resolution — never a fresh row, never
-  a fabricated fill. A `decision_id` collision with a mismatched payload
-  fails loudly rather than silently returning stale data.
+  a fabricated fill.
 - **Reconciliation (live only):** on restart, check every `'pending'`
   journal row against real broker state before doing anything else — the
   broker is always the source of truth for live positions.
@@ -136,9 +180,8 @@ broker/news endpoints.
   persisted in `backtest_state.json`, reused across a resume, never
   reused across a `--reset`). Every table carries it. A deterministic
   `cycle_id` per (run, simulated day) has a real database-level
-  uniqueness constraint — a retried cycle cannot duplicate a snapshot,
-  activity narration, or reflection insight. Reflection retrieval and the
-  dashboard are both scoped to the current run's `run_id`.
+  uniqueness constraint. Reflection retrieval and the dashboard are both
+  scoped to the current run's `run_id`.
 - **Quota:** `quota_pacer.py` counts real Hermes invocations against the
   real ISO calendar week, counted the instant Hermes is actually called
   (including a call that later fails) — the dashboard reads this real
@@ -149,212 +192,11 @@ broker/news endpoints.
 ## Dashboard
 
 Local-only: `docker compose up -d dashboard` → **`http://127.0.0.1:8842`**,
-bound to loopback, never publicly deployed (GitHub Pages was never live
-for this and isn't the goal). Reads Neon's Data API with a SELECT-only
-anonymous role. Shows real quota/token usage, real per-run scoping,
-paginated (not row-capped) trade history, and neutral risk-check
-observations (never a suggestion to loosen a rule). **Documented,
-unaddressed exposure:** the anonymous role has no auth beyond SELECT-only
-— anyone with the endpoint URL can read the same journal rows.
-
----
-
-## Current training window and clean baseline (verified 2026-08-28)
-
-**Local state** (`backtest-harness/backtest_state.json`), verified through
-the real `Portfolio.from_dict` code path, not just inspected:
-
-- Cash / equity: **$100,000**, no holdings, no closed trades, no pending
-  orders
-- Cursor: **`2026-02-17`** (the configured backtest window start)
-- Trading days elapsed: **0**, cycles since reflection: **0**
-- Equity curve: 6 flat entries at $100,000 (matches `Portfolio`'s own
-  dataclass default — needed so the risk checker doesn't fail-closed on
-  weekly P&L for the first 5 cycles of a real run)
-- `run_id`: **not stored** — the harness generates a fresh one the next
-  time it actually runs
-
-**Quota** (`backtest-harness/quota_pacer_state.json`, untouched by this or
-any prior reset): `{"2026-W34": 34, "2026-W35": 6}` — real invocation
-history, preserved exactly.
-
-**Neon:** zero `mode='backtest'`/`execution_mode='backtest'` rows in
-`trades`, `agent_activity`, `portfolio_snapshots`, `insight_log`. The
-AAPL manual integration-test row (`execution_mode: 'alpaca'`,
-`status: 'rejected'`) was removed on 2026-08-28 (backed up first — see
-`~/.hermes-trading-agent/backups/aapl_manual_test_row_backup_2026-08-28.json`)
-— `trades` is now genuinely empty project-wide, zero rows.
-
-**Dashboard**, verified live in a browser without running a Hermes cycle:
-Training and Live views both show zero cycles/trades/positions/snapshots.
-Zero console errors.
-
----
-
-## 2026-08-28 correctness pass (second pass) — repaired guarantees
-
-Narrowly scoped repair, no training started, no architecture/feature
-changes. Full narrative in
-`docs/history/HANDOFF_FULL_2026-08-28.md` is NOT written yet for this
-pass (nothing to archive from — this is new content); this section is
-the complete record.
-
-1. **Circuit breakers now see this morning's own losses before a 09:45
-   BUY.** `simulate_trading_day` used to receive daily/weekly/drawdown
-   percentages frozen as of yesterday's close; a same-morning opening-gap
-   or 09:30–09:45 stop never touched a 09:45 entry's risk check. Fixed by
-   passing the raw `equity_curve` through and recalculating breakers
-   fresh, from a real intraday equity mark, at every 09:30 SELL and 09:45
-   BUY decision point (see `_recalc_breakers`).
-2. **Failed-cycle retries are now deterministic.** A validated Hermes
-   response is durably checkpointed (`backtest-harness/cycle_checkpoint.json`,
-   gitignored, atomic write) the instant it exists — before
-   `record_snapshot_once`, decision journaling, or activity logging. A
-   retry of the same `(run_id, day_index)` reuses the checkpointed
-   response verbatim: no second Hermes call, no quota charge. Cleared only
-   after the atomic local-state commit for that cycle succeeds (see
-   `_load_checkpoint` / `_save_checkpoint` / `_clear_checkpoint`).
-3. **`decision_id` collisions now compare every decision-defining field**
-   (notional, stop/target, confidence, signals, reward:risk, invalidation,
-   notes, timestamps, `run_id` — not just ticker/action/quantity/order_type),
-   normalized sensibly (numeric tolerance, JSON structural equality). A
-   genuine retry stays a no-op; anything materially different fails loudly,
-   naming the field (`trade-journal-mcp/server.py`, `_decision_field_mismatches`).
-4. **Maverick's historical OHLC now explicitly requests the same raw basis
-   Alpaca execution uses** (`auto_adjust=False` on the yfinance fetch) —
-   previously yfinance's own default (dividend/split-adjusted) could
-   silently disagree with real fill prices around an ex-dividend date.
-   `as_of` point-in-time gating is untouched.
-5. **Queued BUY risk checks now use the slippage-adjusted fill price**,
-   not the raw bar open — mirrors execution-sim-mcp's own `SLIPPAGE_BPS=5`
-   MARKET-fill rule exactly (`_slipped_buy_price`). A trade that only
-   breaches a hard cap after slippage is now rejected before it can ever
-   reach execution. SELL is deliberately unaffected (slippage only makes
-   an exit more conservative against a cap).
-6. **Dashboard's "blocked by rule" summary count now uses the complete
-   blocked-activity dataset**, not the 80-row recent-activity feed — it
-   could previously undercount on any run with more than 80 recent
-   activity rows.
-7. **The masking seed is now persisted** in `backtest_state.json`. A
-   resumed run reuses its stored seed; a conflicting `--seed` fails
-   loudly (`SystemExit`, names both seeds) instead of silently remapping
-   ticker↔alias assignments Hermes has already learned this run. A
-   fresh/`--reset` run may establish a new seed. A legacy state file
-   missing the field falls back to the supplied/default seed safely.
-
-**New regression tests** (`backtest-harness/test_execution_semantics.py`
-unless noted): `test_combined_morning_stop_losses_trip_breaker_before_945_buy`,
-`test_checkpoint_survives_a_retry_without_a_second_hermes_call_or_duplicate_journal_row`,
-`test_buy_risk_check_slippage_price_matches_execution_sim_rule` +
-`test_buy_risk_check_uses_slippage_adjusted_price_not_raw_open`,
-`test_resolve_seed_resume_and_mismatch`; extended
-`trade-journal-mcp/test_idempotency.py` with changed-stop/target/notional/
-metadata collision cases; new
-`maverick-mcp/tests/market_data/test_fetchers.py::test_default_history_fn_requests_raw_unadjusted_basis`.
-
-**Exact verification results (2026-08-28):** all first-party Python files
-touched compile clean. `risk-checker/test_risk_checker.py`,
-`backtest-harness/test_execution_semantics.py` (58 checks),
-`test_anonymize.py`, `test_quota_pacer.py`,
-`trade-journal-mcp/test_decision_fields.py`, `test_idempotency.py`
-(extended), `test_run_isolation.py`, `test_dashboard_fields.py` (real
-Neon, self-cleaning), `execution-sim-mcp/test_fill_logic.py`,
-`maverick-mcp/tests/market_data/test_fetchers.py` (22 tests) — all PASS.
-`docker compose config -q` valid. Dashboard smoke-checked live in both
-Training and Live modes, zero console errors. Backtest tables confirmed
-empty before and after (found 8 stray `cycle_failed` rows generated by
-running `test_execution_semantics.py`'s pre-existing
-`_run_cycle_or_halt` test locally — backed up, then deleted, root cause
-noted: that one test's best-effort failure logging shells out to the
-real trade-journal container even when run standalone).
-
-**Remaining blocker: none.** Stack is training-ready pending human
-approval to start the run.
-
----
-
-## 2026-08-28 correctness pass (third pass) — repaired guarantees
-
-**Locked architectural decision — essential vs. best-effort:** cycle data
-now splits into two classes. **Essential** (must halt safely and retry
-deterministically): the checkpointed Hermes response, portfolio state and
-pending orders, trade decisions and execution results, reflections/
-insights (they feed future prompts), and every risk-enforcement check --
-all completed inside `run_day` before it ever returns. **Best-effort
-observability** (must never halt or replay trading): portfolio snapshots,
-activity narration, and the dashboard stats derived from them -- deferred
-into a `do_observability` closure `run_day` returns, which the caller
-(`main()`) invokes ONLY after the atomic local-state commit and
-checkpoint clear for that cycle have already succeeded, inside a
-try/except that reports a failure without halting, retrying, or
-replaying. A crash after the commit but before observability may leave
-missing dashboard information (explicitly accepted); it can never create
-a duplicate trade or repeat a Hermes call. `record_snapshot_once`'s
-`is_new` no longer gates decisions, reflections, or activity.
-
-**Four repairs:**
-1. **Fixed identical backtest retry collisions.** Neon returns UUID
-   columns (`run_id`) as `uuid.UUID` objects; the harness supplies plain
-   strings. `_decision_field_mismatches` compared them directly, so an
-   identical retry with a real `run_id` always false-failed as a
-   `run_id` mismatch. Fixed via `_uuid_equal` (None-safe string
-   normalization) in `trade-journal-mcp/server.py`. Proof:
-   `test_identical_retry_with_real_run_id_is_a_no_op` (real Neon) --
-   identical retry is a no-op, a genuinely different `run_id` still
-   fails loudly.
-2. **Corrected sequential 09:45 BUY accounting.** After an accepted
-   queued BUY, `simulate_trading_day`'s own internal sequencing used to
-   track it via the UNSLIPPED open and mark it at its earlier 09:30
-   close for a SECOND queued BUY's risk check -- both could inflate
-   equity. `_slipped_buy_price` now mirrors execution-sim-mcp's real
-   MARKET-fill formula exactly (5bps + bar-range clamp) for both the
-   risk check AND the internal fill/cash bookkeeping; a freshly-entered
-   position is marked at its own real fill price, never an unrelated
-   09:30 close. Proof: `test_sequential_945_buys_see_the_first_fills_real_state`
-   -- a second BUY that would incorrectly PASS under the old inflated
-   state is correctly REJECTED (§2b) under the real one.
-3. **Isolated unit tests from real Neon/Docker.** `_run_cycle_or_halt`
-   now takes an injectable `fail_logger` (defaults to the real
-   `log_cycle_failure` in production); the test suite injects a fake, so
-   running it locally can no longer create real `cycle_failed` Neon rows
-   -- prevented structurally, not cleaned up after. Proof:
-   `test_run_cycle_or_halt_halts_without_touching_cursor_semantics`
-   asserts the FAKE logger (not the production one) received the exact
-   failure event.
-4. **Added a real lifecycle regression test.** `test_real_lifecycle_checkpoint_commit_then_best_effort_observability`
-   exercises the ACTUAL orchestration boundary (`run_day`,
-   `_load_checkpoint`/`_save_checkpoint`/`_clear_checkpoint`,
-   `_atomic_write_json`) with only the true I/O functions mocked --
-   proves attempt 1 calls fake Hermes once and checkpoints; an essential
-   journal failure halts before state advancement; a retry reuses the
-   checkpoint with no second Hermes call and an idempotent (same
-   `decision_id`) essential re-write; the atomic commit succeeds and the
-   checkpoint clears only after; and a post-commit snapshot/activity
-   failure is caught without halting, rolling back, or replaying.
-
-**Explicitly deferred (documented, not implemented):** restricting live
-Hermes's large Maverick tool surface; removing the separate
-execution-simulator container; consolidating Google News RSS and Alpaca
-news; removing snapshot/activity tables; reworking duplicated
-daily-price fetching; SEC fundamentals, dynamic screening,
-company-research states, or evaluator agents; any risk-rule or strategy
-change.
-
-**Exact verification results (2026-08-28):** all touched Python files
-compile clean. `backtest-harness/test_execution_semantics.py` (100
-checks, including the 4 new/rewritten regressions above), `test_anonymize.py`,
-`test_quota_pacer.py`, `risk-checker/test_risk_checker.py`,
-`trade-journal-mcp/test_decision_fields.py`, `test_idempotency.py`
-(extended), `test_run_isolation.py` (real Neon, self-cleaning) -- all
-PASS. Confirmed no test invoked a real Hermes call (item 3's fix,
-verified with the trade-journal container both up and down). Training
-state (`backtest_state.json`) did not advance -- still cursor
-`2026-02-17`, zero trading days. No checkpoint file remains. All
-backtest Neon tables confirmed empty before and after (found and
-cleaned 1 stray `cycle_failed` row generated by a local test run made
-BEFORE item 3's fix landed -- exactly the class of pollution item 3
-prevents going forward). `git status` otherwise clean -- only the four
-files this pass touched.
+bound to loopback, never publicly deployed. Reads Neon's Data API with a
+SELECT-only anonymous role. Shows real quota/token usage, real per-run
+scoping, paginated trade history, and neutral risk-check observations.
+**Documented, unaddressed exposure:** the anonymous role has no auth beyond
+SELECT-only — anyone with the endpoint URL can read the same journal rows.
 
 ---
 
@@ -367,32 +209,24 @@ files this pass touched.
 - **Circuit-breaker latching** — breakers re-evaluate fresh every cycle
   from live P&L, not latched for the rest of a halted period.
 - **Survivorship bias** — the watchlist was screened using data from
-  inside the exact backtest window; tuning-window P&L should be read as
-  noise, not signal.
+  inside the exact backtest window; Round 1's P&L (there wasn't any —
+  zero fills) can't speak to this either way yet.
 - **No benchmark series** — no S&P MidCap 400 comparison line wired in.
 - **Neon's anonymous-role exposure** and the **pgbouncer statement-cache
-  fix's narrow scope** (only `trade-journal-mcp` — any other future
-  service talking to the same pooled Neon endpoint via `asyncpg` would
-  need the same `statement_cache_size=0` fix) — both documented, open by
-  design/scope.
-- **Open questions worth a second opinion**, deliberately unresolved
-  (settle against real tuning-window results, not theory): risk-per-trade
-  (1% vs. a 5% comparable system), the weekly circuit breaker (−6%,
-  RULES.md's own weakest-grounded number), the just-revised time stop
-  (10→15 trading days), total exposure cap (60%) and max positions (8).
-  See `RULES.md` §10 for the full list.
-  **Early tuning-window evidence on §6b (2:1 minimum reward:risk)**,
-  observed 2026-08-29, run `26f1d371-08db-4885-ab24-b42200792fb7`, 83
-  real trading days elapsed (window day 120/179), **zero fills**: only 4
-  proposals were made in total, all 4 rejected. Three of four missed the
-  2.0 floor by a hair (ALGM 1.95, ATI 1.97, DINO 1.92 — ATI also
-  oversized, §2b 15.70% vs. 10%); the fourth (SFM) passed decision-time
-  review, was queued, and then failed at real next-day execution when
-  its reward:risk collapsed to 0.91 against the actual open. No rule
-  changed — flagged here as the evidence this open question already
-  asked for, not a recommendation. Worth revisiting once more of the
-  window has run; a single early stretch could still be this specific
-  slice of the market, not necessarily the threshold.
+  fix's narrow scope** (only `trade-journal-mcp`) — both documented, open
+  by design/scope.
+- **Round 1's own real, complete evidence on §6b (2:1 minimum
+  reward:risk)** — see "Current state" above and
+  `backtest-harness/run1_evaluation_extract.md` /
+  `run2_prep_analysis.md` for the full numbers. Not a recommendation to
+  change the number: the counterfactual replay suggests the 2:1 floor
+  screened out more bad setups than good ones, which argues against
+  loosening it, not for.
+- **Open questions worth a second opinion**, deliberately unresolved:
+  risk-per-trade (1% vs. a 5% comparable system), the weekly circuit
+  breaker (−6%, `RULES.md`'s own weakest-grounded number), the time stop
+  (15 trading days), total exposure cap (60%) and max positions (8). See
+  `RULES.md` §10 for the full list.
 
 **Ground rule for any of the above:** `RULES.md`'s hard limits are not up
 for negotiation via "better performance" arguments alone — even Hermes
@@ -406,9 +240,13 @@ proposed change to a hard number needs to go through the user explicitly.
 | File | What it is |
 |---|---|
 | `RULES.md` | The authoritative, locked rules — position sizing, caps, circuit breakers, prohibitions |
-| `AGENTS.md` | Hermes' operating procedure (the cycle, step by step) |
+| `AGENTS.md` | Hermes' operating procedure (the cycle, step by step) — updated for Round 2, see "Current state" |
 | `SOUL.md` | Hermes' identity/temperament |
 | `backtest-harness/run_backtest.py` | The backtest harness/orchestrator |
+| `backtest-harness/run1_evaluation_extract.md` | Full read-only extraction of Round 1's real results (125 cycles, zero fills) |
+| `backtest-harness/geometry_scan.py`, `test_geometry_scan.py` | Round-2 prep: offline geometry diagnostic (79.6% GEOMETRY-VALID) |
+| `backtest-harness/counterfactual.py`, `test_counterfactual.py` | Round-2 prep: offline mechanical counterfactual replay (24.5% win rate, avg -0.11R) |
+| `backtest-harness/run2_prep_analysis.md` | Full Round-2 prep numbers and methodology |
 | `backtest-harness/backtest_state.json` | Local, gitignored — current in-progress backtest portfolio |
 | `backtest-harness/quota_pacer_state.json` | Local, gitignored — real weekly invocation count |
 | `risk-checker/risk_checker.py` | Deterministic rule enforcement, shared by live and backtest |
@@ -416,219 +254,73 @@ proposed change to a hard number needs to go through the user explicitly.
 | `dashboard/index.html` | The local-only dashboard frontend |
 | `docker-compose.yml` | Full stack topology, pinned image digests |
 | `watchlist/watchlist.json` | The fixed 10-ticker eligible universe |
-| `docs/history/HANDOFF_FULL_2026-08-28.md` | Full dated repair history, test transcripts, superseded numbers — consult only when a task needs that detail |
+| `docs/history/HANDOFF_FULL_2026-08-28.md` | Full dated repair history, test transcripts, superseded numbers from the pre-Round-1 correctness passes — consult only when a task needs that detail |
 | `PROJECT_FRESH_START.md` | From-zero, code-verified architecture explainer |
+
+---
+
+## Repair history (chronological, historical — not current state)
+
+Pre-Round-1 correctness work. Kept here for provenance; none of it is a
+pending action. Full narrative and exact test transcripts for the two
+2026-08-28 passes: `docs/history/HANDOFF_FULL_2026-08-28.md`.
+
+- **2026-08-28, second pass:** circuit breakers now recalculate fresh from
+  real intraday equity at every entry point (previously frozen as of
+  yesterday's close); failed-cycle retries made deterministic via a
+  durable checkpoint; `decision_id` collisions now compare every
+  decision-defining field; maverick's historical OHLC now matches
+  Alpaca's raw (unadjusted) basis; queued-BUY risk checks now use the
+  slippage-adjusted fill price; the masking seed is now persisted and
+  resume-checked. 58+ new/extended regression checks, all PASS.
+- **2026-08-28, third pass:** locked the **essential vs. best-effort**
+  architectural split described under "Architecture" above; fixed a
+  UUID-string comparison bug that false-failed identical retries; fixed
+  sequential-same-cycle BUY accounting to use real (not stale) marks;
+  isolated unit tests from real Neon/Docker via an injectable fail logger;
+  added a full lifecycle regression test. 100 checks, all PASS.
+- **2026-08-29, plugin-guided pre-training audit:** `google-news-rss-mcp`
+  now fails closed on a genuine RSS fetch/parse failure (narrowed from an
+  over-broad initial fix that would have vetoed most live entries); trade-
+  journal mode isolation (live vs. backtest) enforced at write and read
+  boundaries. New regression suites, all PASS.
+- **2026-08-29, correctness pass #4:** ten verified backtest-path defects
+  fixed — same-day re-entry blocking now resets correctly, duplicate-
+  decision-id disambiguation within one Hermes reply, outage-vs-holiday
+  detection via the real trading calendar, full-session intraday coverage
+  checks, `--start`/`--end` persistence and resume-mismatch failure,
+  quota-state corruption now fails loudly and legibly, `data_timestamps`
+  empty/None comparison symmetry, None-safe confidence comparison,
+  mechanical exits no longer journal a fabricated confidence score,
+  dashboard empty-state handling for a zero-snapshot run. 125 checks plus
+  the existing suites, all PASS. This was the last correctness pass before
+  Round 1 was run.
+
+**This section describes work completed before Round 1 ran.** It is not
+evidence about the current state of the stack — see "Current state" at the
+top of this file for that.
 
 ---
 
 ## Exact next step
 
-### 2026-08-29 plugin-guided pre-training audit
+**Round 2 preparation is complete (see "Current state" above); Round 2
+itself has not started.** The real pending action is a human decision, not
+an engineering task:
 
-The TDD/diagnosis pass found and repaired two first-party boundary defects,
-then a follow-up code review caught and fixed one over-broad condition in
-the first:
-
-- `google-news-rss-mcp` now fails closed when its RSS fetch/parser
-  genuinely fails (a bad HTTP status, or a malformed feed that also came
-  back with zero entries); an unavailable veto feed can no longer
-  masquerade as "no adverse news." The initial fix over-triggered on
-  feedparser's `bozo` flag alone, which real Google News RSS responses
-  set routinely even when entries parse fine — narrowed to only fail
-  closed when the feed ALSO returned nothing, or it would have silently
-  vetoed almost every live entry. `AGENTS.md` explicitly tells live
-  Hermes to skip an entry when the feed errors.
-- Trade-journal mode isolation is enforced at write and read boundaries:
-  live decisions/results are tagged `alpaca` immediately, backtest decisions
-  are tagged `backtest` when queued, and live history/reflection calls cannot
-  read backtest rows.
-
-Regression coverage lives in `google-news-rss-mcp/test_news_fetch.py`
-(three cases: success, genuine failure, and bozo-with-real-entries-is-not-
-a-failure) and `trade-journal-mcp/test_mode_isolation.py` (two cases,
-both pure/mocked, no Neon). Verified 2026-08-29: both files' own suites
-pass, plus the existing `test_idempotency.py`, `test_run_isolation.py`,
-`test_decision_fields.py`, and `test_dashboard_fields.py` (real,
-self-cleaning Neon) still pass unchanged against the new `execution_mode`
-field. All are plain `python test_*.py` scripts, not pytest. Both
-containers rebuilt from the current source, restarted, and confirmed up
-with clean startup logs; all backtest Neon tables confirmed empty before
-and after.
-
-### 2026-08-29 correctness pass #4
-
-A pre-training audit found 10 verified backtest-path defects where the
-harness/journal/dashboard could silently produce wrong state, or fail by
-crash instead of a named error. No rule, architecture, or live-path
-changes.
-
-**Ten repairs (`backtest-harness/run_backtest.py` unless noted):**
-1. `stopped_out_today` (§9.4 same-day re-entry) now resets unconditionally
-   every real trading day, not only inside `if needed:` — a stop-out no
-   longer blocks re-entry on days after the one it happened on. Also
-   persisted in `backtest_state.json` (was omitted entirely).
-2. `make_decision_id`'s `kind` now includes each decision's own position
-   in the response's decisions list — two identical decisions in one
-   Hermes reply (same ticker/action) no longer collide on one
-   `decision_id`; a rejected-then-filled identical pair now journals both
-   outcomes independently. Stable under a checkpointed replay (same list,
-   same positions, same ids).
-3. `if not bars:` now cross-checks Alpaca's real trading calendar
-   (`alpaca-mcp`'s new `_fetch_calendar_day`, same container-call
-   mechanism as every other tool call) before deciding holiday vs.
-   outage: a real trading day with no bars now halts the cycle like any
-   other failure; a confirmed holiday/weekend still skips; a calendar
-   source itself unavailable fails closed with a named message.
-4. `require_intraday_coverage` now requires the FULL 15-minute session
-   grid (`_expected_session_bar_times`, derived from the real session's
-   own open/close — including a genuine half day) for every needed
-   ticker, not just the 09:30/09:45 boundaries — a feed silently missing
-   afternoon bars now fails closed instead of letting the walk stage
-   iterate a truncated feed and the close mark trust a stale last bar.
-5. `--start`/`--end` are now persisted in `backtest_state.json`; a
-   resumed run with a conflicting value fails loudly (`SystemExit`,
-   names all four values) before any fetch or Hermes call, mirroring
-   `_resolve_seed`'s style (`_resolve_window`).
-6. `quota_pacer.py`'s `record_cycle` now raises a named `RuntimeError`
-   ("quota state unreadable...") on a corrupt state file instead of
-   crashing with a bare `AttributeError` — this fires AFTER a real Hermes
-   call already happened, so the failure needs to be legible.
-   `can_run_cycle` already correctly reported closed in this case.
-7. `trade-journal-mcp/server.py`: `data_timestamps` empty-dict/None
-   asymmetry fixed — the write path already collapsed `{}` to `NULL`;
-   the compare path (`_json_equal`) now does too
-   (`_normalize_data_timestamps`), so an identical retry carrying `{}`
-   is a genuine no-op instead of a false payload-mismatch.
-8. `_decision_field_mismatches`'s confidence comparator is now
-   None-safe (`_int_equal`) like every other comparator there — a
-   collision against a NULL-confidence row reports a named mismatch,
-   not a crash.
-9. `record_exit` now journals mechanical exits (stop/target/time-stop)
-   with `confidence=None` instead of a fabricated `confidence=5` —
-   `_validate_decision_fields` skips all report-card checks when
-   `confidence is None`. Stops polluting the confidence-calibration
-   dataset with non-decisions; the dashboard's calibration view already
-   reads from the entry side, unaffected.
-10. `dashboard/index.html`: backtest mode with zero snapshots (no
-    current run to scope to) now renders an explicit "no run scoped"
-    empty state and skips the data queries entirely, instead of running
-    them unfiltered and silently mixing every past discarded run's rows
-    together. Live mode's unfiltered fallback is unchanged (live has no
-    run_id concept).
-
-**Hygiene (same pass):** `execution-sim` now has its own bridge network
-(`net-execution-sim`), no longer sharing `net-execution` with
-`alpaca-mcp` — the hub-and-spoke claim is now actually true for those
-two. `alpaca-mcp` now gets explicit `environment:` for only its two
-`ALPACA_*` vars instead of `env_file: .env` (was also handed
-`NEON_DATABASE_URL` it never uses). `google-news-rss-mcp` fetches with
-an explicit ~10s timeout (`_fetch_feed_bytes`) instead of an unbounded
-`feedparser.parse(url)`. `trade-journal-mcp/schema.sql`'s `CREATE
-POLICY` statements are now guarded (`pg_policies` existence check) so
-the file is safely re-runnable — **not re-applied to Neon**, the
-policies already exist there. `dashboard/index.html`: the blocked-
-activity pagination query now has an explicit `order=`; `esc()` now
-also escapes quotes. `trade-journal-mcp/test_idempotency.py`'s inline
-execution-result test is now wrapped in `try/finally` so a failed
-assertion can't strand a row in Neon.
-
-**Regression tests:** items 1-5 in `backtest-harness/
-test_execution_semantics.py` (9 new tests: stop-out reset/persistence,
-duplicate-decision-id disambiguation + behavioral proof, outage-vs-
-holiday, session-grid + truncated-feed coverage, `--start`/`--end`
-resume/mismatch); item 6 in `test_quota_pacer.py`; items 7-9 in the
-journal tests (`test_idempotency.py`: empty-`data_timestamps` no-op,
-NULL-confidence collision; `test_decision_fields.py`: confidence=None
-skips validation); item 10 verified live in a browser (no test
-framework exists for the dashboard) — see below.
-
-**Exact verification results (2026-08-29):** all touched files compile
-clean. `backtest-harness/test_execution_semantics.py` (125 checks,
-including all 9 new item 1-5 regressions), `test_anonymize.py`,
-`test_quota_pacer.py` (including the new item-6 test),
-`risk-checker/test_risk_checker.py`, `execution-sim-mcp/test_fill_logic.py`,
-`alpaca-mcp/test_account_math.py`, `test_status_mapping.py`,
-`test_historical_news.py` (real Alpaca API), `maverick-mcp/tests/
-market_data/test_fetchers.py` (22 tests), and the full trade-journal
-suite (`test_decision_fields.py`, `test_idempotency.py` extended,
-`test_run_isolation.py`, `test_dashboard_fields.py`, `test_mode_isolation.py`
-— real, self-cleaning Neon) — all PASS. The new `alpaca-mcp` calendar
-path (`_fetch_calendar_day`/`fetch_trading_calendar_day`) verified
-end-to-end against the real Alpaca API: a real trading day, a weekend,
-and a real holiday all resolved correctly. `docker compose config -q`
-valid; `google-news-rss-mcp` and `alpaca-mcp`/`execution-sim` rebuilt/
-recreated for the network and Dockerfile changes, all confirmed up with
-clean startup logs. Baseline untouched: `backtest_state.json` still
-cursor `2026-02-17`, zero trading days, no checkpoint file; quota state
-unchanged (`{"2026-W34": 34, "2026-W35": 6}`); all backtest Neon tables
-confirmed empty before and after. Dashboard checked live in a browser:
-Training mode with zero snapshots shows the new "no run scoped" empty
-state (status line: `BACKTEST · NO RUN SCOPED`); Live mode's normal
-unfiltered fallback is unchanged (`LIVE · LIVE @ NEON · updated ...`);
-zero console errors in either mode. `git status` shows only the 13
-files this pass touched.
-
-**Remaining blocker: none.**
-
-### 2026-08-30 round-2 prep — judgment-layer fixes, geometry diagnostic, counterfactual engine
-
-Run 1 (`26f1d371-08db-4885-ab24-b42200792fb7`, 125 cycles, zero fills — see
-`backtest-harness/run1_evaluation_extract.md`) showed flawless infrastructure and
-judgment-layer failures: every proposal aimed at the bare-minimum §6b R:R (1.92–2.00) and
-died to rounding or a next-day gap; two proposals breached the §2b concentration cap by
-skipping the smaller-of-two sizing check; 25 reflections on zero closed trades entrenched
-a no-trade prior; no-action reasons cited "location" without a measured distance. No
-RULES.md number changed — every fix below is judgment-layer (`AGENTS.md`) or offline
-analysis.
-
-**Part A — `AGENTS.md` edits** (five, all inside the existing entry/reflection procedure):
-R:R headroom doctrine (aim ~2.5:1, a ratio that only clears by rounding is treated as a
-fail — cites SFM's real 2.00→0.91 collapse); a gap stress-test before proposing; a
-mandatory dual sizing check (state both the stop-based and concentration-cap sizes
-explicitly — cites ATI's 15.70% and DINO's 19.80% real breaches); a reflection guard for
-`sample_size=0` (process-only, no strategy conclusions from zero outcomes); quantified
-location rejections (a measured % distance, not "pressed into resistance").
-
-**Part B — `backtest-harness/geometry_scan.py`** (new, read-only, human-eval-only):
-classifies every (day, ticker) pair in the real window by whether maverick's own real
-support/resistance algorithm offered a 2:1-or-better setup with a valid 5–10% stop.
-Real result: **79.6% GEOMETRY-VALID, 20.4% CLOSE, 0% INVALID** across all 1,250 pairs —
-but see the report's methodology note: maverick's synthetic ±5%/±10% resistance/support
-levels make "geometry exists" true almost by construction, verified/corrected against
-SFM's real ground-truth trade (an initial naive "nearest resistance" definition classified
-100% of the window as INVALID, which is provably wrong).
-
-**Part C — `backtest-harness/counterfactual.py`** (new, read-only, human-eval-only):
-mechanically replays real fill/exit rules (same functions `run_backtest.py` uses,
-imported not reimplemented) against SFM's real proposal and all 995 GEOMETRY-VALID pairs.
-Real result: SFM would have stopped out at **-1.00R**; the 995 geometry-valid population
-resolved at a **24.5% win rate, average -0.11R** — well below 2:1's ~33% breakeven. Reading:
-**Hermes' caution in run 1 was directionally justified** — the geometry maverick's simple
-algorithm flags as "available" mostly does not hold up as real resistance. (ALGM/ATI/DINO's
-exact stop/target were never journaled — decision-time rejections don't persist geometry —
-reported honestly as unreplayable rather than fabricated.)
-
-Full numbers, methodology, and the real bug caught mid-build (a cycle-date-mapping
-off-by-one between `agent_activity` events and `trades` rows, since `cycle_start`
-narration is written at the END of its own cycle, not the start) are in
-`backtest-harness/run2_prep_analysis.md`. New tests: `test_geometry_scan.py` (28 checks,
-including a ground-truth regression against SFM's real trade) and
-`test_counterfactual.py` (32 checks, including a regression for the date-mapping fix) —
-both plain-python, no network/Neon/Hermes/Docker, all PASS.
-
-**Verification:** both new modules run against real data for the full window (1,250
-geometry pairs, 995 counterfactual simulations, 0 fetch errors). `docker compose config
--q` valid. No RULES.md/`risk_checker.py`/`run_backtest.py` enforcement-path changes.
-`backtest_state.json`/`quota_pacer_state.json` untouched — no run started, resumed, or
-reset. Neon: SELECT-only, scoped to run 1's own `run_id`, to recover its 5 proposals' real
-dates/stop/target.
-
-**Remaining blocker: none.**
-
-**Start the controlled training run only after explicit human approval.**
-The stack is training-ready — every repair through 2026-08-29 passed its
-own tests, the baseline above is verified clean, and no blocking issue is
-currently known. Nothing in this file authorizes starting it.
+1. **Review** `backtest-harness/run1_evaluation_extract.md` (what Round 1
+   actually did) and `backtest-harness/run2_prep_analysis.md` (the
+   geometry/counterfactual evidence and the five `AGENTS.md` changes made
+   in response).
+2. **Decide** whether the Round-2 `AGENTS.md` judgment-layer changes are
+   sufficient to proceed, or whether further judgment/rule work is wanted
+   first — `RULES.md` itself has open `[JUDGMENT]` questions (§10) that
+   Round 1's zero-trade outcome did not settle either way, since it
+   produced no closed trades to evaluate them against.
+3. **Round 2 (a fresh backtest run — `--reset`, a new `run_id`, same
+   locked model and `RULES.md`, under the updated `AGENTS.md`) requires
+   explicit human approval before starting.** Nothing in this file
+   authorizes starting it.
 
 ---
 
