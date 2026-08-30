@@ -468,16 +468,94 @@ touched by this fix — out of scope, and untouched.
 
 **Remaining blocker: none for the implementation itself.**
 
+### 2026-08-30 — Round 2 started: controlled 3-cycle tranche, then paused
+
+Used the `hermes-handoff` skill. Preflight confirmed before starting:
+branch `round2-prep-judgment-layer` at `9146728`, working tree clean and
+synced with origin; gateway locked to `openai-codex`/`gpt-5.4-mini`/medium
+(verified in the real `config.yaml`/`auth.json`, not assumed); all
+required Docker services healthy (`execution-sim` was down, started
+before the run); real Neon connectivity confirmed; local state confirmed
+to be Round 1's own completed, empty-portfolio end state (matching
+`run_id 26f1d371-...`, cursor past `--end`, zero holdings/pending orders).
+
+**Ran, from `backtest-harness`:**
+`python run_backtest.py --start 2026-02-17 --end 2026-08-14 --days 3 --reset`
+
+- **New `run_id`: `97d112e8-57be-4632-a503-0417993cdf51`.**
+- Simulated dates completed: 2026-02-17, 2026-02-18, 2026-02-19 (3 real
+  trading days). Next cursor: `2026-02-20`.
+- **Exit status: 0.** No cycle failed; nothing halted; no checkpoint left
+  behind.
+- Hermes calls: 3 (one per cycle, no retries). Tokens: 74,751 total
+  (24,917 avg/cycle).
+- End state: cash $100,000.00, equity $100,000.00 (+0.00%), **zero
+  holdings, zero completed (closed) trades**, **two pending orders**
+  carried into the next cycle (ATI x1 @ stop 145.00/target 168.12, BRX x1
+  @ stop 27.20/target 31.60 — both queued on day 3, awaiting day 4's real
+  open).
+- Active profile: `aggressive_v1_base`, min reward:risk **1.5**,
+  `block_start_trading_day=0`, `block_completed_trades=0` (3 of the
+  block's 20 trading days elapsed — far short of a boundary; no
+  escalation).
+- **Real activity in 3 days already exceeded Round 1's entire 125-day
+  total:** 5 proposals queued (DINO, ALGM day-1, ALGM day-2, ATI, BRX),
+  3 rejected at real next-day execution — all for genuine §6a stop-
+  placement issues (a stop landing above the real entry price twice; one
+  stop 2.38% below entry against the new 3.0% floor once) — 2 still
+  pending. Zero fills yet (expected — the two pending orders resolve on
+  day 4, outside this tranche).
+
+**Verification, scoped strictly to the new `run_id` via read-only Neon
+queries:**
+
+| Table / grouping | Result |
+|---|---|
+| `trades` by (status, action) | `pending`/BUY: 2, `rejected`/BUY: 3 |
+| `agent_activity` by event type | `cycle_start`: 3, `order_queued`: 5, `order_rejected`: 3, `reasoning`: 6 |
+| `insight_log` | 0 (no reflection cadence reached in 3 cycles — expected) |
+| `portfolio_snapshots` | 3 |
+| Distinct `cycle_id` | 3 |
+| Distinct non-null `strategy_profile` | `aggressive_v1_base` only |
+| Distinct non-null `min_reward_risk_used` | `1.5` only |
+
+**Round 1 confirmed readable and completely unchanged** (re-verified
+against `run_id 26f1d371-...`): `trades` 1, `agent_activity` 401,
+`insight_log` 25, `portfolio_snapshots` 125 — identical to every prior
+count, including the SFM row's stop/target values intact. No Round 1 row
+was touched, deleted, or modified. `quota_pacer_state.json` advanced only
+by the harness's own normal per-invocation counting (3 real calls this
+week) — never reset or hand-edited.
+
+**Dashboard smoke-checked live in a browser** against the new run: shows
+"3 cycles recorded · 0 positions taken · 3 decisions blocked," the two
+pending BUYs (ATI, BRX) with their real reasoning/R:R in "Recent
+Decisions," §6a as the sole blocked-rule bucket, correct token/quota
+figures, `openai-codex`/`gpt-5.4-mini` in Model Usage. Zero console
+errors.
+
+**No anomaly.** No cycle failed, no checkpoint was stranded, no code/
+rules/config/model/schema/dashboard/architecture was changed by this
+step.
+
+**Training is now PAUSED after this 3-cycle tranche for a full read-only
+repository/database redundancy audit, per explicit instruction.** The
+harness has not been invoked again since; `backtest_state.json` sits at
+cursor `2026-02-20` with the two pending orders above, ready to resume
+once the audit is complete and resumption is separately authorized. This
+section does not authorize further cycles.
+
 ## Exact next step
 
-**The synchronized implementation, including the day-20 boundary fix, is
-done and verified. Round 2 itself still requires separate, explicit human
-approval before it starts** — implementing the profile is not that
-approval. Nothing in this file authorizes starting it. When approved: a
-fresh backtest run (`--reset`, a new `run_id`) under the now-synchronized
-`RULES.md`/`risk_checker.py`/`AGENTS.md`/`SOUL.md`, tracked against the
-six-month target of 30–60 completed trades
-(`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
+**Round 2's first tranche (3 cycles) is complete and verified. Training
+is paused for a full read-only repository/database redundancy audit —
+see the section immediately above for the tranche's exact results.**
+Nothing in this file authorizes resuming training; that requires
+separate, explicit approval after the audit. When resumed: re-run the
+same command WITHOUT `--reset` (resuming `run_id
+97d112e8-57be-4632-a503-0417993cdf51` from cursor `2026-02-20`, its two
+pending orders intact), tracked against the six-month target of 30–60
+completed trades (`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
 
 ---
 
