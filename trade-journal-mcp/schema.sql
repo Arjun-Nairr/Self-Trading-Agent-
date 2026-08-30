@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS trades (
     -- prose. Same 'other' escape hatch as primary_signal.
     technical_basis       TEXT CHECK (technical_basis IN ('rsi', 'macd', 'support_resistance', 'trend', 'multiple', 'other')),
     -- The reward:risk ratio actually calculated for this trade -- lets
-    -- RULES.md §6b's 2:1 minimum be verified after the fact with a query,
+    -- RULES.md §6b's active minimum be verified after the fact with a query,
     -- not by re-deriving it from entry/stop/target by hand.
     expected_reward_risk  NUMERIC(6, 2) CHECK (expected_reward_risk > 0),
     -- One sentence: what would prove this trade wrong. RULES.md §6d --

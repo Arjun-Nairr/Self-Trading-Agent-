@@ -8,8 +8,8 @@ options-trading-level setting doesn't touch crypto either). This tool
 structurally can't place a crypto or options order because that code was
 never written — not "disabled," just never exists.
 
-Three tools, matching what the project's design actually needs (not the
-official tool's full 65-tool surface):
+Six narrow tools, matching what the project's design actually needs (not
+the official tool's full 65-tool surface):
   - place_order: submit a stock order (same interface as execution-sim,
     the tool this replaces as primary)
   - get_positions: real broker-side position state — §6c wants the
@@ -19,6 +19,9 @@ official tool's full 65-tool surface):
     client_order_id) — needed for §6b's restart-reconciliation flow
     (check real broker state for any 'pending' trade-journal row before
     doing anything else after a restart)
+  - get_account: equity, cash, exposure, and performance state
+  - get_historical_news: point-in-time company headlines for backtests
+  - get_intraday_bars: point-in-time 15-minute execution bars for backtests
 
 decision_id is threaded through as Alpaca's client_order_id — a second,
 broker-level idempotency backstop on top of trade-journal's own
@@ -138,13 +141,11 @@ async def _pre_trade_check(
     being its own MCP tool on purpose: a check the agent chooses whether to
     call is not enforcement. Every live order passes through here.
 
-    KNOWN GAP — two rules cannot be enforced from this container.
-    §4a (losing-streak de-risking) and §9.4 (no same-day re-entry after a
-    stop-out) both need trade history, which lives in trade-journal, and the
-    hub-and-spoke topology means tools never talk to each other. The backtest
-    harness enforces both (it holds the journal and passes full context to
-    the same checker). For live trading, whatever drives the cron cycle must
-    enforce them — this is not silently handled here.
+    KNOWN GAP — §9.4 (no same-day re-entry after a stop-out) needs trade
+    history, which lives in trade-journal, and the hub-and-spoke topology
+    means tools never talk to each other. The backtest harness enforces it.
+    A future live-cycle orchestrator must do the same; this is not silently
+    handled here.
     """
     account, positions, clock = (
         await _fetch_account(), await _fetch_positions(), await _fetch_clock()

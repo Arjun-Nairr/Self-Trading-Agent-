@@ -545,17 +545,131 @@ cursor `2026-02-20` with the two pending orders above, ready to resume
 once the audit is complete and resumption is separately authorized. This
 section does not authorize further cycles.
 
+### 2026-08-30 — Training-integrity fix: decision-time position sizing
+
+Used the `implement` skill. Took over an **incomplete, uncommitted patch
+the orchestrator had started directly** in the working tree — every line
+treated as untrusted and reviewed against the existing architecture
+before finishing, correcting, or keeping it.
+
+**The defect this fixes, discovered during the 3-cycle pilot above:**
+Hermes queued **ATI x1** and **BRX x1** — real, accepted, journaled
+proposals — even though RULES.md §2a/§2b/§3's own sizing formula implied
+roughly **x130** and **x696** respectively for those setups. The
+deterministic risk checker only ever rejected *excessive* quantities
+(breaching §2a/§2b/§3's caps); it never verified a quantity was large
+*enough* to mean anything. A meaningless one-share placeholder passed
+every existing check. This is a genuine training-integrity issue, not a
+cosmetic one: the two pending orders sitting in `backtest_state.json`
+right now are exactly this defect's real output.
+
+**The correction — `backtest-harness/run_backtest.py`:**
+
+1. **`required_entry_quantity`**: a new, pure decision-time function
+   computing the exact whole-share size RULES.md §2a (stop-risk), §2b
+   (concentration), and §3 (remaining cash) imply — `math.floor` of
+   whichever is smallest. A BUY's proposed quantity must equal this exact
+   figure or it is rejected before queue-time journaling, naming both
+   numbers. **Execution-time (`resolve_queued_order`) is deliberately
+   untouched** — it still validates only genuine cap/risk/cash violations
+   against the real next-day fill price, never demanding a fresh "exact"
+   recalculation after an overnight gap moves the theoretical optimum.
+2. **Multi-decision coherence within one Hermes response**: accepted BUYs
+   now reserve their estimated notional against a running `available_cash`
+   pool, in response-list order, so a later BUY in the same reply is sized
+   against what's actually left — not the whole day's starting cash as if
+   every earlier proposal didn't exist. A duplicate ticker already
+   *accepted* this cycle is rejected outright (§9.1) before it can reach
+   `record_queued_decision`. A *rejected* earlier proposal reserves
+   nothing and never blocks a later, corrected proposal for the same
+   ticker. Chronological execution-time accounting (`simulate_trading_day`)
+   is unchanged.
+3. **Real `data_timestamps`**: newly queued decisions now journal a
+   non-null object distinguishing the technical cutoff, the news cutoff,
+   and the latest actually-included news article's real timestamp (or
+   `None` when no article existed) — sourced from the real simulated date
+   and the real fetched news payload, never fabricated. No migration
+   needed (`trades.data_timestamps` already existed); the existing
+   idempotency comparison (`_json_equal` in `trade-journal-mcp/server.py`)
+   already handled this generically and needed no change.
+4. **Fabricated equity history removed**: a fresh `Portfolio` now begins
+   with exactly one real $100,000 baseline point, not the six-point flat
+   seed invented to satisfy the daily/weekly circuit breakers Phase 1
+   already removed. Peak drawdown is unaffected (the six seeded points
+   were always identical, so `max(equity_curve)` never depended on the
+   fabrication). The prompt Hermes reads no longer shows `daily`/`weekly`
+   P&L figures for breakers that no longer exist.
+
+**Cleanup portion of the pre-existing diff, reviewed and kept** (all
+verified correct, none touched further): `.gitignore` additions
+(`.pytest_cache/`, `*.log`); stale-comment corrections in
+`alpaca-mcp/server.py` (tool count, the §4a reference — losing-streak
+de-risking is gone, only §9.4 remains a live-mode gap),
+`docker-compose.yml` (execution-sim's real role), and
+`docs/PHASE1_AGGRESSIVE_DESIGN.md`/`trade-journal-mcp/schema.sql`
+(generic "active minimum" wording, queue-then-resolve accuracy) — all
+comment/doc-only, no behavior change. **`backtest-harness/
+integration_check.py`'s deletion was reviewed and kept**: a manual,
+non-automated diagnostic script hardcoded to a stale watchlist (AAPL/
+MSFT — not the real 10-ticker watchlist), requiring hand-produced JSON
+inputs from undocumented external steps, referenced nowhere else in the
+repo, and functionally superseded by `test_anonymize.py`'s own real-
+watchlist regression. Not restored.
+
+**New regression tests** (`backtest-harness/test_execution_semantics.py`):
+`test_required_entry_quantity_matches_rules_md_sizing_formula`,
+`test_resolve_queued_order_does_not_recalculate_exact_quantity_after_a_gap`,
+`test_fresh_portfolio_has_one_baseline_equity_point`,
+`test_prompt_no_longer_exposes_obsolete_daily_weekly_breaker_figures`,
+`test_decision_time_sizing_rejects_placeholder_accepts_exact_and_journals_timestamps`,
+`test_decision_time_multi_decision_response_coherence` — the last of
+these drives one realistic 4-decision Hermes response through the real
+`run_day()` orchestration boundary, proving in one coherent scenario that
+a wrong-size placeholder is rejected, the exact size is accepted, a
+duplicate of an already-accepted ticker is blocked before journaling, and
+a later BUY's accepted size correctly reflects the cash an earlier BUY in
+the same response already reserved.
+
+**Exact verification (2026-08-30):** `alpaca-mcp/server.py`,
+`backtest-harness/run_backtest.py`, `backtest-harness/
+test_execution_semantics.py` all compile clean. Full
+`test_execution_semantics.py` suite — **178 checks, all PASS** (was 158;
++20 from the 6 new test functions above). `test_anonymize.py`,
+`test_quota_pacer.py`, `risk-checker/test_risk_checker.py` — unaffected,
+all PASS (risk_checker.py itself was not touched by this fix).
+Trade-journal suite run in the container (real, self-cleaning Neon):
+`test_decision_fields.py`, `test_idempotency.py`, `test_mode_isolation.py`,
+`test_run_isolation.py`, `test_dashboard_fields.py` — all PASS unchanged
+(no server.py/schema changes required this fix). `docker compose config
+-q` valid. **No Hermes call, no training cycle, no `--reset`, no Neon
+mutation of any kind occurred during this fix** — every verification step
+was either a pure-Python test or a real-but-mocked `run_day()` call with
+all I/O (Docker, Neon, Hermes) patched out.
+
+**The current 3-cycle Round 2 pilot state (`run_id
+97d112e8-57be-4632-a503-0417993cdf51`) is preserved completely unchanged
+by this fix** — `backtest_state.json` still sits at cursor `2026-02-20`
+with its two one-share pending orders (ATI, BRX) and the old six-entry
+equity seed, exactly as the pilot left it. **This state must NOT be
+resumed.** Both pending orders are the exact defect this fix corrects,
+and the equity-history format this fix removed. Resuming it would extend
+a run built on the very numbers this correction fixes.
+
+**Remaining blocker: none for this fix itself.** A **separately
+authorized fresh `--reset` run** is required before any further training
+— not a resume of the current pilot state.
+
 ## Exact next step
 
-**Round 2's first tranche (3 cycles) is complete and verified. Training
-is paused for a full read-only repository/database redundancy audit —
-see the section immediately above for the tranche's exact results.**
-Nothing in this file authorizes resuming training; that requires
-separate, explicit approval after the audit. When resumed: re-run the
-same command WITHOUT `--reset` (resuming `run_id
-97d112e8-57be-4632-a503-0417993cdf51` from cursor `2026-02-20`, its two
-pending orders intact), tracked against the six-month target of 30–60
-completed trades (`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
+**The one-share sizing defect is fixed, tested, and verified. The 3-cycle
+pilot state must not be resumed — see the section immediately above.**
+Nothing in this file authorizes starting a new run. When separately
+approved: a fresh `--reset` run (a genuinely new `run_id`, a genuinely
+fresh one-point equity baseline, the corrected exact-sizing enforcement
+live from cycle one) — never a resume of `run_id
+97d112e8-57be-4632-a503-0417993cdf51`. Tracked, as before, against the
+six-month target of 30–60 completed trades
+(`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
 
 ---
 

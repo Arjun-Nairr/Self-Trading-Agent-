@@ -91,10 +91,11 @@ through your own reasoning").
   table's additive migration.
 - **Decision-time rejections are NOT trade rows at all** — a proposal that
   fails the decision-time risk check is never journaled to `trades` (only
-  what passes both the decision-time check and, the next trading day, the
-  execution-time check gets a row). A rejection is recorded only as an
-  `agent_activity` narration line, with the profile/threshold appended in
-  a fixed, consistently parseable form —
+  decisions that pass the decision-time check get a row). A queued decision
+  is inserted immediately as `pending`; the next-day execution check updates
+  that same row to `filled` or `rejected`. A decision-time rejection is
+  recorded only as an `agent_activity` narration line, with the profile/
+  threshold appended in a fixed, consistently parseable form —
   `[profile=aggressive_v1_base min_rr=1.5]` at the end of the line — so
   later analysis can extract it without parsing Hermes' free-text
   reasoning.

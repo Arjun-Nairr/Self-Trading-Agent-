@@ -23,14 +23,15 @@ from unittest.mock import patch
 from run_backtest import (
     ACTIVITY_BLOCK_TRADING_DAYS, ACTIVITY_TARGET_TRADES, DEFAULT_MASKING_SEED,
     PROFILE_BASE, PROFILE_ESCALATED, PROFILE_LEGACY, PROFILE_MIN_REWARD_RISK,
-    TIME_STOP_TRADING_DAYS,
+    STARTING_EQUITY, TIME_STOP_TRADING_DAYS,
     Holding, Portfolio, QueuedOrder, ResponseValidationError,
     _atomic_write_json, _clear_checkpoint, _expected_session_bar_times, _limits_for_profile,
     _load_checkpoint, _maybe_advance_activity_block, _record_trade_completion,
     _resolve_seed, _resolve_window, _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
     build_decision_time_context, build_prompt,
     evaluate_bar_stop_target, evaluate_opening_gap, make_decision_id,
-    require_intraday_coverage, resolve_queued_order, run_day, simulate_trading_day,
+    require_intraday_coverage, required_entry_quantity, resolve_queued_order,
+    run_day, simulate_trading_day,
     validate_hermes_response,
 )
 from anonymize import RunMasking  # noqa: E402
@@ -405,7 +406,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
         return {
             "decisions": [{
-                "alias": alias, "action": "BUY", "quantity": 10, "entry_price": 100.0,
+                "alias": alias, "action": "BUY", "quantity": 200, "entry_price": 100.0,
                 "stop_price": 93.0, "target_price": 115.0, "confidence": 3,
                 "primary_signal": "technical", "technical_basis": "rsi",
                 "expected_reward_risk": 2.14, "invalidation_condition": "closes below $93",
@@ -424,7 +425,8 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
     remaining_failures = {"n": 1}  # attempt 1's essential journal write fails; attempt 2's succeeds
 
     def fake_record_queued_decision(decision, real_ticker, decision_id, run_id=None,
-                                    strategy_profile=None, min_reward_risk_used=None):
+                                    strategy_profile=None, min_reward_risk_used=None,
+                                    data_timestamps=None):
         journal_calls.append(decision_id)
         if remaining_failures["n"] > 0:
             remaining_failures["n"] -= 1
@@ -1687,6 +1689,282 @@ def test_queued_orders_use_their_stored_threshold_at_execution():
 
 
 # ============================================================================
+# RULES.md §2/§3 decision-time position sizing -- the real training-
+# integrity defect the Round 2 pilot exposed: Hermes queued ATI x1 and
+# BRX x1 when the sizing formula implied ~x130/~x696. The deterministic
+# checker only rejected EXCESSIVE quantities, so a meaningless one-share
+# placeholder sailed through. required_entry_quantity is the exact
+# whole-share size RULES.md §2a/§2b/§3 imply; Step D now requires an exact
+# match before a BUY is ever queued.
+# ============================================================================
+
+def test_required_entry_quantity_matches_rules_md_sizing_formula():
+    """Pure function, no I/O -- the exact arithmetic RULES.md §2a
+    (stop-risk), §2b (concentration), and §3 (remaining cash) imply,
+    whichever is smallest, floored to a whole share."""
+    ctx = _ctx()  # equity=$100,000, cash=$100,000
+    # entry $100, stop $93 (7% distance): risk_size = floor(100000*0.02/7)
+    # = 285, concentration_size = floor(100000*0.20/100) = 200,
+    # cash_size = floor(100000/100) = 1000 -- concentration binds.
+    trade = ProposedTrade(ticker="OLN", action="BUY", quantity=1,
+                          entry_price=100.0, stop_price=93.0, target_price=115.0)
+    assert required_entry_quantity(trade, ctx) == 200
+    print("  ok  required_entry_quantity matches RULES.md's own §2a/§2b/§3 arithmetic "
+          "(concentration binds here)")
+
+    # entry $100, stop $99.9 (0.1% distance): risk_size = floor(2000/0.1) =
+    # 20000, concentration_size = 200, cash_size = 1000 -- still
+    # concentration, proving it's a genuine min(), not always risk-based.
+    tight_stop = ProposedTrade(ticker="OLN", action="BUY", quantity=1,
+                               entry_price=100.0, stop_price=99.9, target_price=115.0)
+    assert required_entry_quantity(tight_stop, ctx) == 200
+    print("  ok  required_entry_quantity takes the genuine minimum of all three, "
+          "not just the risk-based figure")
+
+    # A tiny remaining cash pool makes CASH the binding constraint.
+    low_cash_ctx = Context(
+        account=AccountState(equity=100_000.0, cash=1_500.0, daily_pl_pct=0.0,
+                             weekly_pl_pct=0.0, drawdown_from_peak_pct=0.0),
+        clock=MarketClock(is_open=True), watchlist=["OLN"],
+    )
+    assert required_entry_quantity(trade, low_cash_ctx) == 15  # floor(1500/100)
+    print("  ok  required_entry_quantity is cash-bound when cash is the scarce resource")
+
+    # Fails closed (None) on unusable inputs -- an inverted/missing stop, a
+    # non-BUY action -- never crashes, never returns a bogus number.
+    assert required_entry_quantity(
+        ProposedTrade(ticker="OLN", action="BUY", quantity=1, entry_price=100.0,
+                     stop_price=105.0, target_price=115.0), ctx
+    ) is None
+    assert required_entry_quantity(
+        ProposedTrade(ticker="OLN", action="BUY", quantity=1, entry_price=100.0,
+                     stop_price=None, target_price=115.0), ctx
+    ) is None
+    assert required_entry_quantity(
+        ProposedTrade(ticker="OLN", action="SELL", quantity=1, entry_price=100.0,
+                     stop_price=93.0, target_price=115.0), ctx
+    ) is None
+    print("  ok  required_entry_quantity fails closed (None) on an inverted/missing "
+          "stop or a non-BUY action")
+
+
+def test_resolve_queued_order_does_not_recalculate_exact_quantity_after_a_gap():
+    """RULES.md §2/§3's exact-match requirement is a DECISION-time gate
+    only. Execution-time (resolve_queued_order, the next real trading day)
+    must NOT re-derive a new 'exact' quantity against the real fill price
+    and reject the order for no longer matching it -- it must keep
+    checking only genuine cap/risk/cash violations, exactly as before this
+    fix. A real overnight gap can move the theoretical optimum without
+    invalidating a queued order that still fits every real cap."""
+    order = _order(action="BUY", ticker="OLN", quantity=150, stop_price=92.0,
+                   target_price=115.0)  # NOT the "exact" figure for any equity/price
+    # A modest gapped-up open: $101 instead of the $100 Hermes originally
+    # saw. 150 shares @ ~$101 is still well inside every real cap (stop
+    # distance ~9%, position ~15%, risk ~1.4%, ratio ~1.54), so it must
+    # fill -- resolve_queued_order has no concept of "the exact quantity a
+    # fresh proposal would compute today."
+    bar = {"open": 101.0, "high": 102.0, "low": 100.0, "close": 101.0}
+    outcome = resolve_queued_order(order, bar, _ctx())
+    assert outcome.accepted, (
+        f"execution-time must not demand recalculation to a new exact quantity "
+        f"after a gap -- only real cap/risk/cash violations: {outcome.reason}"
+    )
+    print("  ok  execution-time accepts a queued order whose quantity is no longer "
+          "'exact' for the gapped price, as long as every real cap still holds")
+
+    # And a genuine cap violation at the real fill price is still rejected,
+    # exactly as before -- this fix does not weaken execution-time checks.
+    big_gap_bar = {"open": 700.0, "high": 705.0, "low": 695.0, "close": 700.0}
+    outcome2 = resolve_queued_order(order, big_gap_bar, _ctx())
+    assert not outcome2.accepted and "§2b" in outcome2.reason, (
+        f"a real concentration-cap breach at the gapped price must still reject: {outcome2.reason}"
+    )
+    print("  ok  execution-time still rejects a genuine cap violation at the real "
+          "gapped price -- unaffected by this fix")
+
+
+def test_fresh_portfolio_has_one_baseline_equity_point():
+    """A fresh Portfolio's equity_curve must start with exactly the
+    $100,000 baseline -- not the five extra fabricated flat observations
+    the old daily/weekly-breaker seed added. Phase 1 removed those
+    breakers entirely, so five invented data points would just be
+    dishonest performance history."""
+    p = Portfolio()
+    assert p.equity_curve == [STARTING_EQUITY] == [100_000.0]
+    print("  ok  a fresh Portfolio begins with exactly one $100,000 baseline point")
+
+    # Peak drawdown is still correct with only one point: 0% until a real
+    # day marks equity away from the peak.
+    assert p.drawdown_pct() == 0.0
+    print("  ok  peak drawdown is still correct (0%) with a single-point history")
+
+
+def test_prompt_no_longer_exposes_obsolete_daily_weekly_breaker_figures():
+    """RULES.md §4 removed the daily/weekly circuit breakers -- only the
+    single -30% drawdown breaker remains. The prompt Hermes reads must not
+    show daily_pl_pct/weekly_pl_pct figures for a rule that no longer
+    exists; showing them invites Hermes to reason about numbers that don't
+    bind anything."""
+    account = {"equity": 100_000.0, "cash": 100_000.0, "exposure_pct": 0.0,
+              "daily_pl_pct": -37.0, "weekly_pl_pct": -52.0, "drawdown_pct": 0.0,
+              "strategy_profile": PROFILE_BASE, "min_reward_risk": 1.5}
+    prompt = build_prompt("Day 1", account, [], [], [])
+    assert "-37" not in prompt and "-52" not in prompt, (
+        "the prompt must not surface daily/weekly P&L figures for a removed breaker"
+    )
+    assert "daily" not in prompt.lower() and "weekly" not in prompt.lower(), (
+        "no 'daily'/'weekly' wording should remain in the account section at all"
+    )
+    assert "drawdown" in prompt.lower(), "the one real breaker (drawdown) must still show"
+    print("  ok  the prompt no longer exposes obsolete daily/weekly breaker figures, "
+          "and still shows the one real drawdown breaker")
+
+
+def test_decision_time_sizing_rejects_placeholder_accepts_exact_and_journals_timestamps():
+    """The real defect: a one-share placeholder must be rejected when the
+    RULES.md sizing formula implies something larger; the exact calculated
+    size must be accepted; and an accepted decision must journal a real,
+    non-null data_timestamps object with distinguishable technical/news
+    cutoff fields and the actual latest included news timestamp."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    run_start = date(2026, 2, 17)
+    run_key = str(uuid.uuid4())
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
+    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
+                         seed=DEFAULT_MASKING_SEED)
+    alias = masking.alias("OLN")
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0])
+
+    # entry $100, stop $93 -> required exactly 200 (concentration-bound,
+    # same arithmetic as the pure test above).
+    placeholder = {"alias": alias, "action": "BUY", "quantity": 1, "entry_price": 100.0,
+                  "stop_price": 93.0, "target_price": 115.0, "confidence": 3,
+                  "primary_signal": "technical", "technical_basis": "rsi",
+                  "expected_reward_risk": 3.14, "invalidation_condition": "closes below $93",
+                  "reasoning": "one-share placeholder"}
+    working1, _prompts1, queued1, blocked1 = _run_backtest_scenario(
+        portfolio, run_start, 0, run_key, masking, watchlist, [placeholder], tmp_dir,
+        news_payload={"OLN": []},
+    )
+    assert not queued1, "a one-share placeholder must never reach record_queued_decision"
+    assert any("§2/§3" in line and "200" in line for line in blocked1), blocked1
+    assert not working1.pending_orders, "the placeholder must not have been queued"
+    print("  ok  a one-share placeholder is rejected when the required size (200) is larger, "
+          "and never journaled")
+
+    exact = dict(placeholder, quantity=200, reasoning="exact required size")
+    news_with_article = {"OLN": [
+        {"headline": "Olin reports steady demand", "created_at": "2026-02-16T14:30:00+00:00",
+         "summary": "...", "symbols": ["OLN"]},
+        {"headline": "Older Olin note", "created_at": "2026-02-10T09:00:00+00:00",
+         "summary": "...", "symbols": ["OLN"]},
+    ]}
+    # Fresh tmp_dir (and so a fresh checkpoint file) -- the first call's
+    # completed cycle wrote a real checkpoint under the FIRST tmp_dir at
+    # (run_key, day_index=0); reusing that path here would REPLAY the
+    # placeholder's already-checkpointed response instead of proposing the
+    # exact decision below (checkpoint clearing is main()'s job after a
+    # real atomic state commit, which this direct run_day() call never
+    # performs -- same reason every other scenario in this file gets its
+    # own fresh tmp_dir).
+    working2, _prompts2, queued2, blocked2 = _run_backtest_scenario(
+        portfolio, run_start, 0, run_key, masking, watchlist, [exact], Path(tempfile.mkdtemp()),
+        news_payload=news_with_article,
+    )
+    assert not blocked2, blocked2
+    assert len(queued2) == 1, queued2
+    assert queued2[0]["ticker"] == "OLN"
+    ts = queued2[0]["data_timestamps"]
+    assert ts is not None, "an accepted decision must journal a non-null data_timestamps object"
+    assert ts["technical_as_of"] == run_start.isoformat()
+    assert ts["news_as_of"] == run_start.isoformat()
+    assert ts["latest_news_created_at"] == "2026-02-16T14:30:00+00:00", (
+        f"must be the REAL latest of the actual news payload, not fabricated: {ts}"
+    )
+    assert working2.pending_orders and working2.pending_orders[0].quantity == 200
+    print("  ok  the exact calculated size (200) is accepted and journaled with a real, "
+          "non-null, accurate data_timestamps object (technical/news cutoff + latest news)")
+
+
+def test_decision_time_multi_decision_response_coherence():
+    """One Hermes response proposing four decisions in order, all for the
+    SAME cycle -- proves, together, in one realistic scenario: a rejected
+    proposal reserves no cash and doesn't block a later corrected proposal
+    for the same ticker; an accepted decision's estimated notional IS
+    reserved; a later BUY's required size reflects that reservation; and
+    a duplicate of an already-ACCEPTED ticker is blocked before it ever
+    reaches record_queued_decision."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    run_start = date(2026, 2, 17)
+    run_key = str(uuid.uuid4())
+    watchlist = [{"symbol": "ZULU", "sector": "Chemicals"},
+                {"symbol": "ALPHA", "sector": "Energy"},
+                {"symbol": "BETA", "sector": "Industrials"}]
+    masking = RunMasking(
+        {"ZULU": ["Zulu Corp"], "ALPHA": ["Alpha Inc"], "BETA": ["Beta Ltd"]},
+        run_start=run_start, seed=DEFAULT_MASKING_SEED,
+    )
+    alpha_alias, beta_alias = masking.alias("ALPHA"), masking.alias("BETA")
+
+    # ZULU is already held, worth $75,000 at its $100 mark -- equity is
+    # $100,000 (cash $25,000 + $75,000 held), but only $25,000 is actually
+    # available for new purchases -- the real-world condition that makes
+    # sequential cash reservation across a response actually bite within
+    # RULES.md's 20%-concentration/2%-risk caps (which two positions alone
+    # never exhaust against a full $100k cash pool).
+    held = {"ZULU": Holding(ticker="ZULU", quantity=750, entry_price=100.0,
+                            stop_price=90.0, target_price=120.0,
+                            entry_day=0, entry_trading_day=0)}
+    portfolio = Portfolio(cash=25_000.0, holdings=held, equity_curve=[100_000.0])
+
+    # entry $100, stop $92 (8%, risk $8/share), target $112.50 -> reward
+    # $12.50/share, ratio 1.5625, clears the 1.5 base floor comfortably.
+    # risk_size=floor(2000/8)=250, concentration_size=floor(20000/100)=200
+    # -- concentration binds against the FULL $25,000 cash pool
+    # (cash_size=250 > 200).
+    def buy(alias, quantity, notes):
+        return {"alias": alias, "action": "BUY", "quantity": quantity, "entry_price": 100.0,
+               "stop_price": 92.0, "target_price": 112.5, "confidence": 3,
+               "primary_signal": "technical", "technical_basis": "rsi",
+               "expected_reward_risk": 1.56, "invalidation_condition": "closes below $92",
+               "reasoning": notes}
+
+    decisions = [
+        buy(alpha_alias, 1, "wrong placeholder for ALPHA"),           # 0: rejected (1 != 200)
+        buy(alpha_alias, 200, "corrected ALPHA proposal"),            # 1: accepted, reserves $20,000
+        buy(alpha_alias, 200, "duplicate ALPHA proposal"),            # 2: rejected (duplicate ticker)
+        # remaining cash after #1: 25000 - 20000 = 5000 ->
+        # cash_size = floor(5000/100) = 50, now the binding constraint.
+        buy(beta_alias, 50, "BETA sized against the REMAINING cash"),  # 3: accepted
+    ]
+    working, _prompts, queued, blocked = _run_backtest_scenario(
+        portfolio, run_start, 0, run_key, masking, watchlist, decisions, tmp_dir,
+        news_payload={t["symbol"]: [] for t in watchlist},
+    )
+
+    assert len(queued) == 2, queued
+    assert queued[0]["ticker"] == "ALPHA" and queued[1]["ticker"] == "BETA"
+    print("  ok  exactly the two genuinely-correct decisions (ALPHA, BETA) were journaled "
+          "-- the placeholder and the duplicate never reached record_queued_decision")
+
+    assert len(blocked) == 2, blocked
+    assert any("§2/§3" in line and "ALPHA" in line for line in blocked), blocked
+    assert any("§9.1" in line and "one queued decision per ticker" in line for line in blocked), blocked
+    print("  ok  the wrong-size ALPHA placeholder and the duplicate ALPHA proposal were "
+          "both rejected, for the right reasons")
+
+    alpha_order = next(o for o in working.pending_orders if o.ticker == "ALPHA")
+    beta_order = next(o for o in working.pending_orders if o.ticker == "BETA")
+    assert alpha_order.quantity == 200
+    assert beta_order.quantity == 50, (
+        f"BETA must be sized against the cash REMAINING after ALPHA's reservation "
+        f"(required 50, i.e. floor($5,000 remaining / $100)), got {beta_order.quantity}"
+    )
+    print("  ok  BETA's accepted quantity (50) reflects the cash ALPHA already reserved "
+          "-- later same-cycle BUYs use the remaining unreserved cash, not the full pool")
+
+
+# ============================================================================
 # Real orchestration-boundary regression for the day-20 profile-mismatch bug
 # (see HANDOFF.md's Phase 1 fix section). Drives run_day() itself -- not the
 # pure helpers in isolation -- with only the true I/O boundary mocked, same
@@ -1699,9 +1977,11 @@ def test_queued_orders_use_their_stored_threshold_at_execution():
 # ============================================================================
 
 def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlist,
-                           decisions_to_propose, tmp_dir):
+                           decisions_to_propose, tmp_dir, news_payload=None):
     """Runs one real run_day() cycle with only true I/O mocked. Returns
-    (working, captured_prompts, queued_decision_calls, rejected_lines)."""
+    (working, captured_prompts, queued_decision_calls, rejected_lines).
+    news_payload: optional {ticker: [article, ...]} override -- defaults
+    to no articles for any watchlist ticker."""
     captured_prompts = []
     queued_decision_calls = []
 
@@ -1713,10 +1993,12 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
         return {"decisions": decisions_to_propose, "no_action_reason": "n/a" if decisions_to_propose else "nothing today"}
 
     def fake_record_queued_decision(decision, real_ticker, decision_id, run_id=None,
-                                    strategy_profile=None, min_reward_risk_used=None):
+                                    strategy_profile=None, min_reward_risk_used=None,
+                                    data_timestamps=None):
         queued_decision_calls.append({
             "ticker": real_ticker, "strategy_profile": strategy_profile,
             "min_reward_risk_used": min_reward_risk_used,
+            "data_timestamps": data_timestamps,
         })
 
     fake_bars = {t["symbol"]: {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0}
@@ -1725,7 +2007,7 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
                                      "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
                                      "support": [95.0], "resistance": [110.0]}
                        for t in watchlist}
-    fake_news = {t["symbol"]: [] for t in watchlist}
+    fake_news = news_payload if news_payload is not None else {t["symbol"]: [] for t in watchlist}
     intraday_needed = sorted(set(portfolio.holdings) | {o.ticker for o in portfolio.pending_orders})
     fake_intraday = {t: _flat_session(price=100.0) for t in intraday_needed}
     fake_calendar_day = {"open": "09:30", "close": "16:00"}
@@ -1764,7 +2046,7 @@ def test_activity_escalation_transition_at_the_real_orchestration_boundary():
     # A marginal proposal: ratio 1.3 -- fails the base 1.5 floor (even with
     # its 0.02 tolerance), clears the escalated 1.25 floor comfortably.
     marginal_decision = {
-        "alias": dino_alias, "action": "BUY", "quantity": 90, "entry_price": 100.0,
+        "alias": dino_alias, "action": "BUY", "quantity": 200, "entry_price": 100.0,
         "stop_price": 92.0, "target_price": 110.4, "confidence": 3,
         "primary_signal": "technical", "technical_basis": "rsi",
         "expected_reward_risk": 1.3, "invalidation_condition": "closes below $92",

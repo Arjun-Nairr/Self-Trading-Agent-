@@ -19,9 +19,9 @@ asked of Hermes — a real stop rests at the broker and fires without anyone
 deciding anything. Hermes handles entries and discretionary (thesis-broken)
 exits, which is where judgment actually lives.
 
-Every order still passes the SAME risk_checker the live path uses, with
-fuller context: the harness holds the trade journal, so unlike alpaca-mcp it
-can also enforce §4a (losing streaks) and §9.4 (same-day re-entry).
+Every order still passes the SAME risk_checker the live path uses. The
+backtest harness also carries the same-day stop-out state needed to enforce
+§9.4's no-same-day-re-entry rule.
 
 PHASE 0 REPAIR (2026-08-21) -- NO SAME-DAY LOOKAHEAD: a discretionary BUY or
 SELL Hermes decides on day T's completed data is QUEUED (see QueuedOrder),
@@ -293,16 +293,11 @@ class QueuedOrder:
 class Portfolio:
     cash: float = STARTING_EQUITY
     holdings: dict[str, Holding] = field(default_factory=dict)
-    # Seeded flat, not empty. The risk checker fails closed on an
-    # undeterminable weekly P&L — correct for live, where a missing figure
-    # means something broke, but wrong at the start of a backtest, where
-    # "no history yet" is expected. Left empty it would block the first
-    # five cycles of every run, burning quota-limited cycles on a
-    # non-problem. Seeding is not a fudge: an untouched account genuinely
-    # was flat at its starting equity before the window opened.
-    equity_curve: list[float] = field(
-        default_factory=lambda: [STARTING_EQUITY] * 6
-    )
+    # One real baseline, followed by one mark per completed trading day.
+    # The former six-point flat seed only existed to satisfy daily/weekly
+    # breakers; Phase 1 removed those breakers, so retaining five invented
+    # observations would make the performance history dishonest.
+    equity_curve: list[float] = field(default_factory=lambda: [STARTING_EQUITY])
     closed_pnl: list[float] = field(default_factory=list)
     stopped_out_today: list[str] = field(default_factory=list)
     # Persisted, not a local loop variable -- the harness is invoked as a
@@ -1358,7 +1353,8 @@ asyncio.run(main())
 
 def record_queued_decision(decision: dict, real_ticker: str, decision_id: str,
                            run_id: str | None = None, strategy_profile: str | None = None,
-                           min_reward_risk_used: float | None = None) -> None:
+                           min_reward_risk_used: float | None = None,
+                           data_timestamps: dict | None = None) -> None:
     """Journal a QUEUED discretionary decision the INSTANT it is queued --
     status stays 'pending' (the trades table's own default) until the next
     trading day resolves it (resolve_trade_fill / resolve_trade_rejection).
@@ -1389,6 +1385,7 @@ async def main():
         expected_reward_risk={float(decision.get("expected_reward_risk", 2.0))},
         invalidation_condition={decision.get("invalidation_condition", "n/a")!r},
         strategy_notes={decision.get("reasoning", "")[:900]!r},
+        data_timestamps={data_timestamps!r},
         stop_price={decision.get("stop_price")!r},
         target_price={decision.get("target_price")!r},
         run_id={run_id!r},
@@ -1928,8 +1925,7 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         "ACCOUNT",
         f"  equity ${account['equity']:,.2f} | cash ${account['cash']:,.2f} "
         f"| exposure {account['exposure_pct']:.1f}%",
-        f"  daily {account['daily_pl_pct']} | weekly {account['weekly_pl_pct']} "
-        f"| drawdown {account['drawdown_pct']}%",
+        f"  drawdown {account['drawdown_pct']}%",
         # Phase 1 aggressive profile (RULES.md §6b): the ONLY thing this
         # cycle's activity-escalation state ever tells you -- the
         # currently binding minimum reward:risk and its profile label.
@@ -2024,8 +2020,12 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     lines.append(
         "Decide. Reply with ONLY a JSON object, no prose around it:\n"
         f"{schema}}}\n"
-        "Taking no trade is a good outcome when nothing qualifies — return an "
-        "empty decisions list and say why."
+        "For each BUY, quantity must be the whole-share floor of the smaller "
+        "§2a stop-based size and §2b concentration size, further capped by "
+        "cash remaining after earlier BUYs in this same decisions list; a "
+        "one-share placeholder is invalid. State both §2 calculations in the "
+        "reasoning. Return an empty decisions list only when nothing qualifies, "
+        "and give concrete reasons."
     )
     return "\n".join(lines)
 
@@ -2152,7 +2152,7 @@ def _execute_exit(working: "Portfolio", ticker: str, quantity: int, entry_price:
 
 
 def build_decision_time_context(working: "Portfolio", bars: dict[str, dict],
-                                watchlist: list[str], limits_ctx: dict) -> Context:
+                                 watchlist: list[str], limits_ctx: dict) -> Context:
     """Context for validating a PROPOSED decision BEFORE it is queued --
     pure, no I/O (2026-08-28 pre-training pass, item 3). Uses TODAY's known
     state (equity/cash/positions marked at today's daily close) as a good-
@@ -2185,6 +2185,31 @@ def build_decision_time_context(working: "Portfolio", bars: dict[str, dict],
         stopped_out_today=working.stopped_out_today,
         **limits_ctx,
     )
+
+
+def required_entry_quantity(trade: ProposedTrade, ctx: Context) -> int | None:
+    """Exact whole-share size required by RULES.md §2/§3 at decision time.
+
+    Returns None when the inputs are unusable; the ordinary risk checker
+    reports those violations. Execution-time checks deliberately do not
+    call this: a next-day gap may change the theoretical optimum, while the
+    queued quantity must remain the quantity Hermes actually chose.
+    """
+    equity, cash, stop = ctx.account.equity, ctx.account.cash, trade.stop_price
+    if (
+        trade.action.upper() != "BUY" or equity is None or cash is None or stop is None
+        or not all(math.isfinite(x) for x in (equity, cash, trade.entry_price, stop))
+        or equity <= 0 or cash < 0 or trade.entry_price <= stop
+    ):
+        return None
+    risk_size = math.floor(
+        equity * (ctx.limits.risk_budget_pct / 100) / (trade.entry_price - stop)
+    )
+    concentration_size = math.floor(
+        equity * (ctx.limits.max_position_pct / 100) / trade.entry_price
+    )
+    cash_size = math.floor(cash / trade.entry_price)
+    return min(risk_size, concentration_size, cash_size)
 
 
 # --------------------------------------------------------------------------
@@ -2730,6 +2755,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # the fill's resolution found the row already claimed 'rejected' by
     # the first and was silently dropped (_record_execution_result only
     # ever resolves a row still 'pending').
+    available_cash = working.cash
+    queued_tickers: set[str] = set()
     for i, decision in enumerate(response.get("decisions", [])):
         try:
             real_ticker = masking.real(decision["alias"])
@@ -2767,6 +2794,19 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             target_price=float(target_price) if target_price is not None else None,
         )
         decision_ctx = build_decision_time_context(working, bars, tickers, limits_ctx)
+        decision_ctx = dataclass_replace(
+            decision_ctx,
+            account=dataclass_replace(decision_ctx.account, cash=available_cash),
+        )
+        if real_ticker in queued_tickers:
+            line = (
+                f"{real_ticker}: decision-time risk check rejected -- §9.1: "
+                "only one queued decision per ticker is allowed in a cycle "
+                f"[profile={working.profile_level} min_rr={active_min_rr}]"
+            )
+            summary["blocked"].append(line)
+            activity.append(("risk_check", line, None))
+            continue
         decision_verdict = check_trade(proposal, decision_ctx, validate_timing=False)
         if not decision_verdict.allowed:
             reason = "; ".join(decision_verdict.violations)
@@ -2783,10 +2823,31 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             activity.append(("risk_check", line, None))
             continue
 
+        if action == "BUY":
+            required_quantity = required_entry_quantity(proposal, decision_ctx)
+            if required_quantity is None or quantity != required_quantity:
+                line = (
+                    f"{real_ticker}: decision-time risk check rejected -- §2/§3: "
+                    f"quantity {quantity} does not equal required whole-share size "
+                    f"{required_quantity} from stop risk, concentration, and remaining cash "
+                    f"[profile={working.profile_level} min_rr={active_min_rr}]"
+                )
+                summary["blocked"].append(line)
+                activity.append(("risk_check", line, None))
+                continue
+
         decision_id = make_decision_id(run_key, day_index, real_ticker, action, f"queued_proposal[{i}]")
         record_queued_decision(
             decision, real_ticker, decision_id, run_id=run_key,
             strategy_profile=working.profile_level, min_reward_risk_used=active_min_rr,
+            data_timestamps={
+                "technical_as_of": day.isoformat(),
+                "news_as_of": day.isoformat(),
+                "latest_news_created_at": max(
+                    (a.get("created_at") for a in news.get(real_ticker, []) if a.get("created_at")),
+                    default=None,
+                ),
+            },
         )
         order = QueuedOrder(
             ticker=real_ticker, alias=decision["alias"], action=action, quantity=quantity,
@@ -2796,6 +2857,9 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             strategy_profile=working.profile_level, min_reward_risk_used=active_min_rr,
         )
         working.pending_orders.append(order)
+        queued_tickers.add(real_ticker)
+        if action == "BUY":
+            available_cash -= quantity * entry_price
         line = f"{action} {real_ticker} ({decision['alias']}) x{quantity} queued for next trading day's open"
         summary["decisions"].append(line)
         activity.append(("order_queued", line, decision_id))

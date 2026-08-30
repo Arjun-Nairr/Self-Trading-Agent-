@@ -110,10 +110,9 @@ services:
     env_file:
       - .env
 
-  # execution-sim-mcp — DEV/MANUAL TOOL ONLY, not the active execution
-  # backend. Was the fallback while Upstox (then Alpaca) wasn't wired up
-  # yet; kept around for local testing without burning real Alpaca API
-  # calls. NOT auto-registered in config.yaml — deliberately not an
+  # execution-sim-mcp — active backtest fill simulator and optional manual
+  # development tool. It is never the live execution backend and is NOT
+  # auto-registered in config.yaml — deliberately not an
   # automatic failover if alpaca-mcp has an outage (see
   # project_hermes_trading_agent memory for why: idempotency and
   # execution_mode tagging both assume one execution path per decision,
