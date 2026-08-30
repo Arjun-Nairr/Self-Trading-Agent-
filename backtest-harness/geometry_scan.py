@@ -9,8 +9,8 @@ WHY: run 1 (26f1d371-08db-4885-ab24-b42200792fb7) produced zero fills. This
 answers a narrower question than "was Hermes too cautious": how often did a
 genuinely tradeable setup (>=2:1 room to real resistance, with a valid
 5-10% stop below it) actually exist on the watchlist at all? See
-run1_evaluation_extract.md and HANDOFF.md's round-2 section for the context
-this feeds.
+docs/evaluations/run1_evaluation_extract.md and HANDOFF.md's "Current state"
+section for the context this feeds.
 
 HARD BOUNDARY: this is human-evaluation-only output. Never wired into
 run_backtest.py, never written anywhere Hermes reads, never referenced in

@@ -1,9 +1,21 @@
-# Round-2 prep: judgment-layer fixes, geometry diagnostic, counterfactual engine
+# Round-2 prep: judgment-layer fixes, geometry diagnostic, counterfactual engine (archived — conservative draft)
+
+> **Archived 2026-08-30.** This was the conservative Round-2 direction —
+> keep `RULES.md`'s existing numbers, fix judgment via `AGENTS.md` alone.
+> It was superseded before Round 2 started by the approved aggressive
+> Phase 1 profile (see `docs/PHASE1_AGGRESSIVE_DESIGN.md` and
+> `HANDOFF.md`). Preserved here for comparison, not as current guidance.
+> The `AGENTS.md` edits this draft produced are still in the live
+> `AGENTS.md` as of this archiving — they have not yet been reconciled
+> with the aggressive profile or the Phase 2 `SOUL.md` rewrite; that
+> reconciliation is itself part of the pending synchronized
+> implementation `HANDOFF.md` describes.
 
 Prepared 2026-08-29/30, offline. Follows run 1 (`26f1d371-08db-4885-ab24-b42200792fb7`,
-125 cycles, zero fills) and `run1_evaluation_extract.md`'s finding: infrastructure was
-flawless, the failures were judgment-layer (razor-thin R:R attempts, two §2b sizing
-breaches, 25 reflections on zero outcome data, unquantified location rejections).
+125 cycles, zero fills) and `docs/evaluations/run1_evaluation_extract.md`'s finding:
+infrastructure was flawless, the failures were judgment-layer (razor-thin R:R attempts,
+two §2b sizing breaches, 25 reflections on zero outcome data, unquantified location
+rejections).
 
 No RULES.md numbers changed. No backtest run started, resumed, or reset. All of Part B/C
 below is read-only human-evaluation output — never wired into `run_backtest.py`, never

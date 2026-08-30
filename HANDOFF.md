@@ -21,38 +21,50 @@ task specifically requires them.
 **Round 1 has completed: 125 cycles, zero filled trades.** A full six-month
 backtest (`run_id 26f1d371-08db-4885-ab24-b42200792fb7`, window
 2026-02-17 → 2026-08-14) ran to its natural end under the locked model and
-rules below. Full read-only extraction of every decision, rejection, and
-reflection: **`backtest-harness/run1_evaluation_extract.md`**.
+the then-current (conservative) rules and temperament. Diagnosis:
+infrastructure was flawless; the failures were judgment-layer — every real
+proposal aimed at the bare-minimum §6b reward:risk (1.92–2.00) and died to
+rounding or a next-day price gap, two proposals breached the §2b
+concentration cap, 25 reflections against zero closed trades entrenched a
+no-trade prior. Full read-only extraction:
+**`docs/evaluations/run1_evaluation_extract.md`**.
 
-**Diagnosis: infrastructure was flawless; the failures were judgment-layer.**
-Every real proposal aimed at the bare-minimum §6b reward:risk (1.92–2.00)
-and died to rounding or a next-day price gap; two proposals breached the
-§2b concentration cap by skipping the smaller-of-two sizing check; 25
-reflections written against zero closed trades entrenched a no-trade prior;
-no-action reasons cited "location" without a measured distance. No
-infrastructure defect, no halted cycle, no data-feed starvation.
+**A first, conservative Round-2 response was drafted and is now archived.**
+It kept every `RULES.md` number and fixed judgment purely through
+`AGENTS.md` edits, plus an offline geometry/counterfactual diagnostic
+(79.6% of setups had 2:1-or-better geometry by maverick's own algorithm,
+but a mechanical replay of them won only 24.5% of the time, avg -0.11R —
+reading: Round 1's caution was directionally justified, not simply
+over-cautious). This direction was **superseded before Round 2 started** by
+the decision below. Preserved for comparison, not as current guidance:
+**`docs/history/round2-conservative-draft/run2_prep_analysis.md`**.
 
-**Round 2 preparation is complete. Round 2 itself has not started.**
-Three deliverables, all read-only/judgment-layer, none touching RULES.md:
+**Approved direction: an aggressive Phase 1 profile, implementation
+pending.** Rather than stay conservative, the approved next step loosens
+several numeric limits (1.5:1 min R:R, 2% risk/trade, 20% max position,
+cash-only exposure limit, 5-trading-day time stop, only a −30% drawdown
+breaker, an activity target of ≥5 trades/20 days) specifically to generate
+more real trading evidence — Round 1's near-total inactivity produced too
+little evidence to judge the rules by. Full profile, and what stays
+mandatory regardless (lookahead prevention, execution/slippage mechanics,
+journaling, anti-fabrication): **`docs/PHASE1_AGGRESSIVE_DESIGN.md`**.
+**This is a design only — no enforcement file has been changed to match it
+yet.**
 
-1. **`AGENTS.md`** — five judgment-layer edits (R:R headroom doctrine
-   targeting ~2.5:1 rather than the 2.0 floor, a pre-proposal gap
-   stress-test, a mandatory dual sizing check, a reflection guard for
-   `sample_size=0`, quantified location rejections).
-2. **`backtest-harness/geometry_scan.py`** — diagnostic: across the full
-   real window, maverick's own support/resistance algorithm offered
-   2:1-or-better geometry on **79.6%** of (day, ticker) pairs, 20.4% CLOSE,
-   0% INVALID.
-3. **`backtest-harness/counterfactual.py`** — mechanical replay of real
-   fill/exit rules against those setups: **24.5% win rate, average -0.11R**
-   across 995 geometry-valid pairs; SFM's real rejected proposal, replayed
-   as if filled, would have stopped out at **-1.00R**.
+**`SOUL.md` has been rewritten for this direction (Phase 2) and is
+complete.** The prior conservative temperament ("comfortable doing
+nothing... most cycles should end with no trade") is replaced with an
+active one: search every eligible ticker each cycle, ordinary confidence is
+sufficient to act, uncertainty alone is not a veto, a no-trade cycle is
+valid only when every candidate has a concrete rejection reason. Honesty,
+evidence discipline (no strategy lessons from a tiny/empty sample), and
+prompt-injection resistance are unchanged. The prior version is preserved
+at **`docs/history/SOUL_phase1_conservative_2026-08-30.md`**.
 
-Full numbers and methodology: **`backtest-harness/run2_prep_analysis.md`**.
-**Reading:** Round 1's caution looks directionally justified, not simply
-over-conservative — the geometry that "existed" mostly did not hold up as
-real resistance. See "Exact next step" at the bottom for what's actually
-pending.
+**`RULES.md`, `risk_checker.py`, and `AGENTS.md` still encode the
+conservative numbers.** `SOUL.md`'s temperament and the enforcement layer
+are currently out of sync — that reconciliation is the actual next step,
+below. **No new training run is authorized.**
 
 ---
 
@@ -141,8 +153,9 @@ broker/news endpoints.
   read-only into `gateway` (`docker-compose.yml`), re-read by Hermes every
   cycle, never trusted from memory. Hermes may refine judgment through
   reflection but may **never** loosen a limit. **No number in `RULES.md`
-  changed for Round 2** — every Round-2 fix is judgment-layer (`AGENTS.md`)
-  or offline analysis; see "Current state" above.
+  has changed yet** — the approved aggressive Phase 1 profile
+  (`docs/PHASE1_AGGRESSIVE_DESIGN.md`) is pending synchronized
+  implementation here and in `risk_checker.py`; see "Current state" above.
 - **`risk_checker.py`** enforces every numeric rule in code, independent
   of the model's own reasoning — pure functions, zero I/O, **fail-closed**
   on any unknown/non-finite/non-positive value.
@@ -217,16 +230,19 @@ SELECT-only — anyone with the endpoint URL can read the same journal rows.
   by design/scope.
 - **Round 1's own real, complete evidence on §6b (2:1 minimum
   reward:risk)** — see "Current state" above and
-  `backtest-harness/run1_evaluation_extract.md` /
-  `run2_prep_analysis.md` for the full numbers. Not a recommendation to
-  change the number: the counterfactual replay suggests the 2:1 floor
-  screened out more bad setups than good ones, which argues against
-  loosening it, not for.
-- **Open questions worth a second opinion**, deliberately unresolved:
-  risk-per-trade (1% vs. a 5% comparable system), the weekly circuit
-  breaker (−6%, `RULES.md`'s own weakest-grounded number), the time stop
-  (15 trading days), total exposure cap (60%) and max positions (8). See
-  `RULES.md` §10 for the full list.
+  `docs/evaluations/run1_evaluation_extract.md` /
+  `docs/history/round2-conservative-draft/run2_prep_analysis.md` for the
+  full numbers. That analysis argued against loosening §6b in isolation;
+  the approved Phase 1 profile loosens it anyway (to 1.5:1), alongside
+  several other numbers, as a deliberate bet that more real evidence is
+  worth more than this one number staying conservative — see
+  `docs/PHASE1_AGGRESSIVE_DESIGN.md`.
+- **Open questions worth a second opinion**, deliberately unresolved
+  under `RULES.md`'s current (still-conservative) numbers: risk-per-trade,
+  the weekly circuit breaker (`RULES.md`'s own weakest-grounded number),
+  total exposure cap and max positions. See `RULES.md` §10 for the full
+  list — several of these are exactly what the Phase 1 profile proposes
+  to change, once implemented.
 
 **Ground rule for any of the above:** `RULES.md`'s hard limits are not up
 for negotiation via "better performance" arguments alone — even Hermes
@@ -239,21 +255,23 @@ proposed change to a hard number needs to go through the user explicitly.
 
 | File | What it is |
 |---|---|
-| `RULES.md` | The authoritative, locked rules — position sizing, caps, circuit breakers, prohibitions |
-| `AGENTS.md` | Hermes' operating procedure (the cycle, step by step) — updated for Round 2, see "Current state" |
-| `SOUL.md` | Hermes' identity/temperament |
+| `RULES.md` | The authoritative, locked rules — position sizing, caps, circuit breakers, prohibitions. **Still the conservative Round-1 numbers** — Phase 1 implementation pending |
+| `AGENTS.md` | Hermes' operating procedure (the cycle, step by step). Carries the conservative Round-2-draft judgment edits; not yet reconciled with the aggressive profile or Phase 2 `SOUL.md` |
+| `SOUL.md` | Hermes' identity/temperament — **rewritten for Phase 2** (active/experimental), see "Current state" |
 | `backtest-harness/run_backtest.py` | The backtest harness/orchestrator |
-| `backtest-harness/run1_evaluation_extract.md` | Full read-only extraction of Round 1's real results (125 cycles, zero fills) |
-| `backtest-harness/geometry_scan.py`, `test_geometry_scan.py` | Round-2 prep: offline geometry diagnostic (79.6% GEOMETRY-VALID) |
-| `backtest-harness/counterfactual.py`, `test_counterfactual.py` | Round-2 prep: offline mechanical counterfactual replay (24.5% win rate, avg -0.11R) |
-| `backtest-harness/run2_prep_analysis.md` | Full Round-2 prep numbers and methodology |
+| `backtest-harness/geometry_scan.py`, `test_geometry_scan.py` | Executable offline diagnostic tooling (not a draft) — geometry classification against real market data |
+| `backtest-harness/counterfactual.py`, `test_counterfactual.py` | Executable offline diagnostic tooling (not a draft) — mechanical counterfactual trade replay |
 | `backtest-harness/backtest_state.json` | Local, gitignored — current in-progress backtest portfolio |
 | `backtest-harness/quota_pacer_state.json` | Local, gitignored — real weekly invocation count |
-| `risk-checker/risk_checker.py` | Deterministic rule enforcement, shared by live and backtest |
+| `risk-checker/risk_checker.py` | Deterministic rule enforcement, shared by live and backtest. **Still the conservative Round-1 numbers** — Phase 1 implementation pending |
 | `trade-journal-mcp/`, `alpaca-mcp/`, `maverick-mcp/`, `google-news-rss-mcp/`, `execution-sim-mcp/` | The five tool containers |
 | `dashboard/index.html` | The local-only dashboard frontend |
 | `docker-compose.yml` | Full stack topology, pinned image digests |
 | `watchlist/watchlist.json` | The fixed 10-ticker eligible universe |
+| `docs/evaluations/run1_evaluation_extract.md` | Full read-only extraction of Round 1's real results (125 cycles, zero fills) |
+| `docs/PHASE1_AGGRESSIVE_DESIGN.md` | The approved aggressive profile — numbers, and what stays mandatory regardless. Design only, not yet implemented |
+| `docs/history/round2-conservative-draft/run2_prep_analysis.md` | Archived — the superseded conservative Round-2 direction (geometry/counterfactual numbers, AGENTS.md rationale) |
+| `docs/history/SOUL_phase1_conservative_2026-08-30.md` | Archived — `SOUL.md` as it stood through Round 1, before the Phase 2 rewrite |
 | `docs/history/HANDOFF_FULL_2026-08-28.md` | Full dated repair history, test transcripts, superseded numbers from the pre-Round-1 correctness passes — consult only when a task needs that detail |
 | `PROJECT_FRESH_START.md` | From-zero, code-verified architecture explainer |
 
@@ -304,23 +322,30 @@ top of this file for that.
 
 ## Exact next step
 
-**Round 2 preparation is complete (see "Current state" above); Round 2
-itself has not started.** The real pending action is a human decision, not
-an engineering task:
+**Phase 2's `SOUL.md` is done. The Phase 1 aggressive profile
+(`docs/PHASE1_AGGRESSIVE_DESIGN.md`) is approved but not implemented
+anywhere numeric.** The real next step is a synchronized implementation
+pass, together, not piecemeal (a number changed in one place and not
+another is silently unenforced — the same drift risk `risk_checker.py`
+already warns about for the current numbers):
 
-1. **Review** `backtest-harness/run1_evaluation_extract.md` (what Round 1
-   actually did) and `backtest-harness/run2_prep_analysis.md` (the
-   geometry/counterfactual evidence and the five `AGENTS.md` changes made
-   in response).
-2. **Decide** whether the Round-2 `AGENTS.md` judgment-layer changes are
-   sufficient to proceed, or whether further judgment/rule work is wanted
-   first — `RULES.md` itself has open `[JUDGMENT]` questions (§10) that
-   Round 1's zero-trade outcome did not settle either way, since it
-   produced no closed trades to evaluate them against.
-3. **Round 2 (a fresh backtest run — `--reset`, a new `run_id`, same
-   locked model and `RULES.md`, under the updated `AGENTS.md`) requires
-   explicit human approval before starting.** Nothing in this file
-   authorizes starting it.
+1. **`RULES.md`** — replace the conservative numbers (§2a/§2b/§3/§4/§6a/
+   §6b/§6c) with the Phase 1 profile's values.
+2. **`risk_checker.py`**'s `RiskLimits` — the same values, mirrored exactly
+   as today, plus removing the position-count/daily-entry checks the
+   profile drops and confirming the −30%-only breaker and the cash-only
+   exposure check.
+3. **`AGENTS.md`** — reconcile its still-conservative Round-2-draft
+   judgment edits (R:R headroom aimed at the old 2.0 floor, sizing
+   language keyed to the old caps) against both the new numbers and
+   Phase 2's active `SOUL.md` temperament.
+4. **The harness and its tests** — anything hardcoding the old numbers
+   (`TIME_STOP_TRADING_DAYS`, breaker thresholds, etc.) plus new coverage
+   for the activity-target tracking and escalation proposal mechanic.
+
+**No new training run is authorized until that synchronized pass is done
+and verified** — this document does not authorize starting Round 2 or any
+backtest run.
 
 ---
 
