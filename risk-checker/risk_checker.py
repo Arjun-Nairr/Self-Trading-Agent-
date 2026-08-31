@@ -22,8 +22,8 @@ RULES.md §10's resolved disagreement).
 
 FAIL CLOSED. Anything unknown (equity missing, a circuit-breaker figure that
 could not be computed) blocks the trade. An unevaluated safety check has not
-passed. This matches get_account's null-not-zero contract and quota_pacer's
-corrupt-state behaviour.
+passed. This matches get_account's null-not-zero contract: an unknown value
+is never silently treated as a safe default.
 
 EXITS ARE PRIVILEGED. The circuit breaker, reward:risk and exposure checks
 all restrict *entries only*. A checker that blocked exits would trap losing

@@ -21,7 +21,7 @@
     --amber: #f5a623;
     --mono: 'JetBrains Mono', 'IBM Plex Mono', 'Cascadia Code', 'SF Mono', Consolas, monospace;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; min-width: 0; }
   html { background: var(--bg); }
   body {
     background: var(--bg); color: var(--fg);
@@ -29,6 +29,7 @@
     background-image: repeating-linear-gradient(
       0deg, transparent, transparent 2px, rgba(255,255,255,0.010) 2px, rgba(255,255,255,0.010) 4px
     );
+    overflow-wrap: break-word;
   }
   .wrap { max-width: 1180px; margin: 0 auto; padding: 32px 20px 80px; }
 
@@ -74,7 +75,7 @@
   .stat-value.neg { color: var(--red); }
 
   /* -- progress bar ---------------------------------------------------- */
-  .bars { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); }
+  .bars { display: grid; grid-template-columns: 1fr; gap: 1px; background: var(--line); border: 1px solid var(--line); }
   .bar-cell { background: var(--panel); padding: 14px 16px; }
   .bar-head { display: flex; justify-content: space-between; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--fg-faint); margin-bottom: 8px; }
   .bar-head b { color: var(--fg); font-weight: 700; }
@@ -101,9 +102,18 @@
 
   /* -- tables ------------------------------------------------------------ */
   table { width: 100%; border-collapse: collapse; }
-  .panel { border: 1px solid var(--line); background: var(--panel); }
-  th { text-align: left; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-faint); padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  /* overflow-x:auto rather than shrinking columns -- a narrow viewport
+     scrolls the table horizontally instead of crushing numeric columns
+     unreadable; only activates when content actually overflows. */
+  .panel { border: 1px solid var(--line); background: var(--panel); overflow-x: auto; }
+  th { text-align: left; font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--fg-faint); padding: 10px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
   td { padding: 10px 14px; border-bottom: 1px solid var(--line); font-size: 12px; }
+  /* Positions is the widest table (10 numeric/short columns) and reads
+     better scrolled than wrapped mid-value. Closed trades' and insight
+     log's free-text columns are exempt -- forced nowrap there would just
+     hide text off-screen instead of scrolling it; wrapping is the
+     readable behavior for prose. */
+  #positions td { white-space: nowrap; }
   tr:last-child td { border-bottom: none; }
   tbody tr:hover td { background: var(--panel-hi); }
   .ticker { font-weight: 700; }
@@ -164,6 +174,20 @@
     .trio, .bars { grid-template-columns: 1fr; }
     .feed-row { grid-template-columns: 1fr; gap: 2px; }
   }
+
+  /* Verified at 390px (iPhone 12/13/14 width) and 375px (iPhone SE). */
+  @media (max-width: 480px) {
+    .wrap { padding: 20px 14px 56px; }
+    header { padding-bottom: 12px; margin-bottom: 20px; }
+    h1 { font-size: 18px; }
+    .mode-toggle button { padding: 9px 16px; }
+    section { margin-bottom: 24px; }
+    .stats { grid-template-columns: repeat(2, 1fr); }
+    .cards { grid-template-columns: 1fr; }
+    .summary { padding: 14px 16px; font-size: 13px; }
+    .stat, .bar-cell, .trio-cell, .card { padding: 12px; }
+    .feed-row { padding: 8px 12px; }
+  }
 </style>
 </head>
 <body>
@@ -196,7 +220,7 @@
   </section>
 
   <section>
-    <div class="section-label">Model Usage &amp; Quota</div>
+    <div class="section-label">Model Usage</div>
     <div class="stats" id="usage-stats"></div>
   </section>
 
@@ -439,28 +463,15 @@ function renderBars(snaps) {
   const dayNum = latest?.day_label ? parseInt(latest.day_label.replace(/\D/g, ""), 10) || 0 : 0;
   const dayPct = Math.min(100, dayNum / WINDOW_DAYS * 100);
 
-  // Single source of truth: quota_pacer.py's own real ISO-week count, as
-  // of the latest cycle, mirrored onto that snapshot row by run_backtest.py
-  // (record_snapshot_once). NOT re-derived here -- a second independent
-  // count (e.g. "snapshots in the last 7 days") can silently disagree with
-  // the pacer's real accounting (which also counts failed/retried
-  // invocations the moment Hermes is actually called, not after a cycle
-  // fully succeeds -- see run_backtest.py's mark_invoked).
-  //
-  // 2026-08-31: the 175 weekly threshold this used to gate training on was
-  // never a real OpenAI limit, just a guessed local safety brake -- real
-  // usage stayed at 1-3% of the visible weekly allowance. Training no
-  // longer stops on it (see quota_pacer.py); this is now a plain, honest
-  // observability count, not a progress bar toward an artificial ceiling.
-  const used = latest?.hermes_calls_used;
-
+  // 2026-08-31: the weekly invocation counter (and the 175/week gate it
+  // used to enforce, removed earlier) is gone entirely -- run-scoped
+  // token/api_calls metrics in the Model Usage panel already carry the
+  // real signal it existed to surface. This is now the only bar; .bars
+  // is a single-column grid so it spans the full row.
   el("bars").innerHTML = `
     <div class="bar-cell">
       <div class="bar-head"><span>Backtest window</span><span><b>Day ${dayNum}</b> / ${WINDOW_DAYS}</span></div>
       <div class="bar-track"><div class="bar-fill" style="width:${dayPct}%"></div></div>
-    </div>
-    <div class="bar-cell">
-      <div class="bar-head"><span>Hermes invocations this week</span><span><b>${used != null ? used : "—"}</b></span></div>
     </div>`;
 }
 

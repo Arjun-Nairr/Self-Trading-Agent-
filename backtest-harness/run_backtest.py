@@ -67,7 +67,6 @@ from typing import Callable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "risk-checker"))
 
 from anonymize import RunMasking                                    # noqa: E402
-from quota_pacer import QuotaPacer                                  # noqa: E402
 from risk_checker import (                                          # noqa: E402
     AccountState, Context, MarketClock, Position, ProposedTrade, RiskLimits,
     check_trade,
@@ -196,8 +195,8 @@ def preflight() -> None:
     Found the hard way: `execution-sim` ships with `restart: "no"` (it was a
     dev-only tool before being repurposed for backtest fills), so it is
     stopped by default. The loop then died mid-cycle with a bare
-    'service is not running' — after already spending a Hermes call and a
-    quota slot. Cheaper to check all five up front.
+    'service is not running' — after already spending a real Hermes call
+    for nothing. Cheaper to check all five up front.
     """
     required = ["gateway", "maverick-mcp", "alpaca-mcp", "trade-journal",
                 "execution-sim"]
@@ -1067,12 +1066,11 @@ def _resolve_window(
 
 
 def _atomic_write_json(path: Path, data: dict) -> None:
-    """Write-to-temp-then-atomic-rename -- the same pattern quota_pacer.py's
-    `_save` already uses. A process killed mid-write (exactly the failure
-    mode this whole repair is about) must never leave backtest_state.json
-    half-written; `os.replace` is atomic on both POSIX and Windows for a
-    same-directory rename, so a reader sees either the fully-old or
-    fully-new file, never a partial one."""
+    """Write-to-temp-then-atomic-rename. A process killed mid-write (exactly
+    the failure mode this whole repair is about) must never leave
+    backtest_state.json half-written; `os.replace` is atomic on both POSIX
+    and Windows for a same-directory rename, so a reader sees either the
+    fully-old or fully-new file, never a partial one."""
     fd, tmp_path = tempfile.mkstemp(dir=path.parent, prefix=".backtest_state_", suffix=".tmp")
     try:
         with os.fdopen(fd, "w") as f:
@@ -1103,7 +1101,7 @@ def _atomic_write_json(path: Path, data: dict) -> None:
 # Fix: durably save the validated response (the cycle's whole "intent") the
 # INSTANT it exists, before ANY further external mutation. A retry checks
 # for a checkpoint matching (run_id, day_index) first and, if found, reuses
-# it verbatim -- no second Hermes call, no second quota charge. The
+# it verbatim -- no second Hermes call. The
 # checkpoint is only cleared once the atomic local-state commit for THIS
 # cycle succeeds (main(), after _atomic_write_json) -- never inside run_day
 # itself, so a checkpoint always outlives every write it protects.
@@ -1536,7 +1534,7 @@ asyncio.run(main())
 
 
 def log_cycle_failure(day_label: str, error_text: str, run_id: str | None,
-                      usage: dict | None, pacer: "QuotaPacer | None") -> None:
+                      usage: dict | None) -> None:
     """Best-effort dashboard visibility for a FAILED cycle attempt --
     called from _run_cycle_or_halt, separately from log_activity's batched
     success-path narration (never gated behind the snapshot-conflict check
@@ -1544,14 +1542,18 @@ def log_cycle_failure(day_label: str, error_text: str, run_id: str | None,
     attempt is exactly what should remain visible on every attempt, not be
     deduplicated away).
 
-    usage/pacer, when available (a real _call_hermes may have already run
-    before whatever failed afterward -- JSON parse, semantic validation,
-    a journal write), are real numbers, not estimates: this cycle's actual
-    token spend and the pacer's actual current count at the moment of
-    failure, exactly the state the dashboard is required to show for a
-    failed attempt."""
+    usage, when available (a real _call_hermes may have already run before
+    whatever failed afterward -- JSON parse, semantic validation, a journal
+    write), is real, not estimated: this cycle's actual token spend, exactly
+    the state the dashboard is required to show for a failed attempt.
+
+    2026-08-31: the weekly invocation counter (`QuotaPacer`) was removed
+    entirely -- token/API-call metrics below already carry the real signal
+    that counter existed to surface, and nothing ever needed a weekly
+    number for training itself. `hermes_calls_used` stays NULL going
+    forward (the Neon column remains for compatibility with historical
+    rows, not repurposed)."""
     usage = usage or {}
-    quota_used = pacer.used_this_week() if pacer is not None else None
     script = f'''
 import asyncio
 from server import _log_activity
@@ -1560,7 +1562,6 @@ async def main():
     await _log_activity(
         "cycle_failed", {f"{day_label}: {error_text}"[:900]!r}, None, mode="backtest",
         run_id={run_id!r}, total_tokens={usage.get("total_tokens")!r},
-        hermes_calls_used={quota_used!r},
     )
 
 asyncio.run(main())
@@ -1572,7 +1573,6 @@ def record_snapshot_once(day_label: str, equity: float, cash: float,
                          exposure_pct: float, drawdown_pct: float,
                          open_positions: int, run_id: str, cycle_id: str,
                          usage: dict | None = None,
-                         pacer: "QuotaPacer | None" = None,
                          positions_detail: list[dict] | None = None) -> bool:
     """Write this cycle's snapshot -- AT MOST ONCE, ever, per (run_id,
     day_index) -- and report whether this call was the one that actually
@@ -1585,16 +1585,16 @@ def record_snapshot_once(day_label: str, equity: float, cash: float,
     succeeded, but something after it, e.g. the local state-file write,
     failed) returns False and the caller correctly skips re-narrating.
 
-    usage/pacer: same real-usage/real-quota purpose as the prior
-    record_snapshot. positions_detail: per-open-position dicts as the
-    harness itself sees them this cycle."""
+    usage: same real-usage purpose as the prior record_snapshot.
+    positions_detail: per-open-position dicts as the harness itself sees
+    them this cycle.
+
+    2026-08-31: `hermes_calls_used`/`weekly_budget` stay NULL going
+    forward -- the weekly invocation counter they fed (`QuotaPacer`) was
+    removed entirely, and run-scoped token/api_calls totals already carry
+    the real usage signal it existed to surface. Both Neon columns remain
+    for compatibility with historical rows, not repurposed."""
     usage = usage or {}
-    quota_used = pacer.used_this_week() if pacer is not None else None
-    # 2026-08-31: the 175/week GATE is gone -- there is no budget number
-    # left to report truthfully. `weekly_budget` stays NULL going forward;
-    # the column itself remains for compatibility with historical rows
-    # (see quota_pacer.py), not repurposed to mean anything new.
-    quota_budget = None
     script = f'''
 import asyncio, json
 from server import _record_portfolio_snapshot
@@ -1610,8 +1610,6 @@ async def main():
         reasoning_tokens={usage.get("reasoning_tokens")!r},
         total_tokens={usage.get("total_tokens")!r},
         api_calls={usage.get("api_calls")!r},
-        hermes_calls_used={quota_used!r},
-        weekly_budget={quota_budget!r},
         open_positions_detail={positions_detail!r},
         run_id={run_id!r}, cycle_id={cycle_id!r},
     )
@@ -1754,7 +1752,7 @@ def json_from_list(text: str) -> list:
 # with no reflection) used to sail straight through and either silently do
 # the wrong thing downstream or blow up much later (e.g. record_trade's
 # own field validation, a full day after the decision was queued and a
-# real quota slot already spent). This is the missing gate: validated
+# real Hermes call already spent). This is the missing gate: validated
 # BEFORE a decision is ever queued, with the SAME one-retry-then-fail-
 # closed contract json_from already had for a parse failure -- see
 # ask_hermes.
@@ -2065,7 +2063,7 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     return "\n".join(lines)
 
 
-def _call_hermes(prompt: str, on_invoked: "Callable[[], None] | None" = None) -> str:
+def _call_hermes(prompt: str) -> str:
     escaped = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
     # --usage-file: real per-call token accounting (input/output/cache/
     # reasoning tokens, api_calls) written to a JSON report inside the
@@ -2082,16 +2080,6 @@ def _call_hermes(prompt: str, on_invoked: "Callable[[], None] | None" = None) ->
     if result.returncode != 0:
         raise RuntimeError(f"hermes failed:\n{result.stderr[-1500:]}")
 
-    # PHASE 0 REPAIR: fire the quota-counting callback HERE -- the instant
-    # we know the model was actually invoked and returned (returncode 0),
-    # not after ask_hermes's JSON parsing or anything downstream succeeds.
-    # A cycle that spent a real call and then failed to parse, journal, or
-    # process further must still count against the weekly budget; the old
-    # code only recorded the cycle after run_day returned successfully,
-    # silently under-counting every failure that happened after this point.
-    if on_invoked is not None:
-        on_invoked()
-
     usage_result = subprocess.run(
         ["docker", "compose", "exec", "-T", "gateway", "cat", usage_path],
         capture_output=True, text=True, cwd=REPO, timeout=30, encoding="utf-8",
@@ -2104,8 +2092,7 @@ def _call_hermes(prompt: str, on_invoked: "Callable[[], None] | None" = None) ->
     return result.stdout, usage
 
 
-def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
-               on_invoked: "Callable[[], None] | None" = None) -> dict:
+def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False) -> dict:
     """One retry on a malformed OR semantically invalid reply — a real
     failure mode, seen on the very first live cycle (an unescaped quote
     inside the reasoning text broke the whole object and cost the cycle).
@@ -2116,21 +2103,20 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
     reflection is exactly as unusable as one that doesn't parse at all.
 
     Retrying with the specific error quoted back is cheaper than losing the
-    cycle: a wasted cycle still costs a quota slot AND yields nothing, while
-    the retry costs the same slot and usually succeeds. Capped at one — if
+    cycle: a wasted cycle still costs a real call AND yields nothing, while
+    the retry costs the same call and usually succeeds. Capped at one — if
     it cannot produce a valid reply twice, the cycle deserves to fail loudly
     rather than silently drop or fabricate a decision.
 
     usage_totals accumulates across both the original call and a retry (a
     retry is a second real API call and a second real cost -- both must
-    count, not just the one that happened to validate).
+    count, not just the one that happened to validate); api_calls in
+    particular is how the dashboard's real "Retry Count" is derived.
 
-    on_invoked: passed straight through to _call_hermes on both the
-    original call and the retry -- called once per real call (so twice on
-    a cycle that retries), NOT deduped to once per cycle. 2026-08-31:
-    run_day's closure counts real invocations for observability, not a
-    per-cycle quota slot, so each real call is meant to register
-    separately -- see mark_invoked.
+    2026-08-31: the weekly invocation counter (`QuotaPacer`) that used to
+    hook a callback through `_call_hermes` for every real call was removed
+    entirely -- usage_totals' own api_calls/token fields already carry the
+    real per-cycle signal it existed to surface.
     """
     def _accumulate(usage: dict) -> None:
         # usage.get(key, 0) only substitutes 0 for a MISSING key -- a real
@@ -2145,7 +2131,7 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
             (usage_totals.get("estimated_cost_usd") or 0.0) + (usage.get("estimated_cost_usd") or 0.0)
         )
 
-    raw, usage = _call_hermes(prompt, on_invoked)
+    raw, usage = _call_hermes(prompt)
     _accumulate(usage)
     try:
         response = json_from(raw)
@@ -2159,7 +2145,7 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
             "decision. Keep every free-text field to one short line with "
             "no quote characters, apostrophes, or line breaks inside it."
         )
-        raw2, usage2 = _call_hermes(retry, on_invoked)
+        raw2, usage2 = _call_hermes(retry)
         _accumulate(usage2)
         # A second failure (parse OR validation) propagates uncaught --
         # fail closed, exactly like the pre-existing JSON-only contract.
@@ -2260,7 +2246,7 @@ def required_entry_quantity(trade: ProposedTrade, ctx: Context) -> int | None:
 
 def run_day(day: date, day_index: int, portfolio: Portfolio,
             masking: RunMasking, watchlist: list[dict], limits_ctx: dict,
-            pacer: QuotaPacer, run_key: str) -> tuple[Portfolio, dict, "Callable[[], None]"]:
+            run_key: str) -> tuple[Portfolio, dict, "Callable[[], None]"]:
     """Run one simulated trading day. Returns (new_portfolio, summary,
     do_observability).
 
@@ -2682,46 +2668,25 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # -- checkpoint gate (2026-08-28 correctness pass, item 2) ------------
     # A retry of this EXACT (run_key, day_index) reuses the response
     # already checkpointed by an earlier attempt -- Hermes is never called
-    # again, and no quota is charged (mark_invoked/pacer.record_cycle are
-    # simply never reached on this path). See the module-level checkpoint
-    # docstring above for why this is the actual root-cause fix.
+    # again. See the module-level checkpoint docstring above for why this
+    # is the actual root-cause fix.
     checkpoint = _load_checkpoint(run_key, day_index)
     if checkpoint is not None:
         response = checkpoint["response"]
         summary["usage"] = checkpoint.get("usage") or {}
         print(f"  REPLAYING checkpointed response for day_index={day_index} "
-              "-- no new Hermes call, no quota charged")
+              "-- no new Hermes call")
     else:
-        # PHASE 0 REPAIR: count the instant Hermes is actually invoked
-        # (inside _call_hermes), not after this whole cycle finishes.
-        #
-        # 2026-08-31: the 175-call weekly GATE was removed (never a real
-        # OpenAI limit -- see quota_pacer.py) and this counter is now pure
-        # observability, so it counts every real invocation separately,
-        # including a JSON/semantic retry within the same cycle (2 real
-        # _call_hermes calls this cycle now record as 2, not deduped to 1
-        # "quota slot" -- there's no slot concept left to dedupe against).
-        # `pacer.record_cycle` is observability-only: a corrupt/unreadable
-        # local state file must never block a cycle whose real Hermes call
-        # already succeeded, so failures here are swallowed, not raised.
-        def mark_invoked() -> None:
-            try:
-                pacer.record_cycle()
-            except Exception:
-                pass
-
         try:
-            response = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day,
-                                  on_invoked=mark_invoked)
+            response = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day)
         except Exception as exc:
             # Tag with whatever real usage ask_hermes accumulated before
             # failing (a validation-retry exhaustion still burns 1-2 real
             # calls) -- _run_cycle_or_halt reads this for log_cycle_failure's
             # "real token usage when available" (item 6). This is the single
             # most usage-relevant failure point (a real _call_hermes just ran);
-            # a failure LATER in this function (a journal write, etc.) still
-            # gets the real, current quota-pacer count via log_cycle_failure's
-            # own pacer argument, just not this specific per-cycle token total.
+            # a failure LATER in this function (a journal write, etc.) would
+            # have no real usage to tag beyond what's already accumulated here.
             exc.usage = summary["usage"]
             raise
         # Durably save the validated response BEFORE any further essential
@@ -2925,14 +2890,14 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # docstring and main()'s call site.
     def do_observability() -> None:
         record_snapshot_once(run_id=run_key, cycle_id=cycle_id,
-                             usage=summary["usage"], pacer=pacer, **snapshot_kwargs)
+                             usage=summary["usage"], **snapshot_kwargs)
         log_activity(activity, run_id=run_key, cycle_id=cycle_id)
 
     return working, summary, do_observability
 
 
 def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict, Callable[[], None]]]", day_label: str = "",
-                       run_id: str | None = None, pacer: "QuotaPacer | None" = None,
+                       run_id: str | None = None,
                        fail_logger: "Callable[..., None]" = log_cycle_failure):
     """Isolated control-flow wrapper -- the one piece of "a failed cycle
     must not advance the simulated date" that's actually unit-testable
@@ -2958,14 +2923,13 @@ def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict, Callable
               "journaled before the failure is safe to retry (idempotent).")
         # Best-effort dashboard visibility (item 6): real token usage when
         # available (ask_hermes tags a raised exception with `.usage` --
-        # see run_day) and the real, current quota-pacer count (always
-        # available). Never let a logging failure mask the real exception
+        # see run_day). Never let a logging failure mask the real exception
         # above (e.g. the failure itself was a lost Docker/Neon connection,
         # in which case this write will also fail, harmlessly).
         try:
             fail_logger(
                 day_label, f"{type(exc).__name__}: {exc}", run_id,
-                usage=getattr(exc, "usage", None), pacer=pacer,
+                usage=getattr(exc, "usage", None),
             )
         except Exception:
             pass
@@ -3037,7 +3001,6 @@ def main() -> None:
     start = date.fromisoformat(start_str)
     names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
     masking = RunMasking(names, run_start=start, seed=seed)
-    pacer = QuotaPacer()
 
     # --reset (or a genuinely fresh state file) ALWAYS gets a brand new
     # run_id -- this is what makes "do not let --reset reuse old trade IDs
@@ -3054,12 +3017,6 @@ def main() -> None:
     completed = 0
     run_usage = {"total_tokens": 0, "api_calls": 0, "estimated_cost_usd": 0.0}
     while completed < args.days and cursor <= end:
-        # 2026-08-31: the 175/week GATE is removed -- it was a guessed
-        # local safety brake, never a real OpenAI limit, and real usage
-        # (125 cycles, run 1) stayed at 1-3% of the visible weekly
-        # allowance. `pacer` still counts real invocations for
-        # observability (see mark_invoked in run_day) -- it just no
-        # longer stops the loop. See quota_pacer.py.
         if cursor.weekday() >= 5:
             cursor += timedelta(days=1)
             continue
@@ -3071,18 +3028,16 @@ def main() -> None:
         # skipping to the next day. The simulated date is NOT advanced and
         # state is NOT written -- re-running the harness later retries this
         # exact day, safely (deterministic decision_ids make an already-
-        # journaled trade a no-op on retry; quota was already correctly
-        # counted at invocation time regardless of the failure -- see
-        # run_day's mark_invoked).
+        # journaled trade a no-op on retry).
         # Phase 1 aggressive profile: the reward:risk floor for TODAY's
         # cycle depends on the portfolio's current activity-escalation
         # tier (RULES.md §6b) -- computed fresh each cycle from the real,
         # persisted state, never cached across cycles.
         todays_limits_ctx = _limits_for_profile(portfolio.profile_level)
         result, halted = _run_cycle_or_halt(
-            lambda: run_day(cursor, day_index, portfolio, masking, watchlist, todays_limits_ctx, pacer, run_key),
+            lambda: run_day(cursor, day_index, portfolio, masking, watchlist, todays_limits_ctx, run_key),
             day_label=masking.day_index(cursor),
-            run_id=run_id, pacer=pacer,
+            run_id=run_id,
         )
         if halted:
             break
@@ -3143,9 +3098,7 @@ def main() -> None:
     final = portfolio.equity_curve[-1]
     print(f"\n{'=' * 70}")
     print(f"run_id: {run_id}")
-    _weekly_used = pacer.used_this_week()
-    print(f"cycles this run: {completed} | Hermes invocations this week: "
-          f"{_weekly_used if _weekly_used is not None else 'unknown (state unreadable)'}")
+    print(f"cycles this run: {completed}")
     print(f"equity ${final:,.2f} ({(final / STARTING_EQUITY - 1) * 100:+.2f}%) "
           f"| open {len(portfolio.holdings)} | closed {len(portfolio.closed_pnl)}")
     if completed:

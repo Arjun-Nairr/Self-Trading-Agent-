@@ -35,7 +35,6 @@ from run_backtest import (
     validate_hermes_response,
 )
 from anonymize import RunMasking  # noqa: E402
-from quota_pacer import QuotaPacer  # noqa: E402
 from risk_checker import (  # noqa: E402
     AccountState, Context, MarketClock, Position, ProposedTrade, RiskLimits, check_trade,
 )
@@ -263,10 +262,10 @@ def test_make_decision_id_is_deterministic_and_distinct():
 
 
 def test_atomic_write_never_leaves_a_corrupt_or_partial_state_file():
-    """Mirrors quota_pacer.py's own atomic-write guarantee. A crash DURING
-    the write (simulated here by making json.dump raise partway) must never
-    touch the real state file at all -- the write goes to a temp file
-    first, and only a successful write is atomically renamed into place."""
+    """A crash DURING the write (simulated here by making json.dump raise
+    partway) must never touch the real state file at all -- the write goes
+    to a temp file first, and only a successful write is atomically renamed
+    into place."""
     tmp_dir = Path(tempfile.mkdtemp())
     target = tmp_dir / "backtest_state.json"
 
@@ -374,7 +373,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
     Hermes exactly once and checkpoints the validated response; an
     ESSENTIAL journal failure (record_queued_decision) halts before any
     state advancement; a retry reuses the checkpointed response with NO
-    second Hermes call and NO quota charge; essential records complete
+    second Hermes call; essential records complete
     idempotently (same decision_id both attempts); the atomic state
     commit succeeds; the checkpoint clears only after; and a snapshot/
     activity failure AFTER commit is caught without halting, rolling
@@ -383,7 +382,6 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
     tmp_dir = Path(tempfile.mkdtemp())
     checkpoint_path = tmp_dir / "cycle_checkpoint.json"
     state_path = tmp_dir / "backtest_state.json"
-    quota_path = tmp_dir / "quota_pacer_state.json"
 
     run_start = date(2026, 2, 17)
     day = run_start
@@ -394,15 +392,12 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
     masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
                          seed=DEFAULT_MASKING_SEED)
     alias = masking.alias("OLN")
-    pacer = QuotaPacer(state_path=quota_path)  # isolated -- never touches the real quota file
     portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
 
     hermes_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, on_invoked=None):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
         hermes_calls.append(1)
-        if on_invoked is not None:
-            on_invoked()  # real quota-counting callback -- must fire exactly once, on attempt 1 only
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
         return {
             "decisions": [{
@@ -439,7 +434,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
         pass
 
     def run_one_attempt():
-        return run_day(day, day_index, portfolio, masking, watchlist, {}, pacer, run_key)
+        return run_day(day, day_index, portfolio, masking, watchlist, {}, run_key)
 
     with patch("run_backtest.CHECKPOINT_PATH", checkpoint_path), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
@@ -467,13 +462,13 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
 
         # -- attempt 2 (retry): reuses the checkpoint, no second Hermes call
         working, summary, do_observability = run_one_attempt()
-        assert len(hermes_calls) == 1, "a retry must NOT call Hermes a second time (no quota charge)"
+        assert len(hermes_calls) == 1, "a retry must NOT call Hermes a second time"
         assert len(journal_calls) == 2 and journal_calls[0] == journal_calls[1], (
             "the retry must re-attempt the SAME essential journal write with the "
             f"IDENTICAL decision_id, not a fresh one: {journal_calls}"
         )
         print("  ok  attempt 2 (retry): reuses the checkpointed response verbatim -- "
-              "no second Hermes call, no quota charge, essential records complete idempotently")
+              "no second Hermes call, essential records complete idempotently")
 
         # -- atomic local-state commit, THEN checkpoint clear -------------
         _atomic_write_json(state_path, {"portfolio": working.to_dict(),
@@ -500,96 +495,6 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
         assert committed["cursor"] == "2026-02-18", "committed state must never be rolled back"
         print("  ok  a snapshot/activity failure AFTER commit is caught without halting, "
               "rolling back, or replaying the cycle -- committed state is untouched")
-
-
-def test_mark_invoked_counts_each_real_invocation_separately():
-    """2026-08-31: the 175/week GATE was removed (never a real OpenAI
-    limit) and `pacer.record_cycle` is now pure observability, so run_day's
-    real `mark_invoked` closure was changed to count every real
-    _call_hermes invocation separately, INCLUDING a JSON/semantic retry
-    within the same cycle -- there's no more "one quota slot per cycle" to
-    dedupe against. Exercises the real run_day/mark_invoked closure with a
-    real (isolated) QuotaPacer, only ask_hermes/journal/observability I/O
-    faked -- proves 2 real invocations register as 2, not 1."""
-    tmp_dir = Path(tempfile.mkdtemp())
-    quota_path = tmp_dir / "quota_pacer_state.json"
-    pacer = QuotaPacer(state_path=quota_path)
-    run_start = date(2026, 2, 17)
-    run_key = str(uuid.uuid4())
-    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
-    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
-                         seed=DEFAULT_MASKING_SEED)
-    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
-
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, on_invoked=None):
-        # Simulate the real retry path: _call_hermes succeeds TWICE this
-        # cycle (a malformed first reply, a valid retry) -- both real.
-        if on_invoked is not None:
-            on_invoked()
-            on_invoked()
-        return {"decisions": [], "no_action_reason": "nothing qualified"}
-
-    fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
-    fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
-                               "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
-                               "support": [95.0], "resistance": [110.0]}}
-    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
-         patch("run_backtest.fetch_bars", return_value=fake_bars), \
-         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
-         patch("run_backtest.fetch_news", return_value={"OLN": []}), \
-         patch("run_backtest.fetch_recent_insights", return_value=[]), \
-         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
-         patch("run_backtest.record_snapshot_once", return_value=True), \
-         patch("run_backtest.log_activity"):
-        run_day(run_start, 0, portfolio, masking, watchlist, {}, pacer, run_key)
-
-    assert pacer.used_this_week() == 2, (
-        f"expected 2 real invocations counted (original + retry), got {pacer.used_this_week()}"
-    )
-    print("  ok  a cycle with a real retry (2 real _call_hermes invocations) records 2, not 1 -- "
-          "no per-cycle dedup left now that this is pure observability, not a quota slot")
-
-
-def test_mark_invoked_never_blocks_a_cycle_on_corrupt_quota_state():
-    """Missing/corrupt local usage-tracker state must not block training --
-    `pacer.record_cycle` is observability-only. A cycle whose real Hermes
-    call already succeeded must complete even if the quota file is
-    unreadable garbage."""
-    tmp_dir = Path(tempfile.mkdtemp())
-    quota_path = tmp_dir / "quota_pacer_state.json"
-    quota_path.write_text("not valid json {{{")
-    pacer = QuotaPacer(state_path=quota_path)
-    run_start = date(2026, 2, 17)
-    run_key = str(uuid.uuid4())
-    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
-    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
-                         seed=DEFAULT_MASKING_SEED)
-    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
-
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, on_invoked=None):
-        if on_invoked is not None:
-            on_invoked()  # pacer.record_cycle() will raise internally on this corrupt file
-        return {"decisions": [], "no_action_reason": "nothing qualified"}
-
-    fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
-    fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
-                               "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
-                               "support": [95.0], "resistance": [110.0]}}
-    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
-         patch("run_backtest.fetch_bars", return_value=fake_bars), \
-         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
-         patch("run_backtest.fetch_news", return_value={"OLN": []}), \
-         patch("run_backtest.fetch_recent_insights", return_value=[]), \
-         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
-         patch("run_backtest.record_snapshot_once", return_value=True), \
-         patch("run_backtest.log_activity"):
-        # Must not raise -- a corrupt observability-only file is never
-        # allowed to halt a cycle whose real Hermes call already succeeded.
-        working, summary, do_observability = run_day(
-            run_start, 0, portfolio, masking, watchlist, {}, pacer, run_key)
-    assert summary["no_action_reason"] == "nothing qualified" or summary["decisions"] == []
-    print("  ok  a corrupt quota-state file does not block or fail a cycle -- "
-          "usage tracking is observability-only")
 
 
 def test_working_copy_isolates_a_failed_cycle_from_the_caller_portfolio():
@@ -638,7 +543,7 @@ def test_run_cycle_or_halt_halts_without_touching_cursor_semantics():
     cleaned up afterward."""
     fake_logger_calls = []
 
-    def fake_fail_logger(day_label, error_text, run_id, usage=None, pacer=None):
+    def fake_fail_logger(day_label, error_text, run_id, usage=None):
         fake_logger_calls.append(
             {"day_label": day_label, "error_text": error_text, "run_id": run_id}
         )
@@ -1282,7 +1187,6 @@ def test_stopped_out_today_resets_unconditionally_even_on_a_quiet_day():
     run_start = date(2026, 2, 17)
     masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
                          seed=DEFAULT_MASKING_SEED)
-    pacer = QuotaPacer(state_path=tmp_dir / "quota_pacer_state.json")
     # Portfolio ENTERING today already carries a PRIOR day's stop-out --
     # exactly the leftover state the bug failed to clear, with no
     # holdings/pending orders (a quiet day -- needed=[]).
@@ -1295,9 +1199,7 @@ def test_stopped_out_today_resets_unconditionally_even_on_a_quiet_day():
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
                                "support": [95.0], "resistance": [110.0]}}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, on_invoked=None):
-        if on_invoked is not None:
-            on_invoked()
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
         return {"decisions": [], "no_action_reason": "nothing qualifies today"}
 
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
@@ -1307,7 +1209,7 @@ def test_stopped_out_today_resets_unconditionally_even_on_a_quiet_day():
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
          patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes):
         working, summary, _do_observability = run_day(
-            run_start, 0, portfolio, masking, watchlist, {}, pacer, str(uuid.uuid4()),
+            run_start, 0, portfolio, masking, watchlist, {}, str(uuid.uuid4()),
         )
 
     assert working.stopped_out_today == [], (
@@ -1410,7 +1312,6 @@ def test_outage_vs_holiday_distinguished_via_the_trading_calendar():
     run_start = date(2026, 2, 17)
     masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
                          seed=DEFAULT_MASKING_SEED)
-    pacer = QuotaPacer(state_path=tmp_dir / "quota_pacer_state.json")
     portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
     watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
 
@@ -1419,7 +1320,7 @@ def test_outage_vs_holiday_distinguished_via_the_trading_calendar():
          patch("run_backtest.fetch_trading_calendar_day",
                return_value={"date": "2026-02-17", "open": "09:30", "close": "16:00"}):
         try:
-            run_day(run_start, 0, portfolio, masking, watchlist, {}, pacer, "run-x")
+            run_day(run_start, 0, portfolio, masking, watchlist, {}, "run-x")
             raise AssertionError("expected an outage on a real trading day to halt, not skip")
         except RuntimeError as exc:
             assert "outage" in str(exc).lower()
@@ -1428,7 +1329,7 @@ def test_outage_vs_holiday_distinguished_via_the_trading_calendar():
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value={}), \
          patch("run_backtest.fetch_trading_calendar_day", return_value=None):
-        working, summary, _do = run_day(run_start, 0, portfolio, masking, watchlist, {}, pacer, "run-x")
+        working, summary, _do = run_day(run_start, 0, portfolio, masking, watchlist, {}, "run-x")
     assert "skipped" in summary and working is portfolio
     print("  ok  a confirmed real holiday/weekend still skips, unchanged behavior")
 
@@ -1437,7 +1338,7 @@ def test_outage_vs_holiday_distinguished_via_the_trading_calendar():
          patch("run_backtest.fetch_trading_calendar_day",
                side_effect=RuntimeError("container unreachable")):
         try:
-            run_day(run_start, 0, portfolio, masking, watchlist, {}, pacer, "run-x")
+            run_day(run_start, 0, portfolio, masking, watchlist, {}, "run-x")
             raise AssertionError("expected an unavailable calendar source to fail closed")
         except RuntimeError as exc:
             assert "calendar could not be checked" in str(exc)
@@ -2092,10 +1993,8 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
     captured_prompts = []
     queued_decision_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, on_invoked=None):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
         captured_prompts.append(prompt)
-        if on_invoked is not None:
-            on_invoked()
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
         return {"decisions": decisions_to_propose, "no_action_reason": "n/a" if decisions_to_propose else "nothing today"}
 
@@ -2132,10 +2031,9 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
          patch("run_backtest.resolve_trade_rejection", return_value=None), \
          patch("run_backtest.record_snapshot_once", return_value=True), \
          patch("run_backtest.log_activity", return_value=None):
-        pacer = QuotaPacer(state_path=tmp_dir / "quota_pacer_state.json")
         todays_limits_ctx = _limits_for_profile(portfolio.profile_level)
         working, summary, _do_observability = run_day(
-            day, day_index, portfolio, masking, watchlist, todays_limits_ctx, pacer, run_key,
+            day, day_index, portfolio, masking, watchlist, todays_limits_ctx, run_key,
         )
 
     return working, captured_prompts, queued_decision_calls, summary["blocked"]

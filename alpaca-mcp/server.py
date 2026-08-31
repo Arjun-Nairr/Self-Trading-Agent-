@@ -253,8 +253,8 @@ def _summarize_history(
     peak-drawdown math nonsense (a drawdown measured against a peak of 0,
     or a "week start" of 0 producing an infinite loss).
 
-    ISO week (Monday-start) matches quota_pacer's week definition, so
-    "this week" means the same thing everywhere in this project.
+    ISO week (Monday-start) is used consistently everywhere in this
+    project, so "this week" means the same thing everywhere.
     """
     points = [(t, e) for t, e in zip(timestamps, equities) if e]
     if not points:

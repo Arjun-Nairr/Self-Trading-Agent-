@@ -675,10 +675,12 @@ async def record_portfolio_snapshot(
     file. day_label: the masked "Day N" string for backtest cycles (so a
     snapshot cross-references what Hermes itself saw); omit for live.
 
-    The token/quota fields are optional real usage for THIS cycle (from
-    Hermes' own --usage-file report) and the real quota_pacer.py count as of
-    this cycle -- pass them when known so the dashboard reads real numbers
-    instead of estimating. open_positions_detail: per-position dicts
+    The token fields are optional real usage for THIS cycle (from Hermes'
+    own --usage-file report) -- pass them when known so the dashboard reads
+    real numbers instead of estimating. hermes_calls_used/weekly_budget are
+    historical fields from a removed weekly invocation counter (2026-08-31)
+    -- kept nullable for compatibility with old rows, no longer populated.
+    open_positions_detail: per-position dicts
     (ticker, quantity, entry_price, current_price, stop_price, target_price,
     days_held, unrealized_pl, unrealized_pl_pct) for a live open-positions
     view without a separate broker/journal round trip."""
