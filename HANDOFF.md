@@ -64,14 +64,19 @@ are unchanged. The prior version is preserved at
 
 **A 3-cycle Round 2 pilot ran (`run_id 97d112e8-...`), found a real
 one-share position-sizing defect, and it was fixed.** A follow-up
-`--reset` attempt (`run_id c55f0fc2-...`) then hit a **second, different,
-still-unfixed bug** — a real crash on cycle 1 (`ask_hermes`'s usage-token
-accumulator throws on an explicit-`null` field). **Neither run_id should
-ever be resumed; `backtest_state.json` does not currently exist at all;
-and a fresh `--reset` run cannot complete even one cycle until that second
-bug is fixed.** **Training is NOT currently safe to start.** See the
-dated sections near the bottom of this file for both defects' full story,
-and "Exact next step" for the real next action.
+`--reset` attempt (`run_id c55f0fc2-...`) then hit a **second, different
+bug** — a real crash on cycle 1 (`ask_hermes`'s usage-token accumulator
+threw on an explicit-`null` field). **That bug is now fixed** (null usage
+fields coerce to 0; regression test added), and a third `--reset` smoke
+test (`run_id 1bf9af3d-8375-45b2-8cdb-313fd56832d5`) **completed all 3
+cycles cleanly** — real sizing enforcement, real cash reservation, real
+rejections, real dashboard verification, zero unexpected errors. **None of
+the three run_ids above should be resumed** — the first two are defective/
+superseded, and the third is a completed 3-cycle smoke test, not a resumable
+partial run; the next attempt starts its own fresh `run_id` via `--reset`.
+**Full training is safe to begin.** See the dated sections near the bottom
+of this file for the complete story of all three attempts, and "Exact next
+step" for what a full run needs before it starts.
 
 ---
 
@@ -774,23 +779,144 @@ repeating this same verification (RULES-based sizing enforcement, cash
 reservation, duplicate-ticker prevention, journal/dashboard correctness,
 no stale data mixed in) before any larger training batch is considered.
 
-**Remaining blocker: yes — the `_accumulate` None-handling bug above.**
-Not fixed in this pass.
+**Remaining blocker at the time: yes — the `_accumulate` None-handling
+bug above. See the next section — it is now fixed and re-verified.**
+
+### 2026-08-31 — `_accumulate` null-usage bug fixed; fresh --reset smoke test completes all 3 cycles clean
+
+**Fix.** `ask_hermes`'s `_accumulate()` helper
+(`backtest-harness/run_backtest.py`) changed from
+`usage_totals.get(key, 0) + usage.get(key, 0)` to
+`(usage_totals.get(key) or 0) + (usage.get(key) or 0)` for every usage
+field (`input_tokens`, `output_tokens`, `cache_read_tokens`,
+`reasoning_tokens`, `total_tokens`, `api_calls`, `estimated_cost_usd`).
+`.get(key, 0)` only substitutes the default for a *missing* key; `or 0`
+also covers a key present with an explicit `None`, which is what the real
+crash needed. Minimal, scoped to usage aggregation only — nothing else in
+`ask_hermes` or the surrounding cycle logic was touched.
+
+**Regression test added** —
+`test_ask_hermes_treats_an_explicit_null_usage_field_as_zero` in
+`backtest-harness/test_execution_semantics.py`: patches
+`run_backtest._call_hermes` to return a clean decision reply plus a real
+usage dict with `cache_read_tokens` and `estimated_cost_usd` both explicit
+`None`, calls the real `ask_hermes` (not a reimplementation), and asserts
+the null fields become `0` while every other real field (`input_tokens`,
+`output_tokens`, `reasoning_tokens`, `total_tokens`, `api_calls`)
+accumulates its true value untouched.
+
+**`AGENTS.md` strengthened (no numeric rule changed).** Step 4.2's stop-
+placement guidance now explicitly tells Hermes to stress-test a proposed
+stop against a plausible ~3% adverse next-open gap before proposing the
+entry — if that gap would land the fill at or below the stop, the stop
+sits too close to the §6a floor to survive real execution, and Hermes
+must find a genuinely valid deeper technical level within §6a's range or
+skip the trade; never stretch a level merely to survive the stress test.
+This directly targets what actually happened in the smoke test below
+(two queued BUYs whose stop ended up at/above the next day's real entry
+and were rejected at execution) without touching `RULES.md` or
+`risk_checker.py`.
+
+**Verification — full local suite, real commands, real output:**
+
+```
+cd backtest-harness
+python test_execution_semantics.py   # includes the new test — PASS, ~100 checks
+python test_anonymize.py             # PASS
+python test_counterfactual.py        # OK — 32 checks
+python test_geometry_scan.py         # OK — 28 checks
+python test_quota_pacer.py           # PASS
+python test_execution_path.py        # PASS (required starting the
+                                      # execution-sim container first —
+                                      # `docker compose up -d execution-sim`;
+                                      # it ships with restart:"no" and was
+                                      # stopped, unrelated to this fix)
+python -m py_compile run_backtest.py test_execution_semantics.py   # clean
+```
+
+**Smoke test — exact command, from `backtest-harness`:**
+```
+python run_backtest.py --start 2026-02-17 --end 2026-08-14 --days 3 --reset
+```
+
+**Result: all 3 cycles completed. No crash, no unexpected error.**
+New `run_id 1bf9af3d-8375-45b2-8cdb-313fd56832d5`.
+
+- **Day 1** — BUY ALGM x479 queued, BUY DINO x353 queued (both accepted in
+  the SAME cycle — cash reservation across same-response BUYs held: ALGM's
+  own recorded reasoning notes "chose 479, so concentration is the
+  limiter and cash still remains ample" immediately before DINO was also
+  accepted). OLN rejected at decision time: proposed quantity 847 ≠
+  required whole-share size 850 (§2/§3 sizing enforcement).
+- **Day 2** — Both Day-1 queued orders (ALGM, DINO) rejected at
+  execution-time re-validation: §6a, stop no longer below the real
+  next-day entry price. OLN and ALGM both rejected again at decision time
+  for quantity mismatches (407≠814, 259≠518).
+- **Day 3** — BUY ATI x130 queued (accepted; still `pending` — the window
+  ends before its execution day). BRX rejected at decision time for a
+  near-miss quantity mismatch (694 ≠ 696 required) — confirms the sizing
+  check is exact, not tolerant of rounding.
+- **Trades this run:** 3 (`1` pending, `2` rejected-at-execution, `0`
+  filled — expected for a 3-day window with T+1 fills). **No ticker was
+  proposed as a duplicate BUY within the run** (verified by direct query,
+  see below). **Zero closed trades, equity unchanged at $100,000.00 across
+  all 3 real snapshots** — one clean baseline, exactly as required.
+
+**Neon, scoped to the new `run_id` (read-only, verified via a scratch
+script through the `trade-journal` container, not assumed):**
+- `trades`: 3 rows (ALGM/DINO rejected with real `§6a` rejection_reason
+  text, ATI pending) — real `intended_quantity`, real timestamps.
+- `portfolio_snapshots`: 3 rows, `day_label` Day 1/2/3, cash=equity=
+  $100,000.00 on every row, `open_positions` 0 on every row.
+- `agent_activity`: 18 rows — `cycle_start`×3, `reasoning`×6, `risk_check`×4,
+  `order_queued`×3, `order_rejected`×2. Real narration text for every
+  rejection, naming the specific rule and number (matches AGENTS.md
+  Step 5's requirement).
+- `insight_log`: 0 (expected — no reflection cadence reached in 3 cycles).
+- Duplicate-ticker query (`GROUP BY ticker HAVING count(*) > 1` on BUYs for
+  this run_id): empty — no ticker was proposed twice.
+- **Old runs confirmed untouched:** `97d112e8-...` still shows 5
+  trades/17 activity rows, `c55f0fc2-...` still shows 0 trades/1 activity
+  row — identical to their pre-fix counts. No manual cleanup was performed
+  or needed.
+- **Quota:** `quota_pacer_state.json` now `{"2026-W34": 34, "2026-W35":
+  135, "2026-W36": 3}` — a real new ISO week (today, 2026-08-31, is a
+  Monday) started its own counter at 3, matching the 3 real Hermes calls
+  this smoke test made. Not a reset bug; the weekly key rolled over
+  correctly.
+
+**Dashboard verification (loaded live, `http://127.0.0.1:8842`, zero
+console errors):** shows the new run as current — "3 cycles recorded,"
+Day 3, $100,000.00 cash/equity, the real ALGM/DINO/ATI decisions with
+their real §2a/§2b sizing arithmetic spelled out in each decision's own
+reasoning text, the real §6a/§2/§3 rejection counts (§2: 4, §3: 4, §6a: 2)
+in the "blocked by rule" panel, and the real activity feed in chronological
+order. **No trace of the old `97d112e8-...` pilot data anywhere on the
+page** — the crash-caused staleness from the previous attempt is gone now
+that a real snapshot exists for the dashboard to key off.
+
+**No other defect appeared.** Nothing beyond the fixed bug needed
+stopping-and-documenting this time.
+
+**Whether full training is safe to begin: YES.** The `_accumulate` bug is
+fixed and regression-tested, a fresh `--reset` run completes 3-for-3 real
+cycles with correct sizing, cash reservation, duplicate prevention,
+journaling, and dashboard behavior, and the old runs remain untouched.
 
 ## Exact next step
 
-**A fresh `--reset` run currently fails on its very first cycle with a
-real, diagnosed-but-unfixed bug — see the section immediately above.**
-Nothing in this file authorizes starting a new run or a training batch.
-The next action is a targeted fix to `ask_hermes`'s `_accumulate()`
-None-handling in `backtest-harness/run_backtest.py`, tested against a
-hand-built usage payload with an explicit `null` field, before attempting
-another `--reset` smoke test. Neither of the two prior run_ids
-(`97d112e8-...`, the one-share pilot; `c55f0fc2-...`, this crashed
-attempt) should be resumed — both are superseded; the next attempt starts
-its own fresh `run_id` via `--reset` again. Tracked, once a clean 3-cycle
-smoke test actually passes, against the six-month target of 30–60
-completed trades (`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
+**Full training is unblocked.** The next action is to start the real
+training batch with a fresh `--reset` (do not resume
+`1bf9af3d-8375-45b2-8cdb-313fd56832d5` or either prior run_id — this smoke
+test's 3 cycles were a validation pass, not the start of the real batch)
+and let it run the full `--start 2026-02-17 --end 2026-08-14` window
+rather than stopping at `--days 3`. Watch early cycles for the §6a
+stop-margin pattern seen in this smoke test (two queued BUYs rejected at
+execution because the stop sat at/above the real next-day entry) — the
+`AGENTS.md` stress-test guidance added in this pass targets exactly that,
+but it has not yet been observed across a real multi-day run. Tracked
+against the six-month target of 30–60 completed trades
+(`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
 
 ---
 

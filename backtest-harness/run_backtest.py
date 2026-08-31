@@ -2096,11 +2096,16 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
     twice; run_day's own closure guards that.
     """
     def _accumulate(usage: dict) -> None:
+        # usage.get(key, 0) only substitutes 0 for a MISSING key -- a real
+        # Hermes usage payload can return a field as explicit `null` (e.g.
+        # cache_read_tokens on a cycle with no prior context to cache),
+        # which .get() passes through unchanged and crashes the `+` below.
+        # `or 0` coerces both missing AND explicit-None to 0.
         for key in ("input_tokens", "output_tokens", "cache_read_tokens",
                     "reasoning_tokens", "total_tokens", "api_calls"):
-            usage_totals[key] = usage_totals.get(key, 0) + usage.get(key, 0)
+            usage_totals[key] = (usage_totals.get(key) or 0) + (usage.get(key) or 0)
         usage_totals["estimated_cost_usd"] = (
-            usage_totals.get("estimated_cost_usd", 0.0) + usage.get("estimated_cost_usd", 0.0)
+            (usage_totals.get("estimated_cost_usd") or 0.0) + (usage.get("estimated_cost_usd") or 0.0)
         )
 
     raw, usage = _call_hermes(prompt, on_invoked)

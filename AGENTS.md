@@ -102,6 +102,16 @@ For each such name:
    checked to two decimal places, not targets to aim at: a stop landing a
    hair inside the floor by a rounding-width miss is rejected outright,
    and the whole trade is lost over it. Sit comfortably inside the range.
+
+   **The 3% stop floor specifically needs comfortable margin, not a graze.**
+   Before proposing an entry, stress-test the level: would a plausible
+   ~3% adverse gap at the next open (an ordinary overnight move, not a
+   crash) land the fill at or below your proposed stop? If it would, the
+   stop is too close to the floor to survive real execution, not just the
+   validation check. In that case, use a genuinely valid deeper technical
+   level that still fits within §6a's range — never fabricate or stretch
+   a level merely to survive this stress test; if no real level clears it,
+   skip the trade.
 3. Identify the target. If reward:risk is below the §6b minimum currently
    binding (your prompt shows it — see below), skip it. The setup does not
    pay enough for what it risks. A ratio that clears the minimum is a real

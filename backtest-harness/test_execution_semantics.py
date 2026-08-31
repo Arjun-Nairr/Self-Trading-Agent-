@@ -24,7 +24,7 @@ from run_backtest import (
     ACTIVITY_BLOCK_TRADING_DAYS, ACTIVITY_TARGET_TRADES, DEFAULT_MASKING_SEED,
     PROFILE_BASE, PROFILE_ESCALATED, PROFILE_LEGACY, PROFILE_MIN_REWARD_RISK,
     STARTING_EQUITY, TIME_STOP_TRADING_DAYS,
-    Holding, Portfolio, QueuedOrder, ResponseValidationError,
+    Holding, Portfolio, QueuedOrder, ResponseValidationError, ask_hermes,
     _atomic_write_json, _clear_checkpoint, _expected_session_bar_times, _limits_for_profile,
     _load_checkpoint, _maybe_advance_activity_block, _record_trade_completion,
     _resolve_seed, _resolve_window, _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
@@ -990,6 +990,36 @@ def test_validate_hermes_response_accepts_a_clean_reply():
     validate_hermes_response({"decisions": [], "no_action_reason": "nothing qualified"},
                              is_reflection_day=False)
     print("  ok  a clean decision and a clean empty-decisions reply both validate")
+
+
+def test_ask_hermes_treats_an_explicit_null_usage_field_as_zero():
+    """The real crash (c55f0fc2-... smoke test): a real Hermes usage payload
+    came back with a field present but explicit `null` (e.g. cache_read_tokens
+    with no prior context to cache on cycle 1 of a fresh run) -- .get(key, 0)
+    only substitutes the default for a MISSING key, so `usage_totals[key] +
+    None` threw TypeError and killed the cycle before anything was journaled.
+    """
+    clean_reply = json.dumps({"decisions": [], "no_action_reason": "nothing qualified"})
+    usage_with_null = {
+        "input_tokens": 500, "output_tokens": 120, "cache_read_tokens": None,
+        "reasoning_tokens": 40, "total_tokens": 660, "api_calls": 1,
+        "estimated_cost_usd": None,
+    }
+    with patch("run_backtest._call_hermes", return_value=(clean_reply, usage_with_null)):
+        totals: dict = {}
+        response = ask_hermes("irrelevant prompt", totals, is_reflection_day=False)
+    assert response == {"decisions": [], "no_action_reason": "nothing qualified"}
+    assert totals["cache_read_tokens"] == 0, "an explicit null must become 0, not crash or stay None"
+    assert totals["estimated_cost_usd"] == 0.0
+    # Every other real field must still accumulate truthfully -- the null
+    # coercion must not corrupt values that were actually present.
+    assert totals["input_tokens"] == 500
+    assert totals["output_tokens"] == 120
+    assert totals["reasoning_tokens"] == 40
+    assert totals["total_tokens"] == 660
+    assert totals["api_calls"] == 1
+    print("  ok  an explicit-null usage field is coerced to 0 without crashing or corrupting "
+          "the other real usage totals")
 
 
 def test_validate_hermes_response_rejects_missing_decisions_list():
