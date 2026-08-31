@@ -1,5 +1,8 @@
-"""Proof the quota pacer actually stops cycles at the budget and resets on
-a real new calendar week. Run: python test_quota_pacer.py
+"""Proof the quota pacer counts real Hermes invocations correctly against a
+real ISO calendar week, persists across restarts, and fails closed
+(unreadable, not silently zero) on corrupt local state -- no blocking
+threshold anymore (removed 2026-08-31; see quota_pacer.py's module
+docstring). Run: python test_quota_pacer.py
 """
 import tempfile
 from datetime import date
@@ -8,9 +11,9 @@ from pathlib import Path
 from quota_pacer import QuotaPacer, _week_key
 
 
-def _pacer(budget: int = 3) -> QuotaPacer:
+def _pacer() -> QuotaPacer:
     tmp = Path(tempfile.mktemp(suffix=".json"))
-    return QuotaPacer(budget=budget, state_path=tmp)
+    return QuotaPacer(state_path=tmp)
 
 
 def test_week_key_is_monday_start_and_stable_within_a_week():
@@ -25,131 +28,113 @@ def test_week_key_is_monday_start_and_stable_within_a_week():
     assert _week_key(next_monday) != _week_key(sunday)
 
 
-def test_fresh_pacer_allows_cycles_up_to_budget():
-    p = _pacer(budget=3)
+def test_fresh_pacer_counts_from_zero_with_no_ceiling():
+    """The old 175/week GATE is gone -- record_cycle just keeps counting,
+    with nothing that stops it and nothing it needs to stay under."""
+    p = _pacer()
     today = date(2026, 8, 17)
 
-    assert p.can_run_cycle(today)
-    assert p.remaining_this_week(today) == 3
+    assert p.used_this_week(today) == 0
 
     p.record_cycle(today)
     p.record_cycle(today)
-    assert p.remaining_this_week(today) == 1
-    assert p.can_run_cycle(today)
-
     p.record_cycle(today)
-    # Budget exactly hit -- this is the real gate, not just a low number.
-    assert p.remaining_this_week(today) == 0
-    assert not p.can_run_cycle(today)
+    assert p.used_this_week(today) == 3
 
-
-def test_budget_never_goes_negative_if_overcounted():
-    """Defensive: a caller bug that calls record_cycle one extra time must
-    not make remaining_this_week report a nonsensical negative number that
-    a naive `if remaining > 0` check could misread."""
-    p = _pacer(budget=1)
-    today = date(2026, 8, 17)
-    p.record_cycle(today)
-    p.record_cycle(today)  # over budget by one
-    assert p.remaining_this_week(today) == 0
-    assert not p.can_run_cycle(today)
+    # Keeps counting past any of the old guessed thresholds (32, 175) with
+    # no special behavior at either -- there is no ceiling left to hit.
+    for _ in range(200):
+        p.record_cycle(today)
+    assert p.used_this_week(today) == 203
 
 
 def test_state_persists_across_a_fresh_pacer_instance():
     """The real point of persisting to disk: a restarted process (script
-    re-run, cron firing again) must not forget cycles already spent this
-    week and silently double the effective budget."""
+    re-run, cron firing again) must not forget invocations already counted
+    this week."""
     tmp = Path(tempfile.mktemp(suffix=".json"))
     today = date(2026, 8, 17)
 
-    p1 = QuotaPacer(budget=5, state_path=tmp)
+    p1 = QuotaPacer(state_path=tmp)
     p1.record_cycle(today)
     p1.record_cycle(today)
 
-    p2 = QuotaPacer(budget=5, state_path=tmp)  # simulates a restart
+    p2 = QuotaPacer(state_path=tmp)  # simulates a restart
     assert p2.used_this_week(today) == 2
-    assert p2.remaining_this_week(today) == 3
 
 
-def test_new_real_week_resets_the_budget():
-    p = _pacer(budget=2)
+def test_new_real_week_starts_its_own_count():
+    p = _pacer()
     week1_day = date(2026, 8, 17)  # a Monday
     week2_day = date(2026, 8, 24)  # the following Monday
 
     p.record_cycle(week1_day)
     p.record_cycle(week1_day)
-    assert not p.can_run_cycle(week1_day)
+    assert p.used_this_week(week1_day) == 2
 
     # Same pacer, same state file, but a genuinely new calendar week --
-    # this is the actual point of the pacer (pause-then-resume, not a
-    # permanent stop).
-    assert p.can_run_cycle(week2_day)
-    assert p.remaining_this_week(week2_day) == 2
-    # And week1's exhausted count is untouched, not merged/reset globally.
+    # its own independent count, starting fresh.
+    assert p.used_this_week(week2_day) == 0
+    p.record_cycle(week2_day)
+    assert p.used_this_week(week2_day) == 1
+    # And week1's count is untouched, not merged/reset globally.
     assert p.used_this_week(week1_day) == 2
 
 
-def test_corrupt_state_file_fails_CLOSED_not_open():
-    """The bug this test exists to catch (found by asking 'did you actually
-    test an interruption, or just clean logic?'): a naive fallback of
-    'corrupt file -> treat as {} -> 0 used -> full budget available' is
-    FAIL-OPEN -- exactly backwards for a system whose entire job is
-    stopping overspend. If corruption happens near the budget limit, that
-    fallback would silently hand back a fresh full week right when the
-    pacer is supposed to say no. Must fail CLOSED instead: unreadable
-    state reports as budget-exhausted, not budget-fresh. It also must not
-    crash the harness either way."""
+def test_corrupt_state_reports_as_unknown_not_zero():
+    """This is observability now, not a gate -- a naive 'corrupt file -> 0
+    used' fallback would silently under-report real usage on a dashboard,
+    which is exactly the kind of quiet wrongness this guards against.
+    Unreadable state must report as `None` ("unknown"), never as a number
+    a caller could mistake for a real, trustworthy count."""
     tmp = Path(tempfile.mktemp(suffix=".json"))
     tmp.write_text("{not valid json")
-    p = QuotaPacer(budget=3, state_path=tmp)
+    p = QuotaPacer(state_path=tmp)
     today = date(2026, 8, 17)
 
-    assert p.used_this_week(today) == p.budget  # reads as fully spent
-    assert p.remaining_this_week(today) == 0
-    assert not p.can_run_cycle(today)  # blocked, not allowed
+    assert p.used_this_week(today) is None
 
 
 def test_interrupted_write_never_corrupts_the_previous_valid_state():
     """The actual scenario the user asked about: the process gets cut off
-    mid-run (hit quota, killed, crashed) WHILE a write is in flight. Direct
-    write_text() would leave a half-written file; the atomic
-    temp-file-then-rename in _save must mean readers only ever see the
-    fully-old or fully-new file, never a partial one. Simulated here by
-    writing a real, valid, high-usage state, then independently writing a
-    truncated version of that same file (what a torn write looks like) and
-    confirming the pacer still fails closed rather than losing the count
-    and reopening the budget."""
+    mid-run WHILE a write is in flight. Direct write_text() would leave a
+    half-written file; the atomic temp-file-then-rename in _save must mean
+    readers only ever see the fully-old or fully-new file, never a partial
+    one. Simulated here by writing a real, valid state, then independently
+    writing a truncated version of that same file (what a torn write looks
+    like) and confirming the pacer reports it as unreadable rather than
+    silently losing the count."""
     tmp = Path(tempfile.mktemp(suffix=".json"))
     today = date(2026, 8, 17)
 
-    # A real prior state: already at budget for this week.
-    p1 = QuotaPacer(budget=3, state_path=tmp)
+    p1 = QuotaPacer(state_path=tmp)
     p1.record_cycle(today)
     p1.record_cycle(today)
     p1.record_cycle(today)
-    assert not p1.can_run_cycle(today)
+    assert p1.used_this_week(today) == 3
 
     # Simulate a torn write: truncate the valid JSON mid-object, exactly
     # the shape a kill-during-write leaves behind.
     valid = tmp.read_text()
     tmp.write_text(valid[: len(valid) // 2])
 
-    p2 = QuotaPacer(budget=3, state_path=tmp)
-    # Must NOT silently read as "0 used, budget reopened" -- that would be
-    # the actual quota-overspend bug the user was pushing on.
-    assert not p2.can_run_cycle(today)
+    p2 = QuotaPacer(state_path=tmp)
+    # Must NOT silently read as "0 used" -- that would misreport real
+    # usage that actually happened.
+    assert p2.used_this_week(today) is None
 
 
 def test_record_cycle_fails_closed_with_a_named_error_on_corrupt_state():
-    """2026-08-29 correctness pass #4, item 6: record_cycle is called
-    AFTER a real Hermes call already happened -- an unreadable state file
-    used to crash here with a bare AttributeError (None.get), with no
-    indication the failure was quota-state corruption specifically, right
-    after real quota was already spent. Must raise a NAMED RuntimeError
-    instead, and can_run_cycle must still report closed."""
+    """record_cycle is called right after a real Hermes call already
+    happened -- an unreadable state file used to crash here with a bare
+    AttributeError (None.get), with no indication the failure was
+    quota-state corruption specifically. Must raise a NAMED RuntimeError
+    instead, so a caller (run_backtest.py's mark_invoked) can deliberately
+    choose to swallow it -- this is observability-only, so a broken
+    counter must never be allowed to fail a real cycle."""
     tmp = Path(tempfile.mktemp(suffix=".json"))
     tmp.write_text("{not valid json")
-    p = QuotaPacer(budget=3, state_path=tmp)
+    p = QuotaPacer(state_path=tmp)
     today = date(2026, 8, 17)
 
     try:
@@ -163,28 +148,15 @@ def test_record_cycle_fails_closed_with_a_named_error_on_corrupt_state():
             f"named error: {exc}"
         ) from exc
 
-    # can_run_cycle must still report closed -- the failed record_cycle
-    # call didn't somehow leave the pacer thinking budget is available.
-    assert not p.can_run_cycle(today)
-
-
-def test_next_week_starts_returns_the_coming_monday():
-    p = _pacer()
-    # Wednesday -> next Monday is 5 days later.
-    assert p.next_week_starts(date(2026, 8, 19)) == date(2026, 8, 24)
-    # Monday itself -> next week's Monday, not today.
-    assert p.next_week_starts(date(2026, 8, 17)) == date(2026, 8, 24)
-    # Sunday -> tomorrow.
-    assert p.next_week_starts(date(2026, 8, 23)) == date(2026, 8, 24)
-
 
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
             fn()
             print(f"  ok  {name}")
-    print("PASS: quota pacer gates cycles at budget, persists across "
-          "restarts, and resets on a real new week")
+    print("PASS: quota pacer counts real invocations against a real ISO week, "
+          "persists across restarts, and reports (never hides) unreadable state -- "
+          "no blocking threshold")
 
 
 if __name__ == "__main__":

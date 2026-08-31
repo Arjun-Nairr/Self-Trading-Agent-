@@ -1590,7 +1590,11 @@ def record_snapshot_once(day_label: str, equity: float, cash: float,
     harness itself sees them this cycle."""
     usage = usage or {}
     quota_used = pacer.used_this_week() if pacer is not None else None
-    quota_budget = pacer.budget if pacer is not None else None
+    # 2026-08-31: the 175/week GATE is gone -- there is no budget number
+    # left to report truthfully. `weekly_budget` stays NULL going forward;
+    # the column itself remains for compatibility with historical rows
+    # (see quota_pacer.py), not repurposed to mean anything new.
+    quota_budget = None
     script = f'''
 import asyncio, json
 from server import _record_portfolio_snapshot
@@ -1905,7 +1909,24 @@ def validate_hermes_response(response, is_reflection_day: bool) -> None:
 
 def build_prompt(day_label: str, account: dict, positions: list[dict],
                  candidates: list[dict], recent_insights: list[str],
-                 reflection_trades: list[dict] | None = None) -> str:
+                 reflection_trades: list[dict] | None = None,
+                 limits: "RiskLimits | None" = None) -> str:
+    # `limits` must be the SAME RiskLimits instance the decision-time
+    # checker (required_entry_quantity/check_trade) will actually enforce
+    # -- see run_day's `active_limits` -- never a second, independently
+    # hard-coded copy of these numbers. Defaults to RiskLimits()'s own
+    # base values only for callers (existing tests) that don't care about
+    # a non-default profile.
+    #
+    # 2026-08-31: a real smoke test showed Hermes reasoning from a stale
+    # 1% §2a figure it was never actually told -- this function used to
+    # only say "§2a stop-based size" with no number and no formula, so
+    # Hermes filled the gap from its own training-data notion of a
+    # "typical" risk-per-trade rule. Spelling out the real percentages and
+    # formulas here removes that gap; because they're read from `limits`
+    # rather than written as literals, this stays correct automatically if
+    # a future approved RULES.md change alters the active profile.
+    limits = limits or RiskLimits()
     lines = [
         f"BACKTEST CYCLE — {day_label}", "",
     ]
@@ -1934,6 +1955,19 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         f"  strategy profile: {account.get('strategy_profile', PROFILE_BASE)} "
         f"(minimum reward:risk this cycle: "
         f"{account.get('min_reward_risk', PROFILE_MIN_REWARD_RISK[PROFILE_BASE])}:1)",
+        "",
+    ]
+
+    lines += [
+        "POSITION SIZING (RULES.md §2/§3 — the CURRENT active limits, not a fixed rule)",
+        f"  §2a risk budget: {limits.risk_budget_pct:.1f}% of equity risked per trade",
+        f"  §2b max position: {limits.max_position_pct:.1f}% of equity in one name",
+        "  §3: cash-only exposure, no margin",
+        "  For each BUY, compute all three and take the smallest, floored to a whole share:",
+        f"    stop-based size    = floor(equity * ({limits.risk_budget_pct:.1f} / 100) / (entry - stop))",
+        f"    concentration size = floor(equity * ({limits.max_position_pct:.1f} / 100) / entry)",
+        "    cash size          = floor(remaining_cash / entry)",
+        "    required quantity  = min(stop-based size, concentration size, cash size)",
         "",
     ]
 
@@ -2020,12 +2054,13 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     lines.append(
         "Decide. Reply with ONLY a JSON object, no prose around it:\n"
         f"{schema}}}\n"
-        "For each BUY, quantity must be the whole-share floor of the smaller "
-        "§2a stop-based size and §2b concentration size, further capped by "
-        "cash remaining after earlier BUYs in this same decisions list; a "
-        "one-share placeholder is invalid. State both §2 calculations in the "
-        "reasoning. Return an empty decisions list only when nothing qualifies, "
-        "and give concrete reasons."
+        "For each BUY, quantity must equal the required quantity from the "
+        "POSITION SIZING block above -- computed against cash remaining "
+        "after earlier BUYs in this same decisions list, not the account's "
+        "starting cash; a one-share placeholder is invalid. State both §2a "
+        "and §2b's actual numbers in the reasoning. Return an empty "
+        "decisions list only when nothing qualifies, and give concrete "
+        "reasons."
     )
     return "\n".join(lines)
 
@@ -2091,9 +2126,11 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
     count, not just the one that happened to validate).
 
     on_invoked: passed straight through to _call_hermes on both the
-    original call and the retry -- the caller's callback must itself be
-    idempotent (fire at most once per cycle) since this can invoke it
-    twice; run_day's own closure guards that.
+    original call and the retry -- called once per real call (so twice on
+    a cycle that retries), NOT deduped to once per cycle. 2026-08-31:
+    run_day's closure counts real invocations for observability, not a
+    per-cycle quota slot, so each real call is meant to register
+    separately -- see mark_invoked.
     """
     def _accumulate(usage: dict) -> None:
         # usage.get(key, 0) only substitutes 0 for a MISSING key -- a real
@@ -2640,7 +2677,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
 
     prompt = build_prompt(masking.day_index(day), account_view,
                           positions_view, candidates, recent_insights,
-                          reflection_trades)
+                          reflection_trades, limits=active_limits)
 
     # -- checkpoint gate (2026-08-28 correctness pass, item 2) ------------
     # A retry of this EXACT (run_key, day_index) reuses the response
@@ -2655,17 +2692,23 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         print(f"  REPLAYING checkpointed response for day_index={day_index} "
               "-- no new Hermes call, no quota charged")
     else:
-        # PHASE 0 REPAIR: count the quota slot the instant Hermes is
-        # actually invoked (inside _call_hermes), not after this whole
-        # cycle finishes. `invoked` guards against double-counting a
-        # JSON-parse retry (2 real _call_hermes calls, still 1 cycle's
-        # quota) -- see ask_hermes.
-        invoked = {"done": False}
-
+        # PHASE 0 REPAIR: count the instant Hermes is actually invoked
+        # (inside _call_hermes), not after this whole cycle finishes.
+        #
+        # 2026-08-31: the 175-call weekly GATE was removed (never a real
+        # OpenAI limit -- see quota_pacer.py) and this counter is now pure
+        # observability, so it counts every real invocation separately,
+        # including a JSON/semantic retry within the same cycle (2 real
+        # _call_hermes calls this cycle now record as 2, not deduped to 1
+        # "quota slot" -- there's no slot concept left to dedupe against).
+        # `pacer.record_cycle` is observability-only: a corrupt/unreadable
+        # local state file must never block a cycle whose real Hermes call
+        # already succeeded, so failures here are swallowed, not raised.
         def mark_invoked() -> None:
-            if not invoked["done"]:
+            try:
                 pacer.record_cycle()
-                invoked["done"] = True
+            except Exception:
+                pass
 
         try:
             response = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day,
@@ -3011,13 +3054,12 @@ def main() -> None:
     completed = 0
     run_usage = {"total_tokens": 0, "api_calls": 0, "estimated_cost_usd": 0.0}
     while completed < args.days and cursor <= end:
-        if not pacer.can_run_cycle():
-            print(
-                f"\nQUOTA PACER: weekly budget spent "
-                f"({pacer.used_this_week()}/{pacer.budget}). "
-                f"Resume on {pacer.next_week_starts()}."
-            )
-            break
+        # 2026-08-31: the 175/week GATE is removed -- it was a guessed
+        # local safety brake, never a real OpenAI limit, and real usage
+        # (125 cycles, run 1) stayed at 1-3% of the visible weekly
+        # allowance. `pacer` still counts real invocations for
+        # observability (see mark_invoked in run_day) -- it just no
+        # longer stops the loop. See quota_pacer.py.
         if cursor.weekday() >= 5:
             cursor += timedelta(days=1)
             continue
@@ -3101,8 +3143,9 @@ def main() -> None:
     final = portfolio.equity_curve[-1]
     print(f"\n{'=' * 70}")
     print(f"run_id: {run_id}")
-    print(f"cycles this run: {completed} | quota used this week: "
-          f"{pacer.used_this_week()}/{pacer.budget}")
+    _weekly_used = pacer.used_this_week()
+    print(f"cycles this run: {completed} | Hermes invocations this week: "
+          f"{_weekly_used if _weekly_used is not None else 'unknown (state unreadable)'}")
     print(f"equity ${final:,.2f} ({(final / STARTING_EQUITY - 1) * 100:+.2f}%) "
           f"| open {len(portfolio.holdings)} | closed {len(portfolio.closed_pnl)}")
     if completed:

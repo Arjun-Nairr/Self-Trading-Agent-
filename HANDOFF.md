@@ -66,17 +66,32 @@ are unchanged. The prior version is preserved at
 one-share position-sizing defect, and it was fixed.** A follow-up
 `--reset` attempt (`run_id c55f0fc2-...`) then hit a **second, different
 bug** — a real crash on cycle 1 (`ask_hermes`'s usage-token accumulator
-threw on an explicit-`null` field). **That bug is now fixed** (null usage
+threw on an explicit-`null` field). **That bug was fixed** (null usage
 fields coerce to 0; regression test added), and a third `--reset` smoke
-test (`run_id 1bf9af3d-8375-45b2-8cdb-313fd56832d5`) **completed all 3
-cycles cleanly** — real sizing enforcement, real cash reservation, real
-rejections, real dashboard verification, zero unexpected errors. **None of
-the three run_ids above should be resumed** — the first two are defective/
-superseded, and the third is a completed 3-cycle smoke test, not a resumable
-partial run; the next attempt starts its own fresh `run_id` via `--reset`.
-**Full training is safe to begin.** See the dated sections near the bottom
-of this file for the complete story of all three attempts, and "Exact next
-step" for what a full run needs before it starts.
+test (`run_id 1bf9af3d-...`) completed all 3 cycles mechanically clean —
+but its own persisted reasoning showed **a third, more subtle defect**:
+Hermes was sizing every BUY off the *superseded* 1% §2a risk budget, not
+the currently-active 2% (the prompt never actually stated the real
+percentages or formulas, so Hermes filled the gap from its own general
+notion of a "typical" risk rule). Fixed by rendering the real, currently-
+active `RiskLimits` values and formulas directly into every prompt. **A
+fourth `--reset` smoke test (`run_id 81db75e5-f9e9-48df-8bf1-0a2f581d3db8`)
+confirmed the fix** — every persisted BUY reasoning now explicitly computes
+`§2a size = floor(100000*0.02/...)`, the real 2%.
+
+**The separate, artificial 175-call weekly quota GATE has also been
+removed** (user-approved; real usage never approached it — see below).
+Local invocation counting is preserved for observability only; the
+dashboard now shows a truthful "Hermes invocations this week: N," never a
+`/175` denominator.
+
+**None of the four run_ids above should be resumed** — the first three
+are defective/superseded, and the fourth is a completed 3-cycle smoke
+test, not a resumable partial run; the next attempt starts its own fresh
+`run_id` via `--reset`. **Full training is safe to begin.** See the dated
+sections near the bottom of this file for the complete story of all four
+attempts, and "Exact next step" for what a full run needs before it
+starts.
 
 ---
 
@@ -895,27 +910,168 @@ order. **No trace of the old `97d112e8-...` pilot data anywhere on the
 page** — the crash-caused staleness from the previous attempt is gone now
 that a real snapshot exists for the dashboard to key off.
 
-**No other defect appeared.** Nothing beyond the fixed bug needed
-stopping-and-documenting this time.
+**No other defect appeared at the time.** Nothing beyond the fixed bug
+needed stopping-and-documenting in that pass.
 
-**Whether full training is safe to begin: YES.** The `_accumulate` bug is
-fixed and regression-tested, a fresh `--reset` run completes 3-for-3 real
-cycles with correct sizing, cash reservation, duplicate prevention,
-journaling, and dashboard behavior, and the old runs remain untouched.
+> **⚠ SUPERSEDED.** This section's "training is safe to begin: YES" was
+> wrong — not because the `_accumulate` fix was bad (it wasn't), but
+> because this same smoke test's own persisted reasoning contained a
+> THIRD defect nobody had checked for yet: Hermes was sizing every BUY
+> off a stale 1% §2a risk budget, not the real, active 2%. See the next
+> section for the full story, the fix, and the actually-current answer.
+
+### 2026-08-31 — third defect found: Hermes was sizing off a stale 1% §2a budget, not the real 2%; fixed, and the 175/week quota gate removed
+
+**How this was found.** Nothing crashed and nothing was rejected for
+being wrong-sized in the previous smoke test (`1bf9af3d-...`) — it looked
+completely clean by cycle-count alone. Only reading the actual persisted
+reasoning on the ATI decision showed the tell: `§2a stop-based size =
+floor(100000*0.01/(152.84-145.20))` — **0.01**, i.e. 1%, when RULES.md's
+Phase 1 profile has run at **2%** since before that pilot even started.
+Day 2's two rejections corroborated it independently: Hermes proposed
+407 and 259 shares, exactly HALF the real required 814 and 518 — the
+signature of computing against a 1% budget instead of 2%. ATI's own
+BUY only happened to pass earlier because the 20% concentration cap
+(unaffected by this bug) coincidentally produced the same final quantity
+as the correct 2% calculation would have, masking the defect in that one
+case.
+
+**Root cause.** `build_prompt` (`backtest-harness/run_backtest.py`) told
+Hermes to compute "§2a stop-based size" but never actually stated the
+real percentage or the formula — no number, no arithmetic, nothing to
+anchor against. Hermes filled that gap from its own general training-data
+notion of a "typical" risk-per-trade rule (1% is the common textbook
+default), not from anything this project ever told it. This was latent
+since Phase 1 shipped 2% — RULES.md/`risk_checker.py`/`AGENTS.md` all
+correctly say 2%, but the ONE place Hermes actually reads live numbers
+from (the prompt) never passed that number through.
+
+**Fix.** `build_prompt` now takes the same `RiskLimits` instance
+`run_day`'s own decision-time checker (`required_entry_quantity`/
+`check_trade`) enforces — never an independent copy of the numbers — and
+renders a real **POSITION SIZING** block into every prompt: the actual
+`risk_budget_pct`/`max_position_pct`/cash-only rule, plus all three
+formulas spelled out (`stop-based size = floor(equity * (X/100) /
+(entry-stop))`, `concentration size = floor(equity * (Y/100) / entry)`,
+`cash size = floor(remaining_cash / entry)`, `required quantity = min(...)`).
+Because it reads from the live `RiskLimits` object rather than literals,
+this stays correct automatically if a future approved `RULES.md` change
+alters the active profile — no `RULES.md`, `risk_checker.py`, or strategy
+number was touched to fix this.
+
+**Regression test added** —
+`test_build_prompt_sizing_block_reads_the_active_limits_not_hardcoded_defaults`
+in `test_execution_semantics.py`: builds a prompt with a deliberately
+non-default `RiskLimits(risk_budget_pct=7.5, max_position_pct=33.0)` and
+asserts those exact values and formulas appear (and the old 2.0/20.0
+defaults do NOT leak in) — proving the block reads the supplied instance,
+not a second hard-coded copy.
+
+**Separately, the 175/week quota GATE was removed** (user-approved): it
+was always a guessed local safety brake, never a real OpenAI limit, and
+real usage (125 cycles, run 1) stayed at roughly 1–3% of the visible
+weekly ChatGPT Plus allowance. `quota_pacer.py` was simplified to a pure
+ISO-week invocation counter — `can_run_cycle`/`budget`/
+`remaining_this_week`/`next_week_starts` removed entirely, nothing reads
+a threshold to decide whether to keep running. Every real invocation
+(including a JSON/semantic retry — previously deduped to "1 quota slot
+per cycle," now counted separately since there's no slot concept left to
+dedupe against) still increments the counter, and the counter is now
+explicitly best-effort: a corrupt/unreadable local state file is caught
+and swallowed at the call site (`run_day`'s `mark_invoked`) rather than
+raised, so a broken counter can never block a cycle whose real Hermes
+call already succeeded. The dashboard's "Weekly quota — used/175 cycles"
+progress bar is now "Hermes invocations this week: N," with no
+denominator and no claim of being an official OpenAI figure. The
+historical `weekly_budget` Neon column is left in place for compatibility
+(no destructive schema change) but is no longer populated with a
+meaningful number (`NULL` going forward).
+
+**Verification — full local suite, real commands, real output, from
+`backtest-harness`:**
+
+```
+python -m py_compile run_backtest.py test_execution_semantics.py quota_pacer.py test_quota_pacer.py   # clean
+python test_execution_semantics.py   # PASS — 184 checks, incl. the new sizing-block test and 2 new mark_invoked tests
+python test_quota_pacer.py           # PASS — 7 checks (rewritten: pure counting + ISO-week rollover + fail-closed-on-corrupt, no blocking-threshold assertions)
+python test_anonymize.py             # PASS
+python test_counterfactual.py        # OK — 32 checks
+python test_geometry_scan.py         # OK — 28 checks
+python test_execution_path.py        # PASS
+```
+
+**Smoke test — exact command, from `backtest-harness`:**
+```
+python run_backtest.py --start 2026-02-17 --end 2026-08-14 --days 3 --reset
+```
+
+**Result: all 3 cycles completed. No crash, no unexpected error, no
+quota-gate message anywhere in the output.** New
+`run_id 81db75e5-f9e9-48df-8bf1-0a2f581d3db8`.
+
+- **Day 1** — BUY ALGM x479, BUY DINO x353 queued (both accepted).
+- **Day 2** — BUY ALGM x518, BUY DINO x396 queued — **the exact correct
+  2%-based quantities this time**, not the stale 1%-based 259/407 from
+  the prior run. Both later rejected at execution under real §6a (stop no
+  longer below the real next-day entry).
+- **Day 3** — 4 new BUYs queued (ALGM x551, OLN x836, WMG x688, PLNT
+  x219); ALGM separately rejected for a real §6a min-stop-distance
+  breach (2.08% vs the 3.0% floor) and DINO for a real §2b concentration
+  breach (20.34% vs the 20.00% cap) — both genuine, deterministic
+  risk-checker rejections, not fabricated.
+- **Every single persisted BUY's reasoning this run explicitly shows
+  `§2a ... size = floor(100000*0.02/...)` or the equivalent
+  `floor(2000/...)` (2% of $100,000 = $2,000) — real, verified via a
+  direct Neon query of `trades.strategy_notes`, not sampled or assumed.**
+  The stale 1% figure never appears anywhere in this run's reasoning.
+- **Cash reservation across same-response BUYs verified directly in the
+  reasoning text**, not just inferred: Day 3's OLN cites "cash size ...
+  after the INDIA buy," WMG cites "... after the INDIA and LIMA buys,"
+  PLNT cites "... after the INDIA, LIMA, and DELTA buys" — the running
+  cash figure compounds correctly across all four same-cycle BUYs.
+- **No duplicate-ticker BUY within any single cycle** — verified from
+  real per-decision timestamps (each day's distinct tickers land 4–15
+  seconds apart; no ticker repeats within one day's cluster).
+- **Old run_ids confirmed untouched** in Neon (unchanged from the prior
+  verification pass).
+- **Quota, real and observable, no gate anywhere:** printed as `Hermes
+  invocations this week: 6` (3 from the earlier `1bf9af3d-...` smoke test
+  + 3 from this one, same real ISO week) — no "QUOTA PACER" message, no
+  halt, at any point.
+
+**Dashboard verification (loaded live, `http://127.0.0.1:8842`, zero
+console errors after a hard reload — an earlier same-session read had a
+stale browser-cached pre-edit copy of `index.html`, corrected by
+reloading, not a real defect):** shows the new run as current — "3 cycles
+recorded," Day 3, $100,000.00 cash/equity, all four Day-3 BUYs with their
+real, truthful §2a/§2b arithmetic in each one's own reasoning text, real
+§6a/§2b rejection counts (§6a: 3, §2b: 1) in the "blocked by rule" panel,
+and **"HERMES INVOCATIONS THIS WEEK: 6" with no `/175` or any other
+denominator** in the run-progress panel — the old quota bar and its
+"MODEL USAGE & QUOTA" panel's implicit ceiling are gone.
+
+**No other defect appeared.** Nothing beyond the two fixed issues (1%
+sizing, quota gate) needed stopping-and-documenting this pass.
+
+**Whether full training is safe to begin: YES — now genuinely verified,**
+including the specific thing the PRIOR "YES" missed (real-percentage
+sizing correctness, not just cycle-count success).
 
 ## Exact next step
 
 **Full training is unblocked.** The next action is to start the real
-training batch with a fresh `--reset` (do not resume
-`1bf9af3d-8375-45b2-8cdb-313fd56832d5` or either prior run_id — this smoke
-test's 3 cycles were a validation pass, not the start of the real batch)
-and let it run the full `--start 2026-02-17 --end 2026-08-14` window
-rather than stopping at `--days 3`. Watch early cycles for the §6a
-stop-margin pattern seen in this smoke test (two queued BUYs rejected at
-execution because the stop sat at/above the real next-day entry) — the
-`AGENTS.md` stress-test guidance added in this pass targets exactly that,
-but it has not yet been observed across a real multi-day run. Tracked
-against the six-month target of 30–60 completed trades
+training batch with a fresh `--reset` (do not resume any of
+`97d112e8-...`, `c55f0fc2-...`, `1bf9af3d-...`, or
+`81db75e5-f9e9-48df-8bf1-0a2f581d3db8` — all four are superseded/
+completed smoke tests, not the start of the real batch) and let it run
+the full `--start 2026-02-17 --end 2026-08-14` window rather than
+stopping at `--days 3`. Watch early cycles for the §6a stop-margin
+pattern seen across both the third and fourth smoke tests (queued BUYs
+rejected at execution because the stop sat too close to or above the
+real next-day entry) — the `AGENTS.md` stress-test guidance added in the
+prior pass targets exactly that, but it has not yet visibly changed
+Hermes's stop placement across a real multi-day run; watch whether it
+does. Tracked against the six-month target of 30–60 completed trades
 (`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
 
 ---

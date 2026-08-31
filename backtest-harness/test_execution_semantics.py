@@ -37,7 +37,7 @@ from run_backtest import (
 from anonymize import RunMasking  # noqa: E402
 from quota_pacer import QuotaPacer  # noqa: E402
 from risk_checker import (  # noqa: E402
-    AccountState, Context, MarketClock, Position, ProposedTrade, check_trade,
+    AccountState, Context, MarketClock, Position, ProposedTrade, RiskLimits, check_trade,
 )
 
 
@@ -502,48 +502,94 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
               "rolling back, or replaying the cycle -- committed state is untouched")
 
 
-def test_mark_invoked_fires_exactly_once_per_cycle_even_with_a_retry():
-    """The quota-counting guarantee: a cycle that spends a real call and
-    then fails downstream (JSON parse, journaling, anything after) must
-    still count against the weekly budget -- but a JSON-retry within the
-    SAME cycle (2 real _call_hermes invocations) must still only count as
-    ONE cycle, matching the project's existing quota semantics."""
-    calls = []
+def test_mark_invoked_counts_each_real_invocation_separately():
+    """2026-08-31: the 175/week GATE was removed (never a real OpenAI
+    limit) and `pacer.record_cycle` is now pure observability, so run_day's
+    real `mark_invoked` closure was changed to count every real
+    _call_hermes invocation separately, INCLUDING a JSON/semantic retry
+    within the same cycle -- there's no more "one quota slot per cycle" to
+    dedupe against. Exercises the real run_day/mark_invoked closure with a
+    real (isolated) QuotaPacer, only ask_hermes/journal/observability I/O
+    faked -- proves 2 real invocations register as 2, not 1."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    quota_path = tmp_dir / "quota_pacer_state.json"
+    pacer = QuotaPacer(state_path=quota_path)
+    run_start = date(2026, 2, 17)
+    run_key = str(uuid.uuid4())
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
+    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
+                         seed=DEFAULT_MASKING_SEED)
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
 
-    def fake_record_cycle():
-        calls.append(1)
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, on_invoked=None):
+        # Simulate the real retry path: _call_hermes succeeds TWICE this
+        # cycle (a malformed first reply, a valid retry) -- both real.
+        if on_invoked is not None:
+            on_invoked()
+            on_invoked()
+        return {"decisions": [], "no_action_reason": "nothing qualified"}
 
-    invoked = {"done": False}
+    fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
+    fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
+                               "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
+                               "support": [95.0], "resistance": [110.0]}}
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
+         patch("run_backtest.fetch_news", return_value={"OLN": []}), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_snapshot_once", return_value=True), \
+         patch("run_backtest.log_activity"):
+        run_day(run_start, 0, portfolio, masking, watchlist, {}, pacer, run_key)
 
-    def mark_invoked():
-        if not invoked["done"]:
-            fake_record_cycle()
-            invoked["done"] = True
+    assert pacer.used_this_week() == 2, (
+        f"expected 2 real invocations counted (original + retry), got {pacer.used_this_week()}"
+    )
+    print("  ok  a cycle with a real retry (2 real _call_hermes invocations) records 2, not 1 -- "
+          "no per-cycle dedup left now that this is pure observability, not a quota slot")
 
-    # Simulate the retry path: _call_hermes invoked twice in one cycle.
-    mark_invoked()
-    mark_invoked()
-    assert len(calls) == 1, f"expected exactly 1 quota slot recorded, got {len(calls)}"
-    print("  ok  two real invocations within one cycle (original + JSON retry) count as ONE slot")
 
-    # And a downstream failure AFTER invocation must not un-count it --
-    # simulated by invoking, then "failing" (raising), and confirming the
-    # slot was already recorded before the failure.
-    invoked2 = {"done": False}
-    calls2 = []
+def test_mark_invoked_never_blocks_a_cycle_on_corrupt_quota_state():
+    """Missing/corrupt local usage-tracker state must not block training --
+    `pacer.record_cycle` is observability-only. A cycle whose real Hermes
+    call already succeeded must complete even if the quota file is
+    unreadable garbage."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    quota_path = tmp_dir / "quota_pacer_state.json"
+    quota_path.write_text("not valid json {{{")
+    pacer = QuotaPacer(state_path=quota_path)
+    run_start = date(2026, 2, 17)
+    run_key = str(uuid.uuid4())
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
+    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
+                         seed=DEFAULT_MASKING_SEED)
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
 
-    def mark_invoked2():
-        if not invoked2["done"]:
-            calls2.append(1)
-            invoked2["done"] = True
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, on_invoked=None):
+        if on_invoked is not None:
+            on_invoked()  # pacer.record_cycle() will raise internally on this corrupt file
+        return {"decisions": [], "no_action_reason": "nothing qualified"}
 
-    try:
-        mark_invoked2()
-        raise ValueError("simulated downstream failure (parsing/journaling/etc)")
-    except ValueError:
-        pass
-    assert len(calls2) == 1, "a downstream failure after invocation must not lose the quota count"
-    print("  ok  a downstream failure after invocation does not lose the already-recorded quota slot")
+    fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
+    fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
+                               "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
+                               "support": [95.0], "resistance": [110.0]}}
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
+         patch("run_backtest.fetch_news", return_value={"OLN": []}), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_snapshot_once", return_value=True), \
+         patch("run_backtest.log_activity"):
+        # Must not raise -- a corrupt observability-only file is never
+        # allowed to halt a cycle whose real Hermes call already succeeded.
+        working, summary, do_observability = run_day(
+            run_start, 0, portfolio, masking, watchlist, {}, pacer, run_key)
+    assert summary["no_action_reason"] == "nothing qualified" or summary["decisions"] == []
+    print("  ok  a corrupt quota-state file does not block or fail a cycle -- "
+          "usage tracking is observability-only")
 
 
 def test_working_copy_isolates_a_failed_cycle_from_the_caller_portfolio():
@@ -1188,6 +1234,37 @@ def test_build_prompt_renders_fresh_evidence_for_held_positions():
     # shows its base entry/current/stop/target line -- never fabricated.
     assert "BRAVO: 50 @ $50.00" in prompt
     print("  ok  a held position without fresh evidence still shows its base line, nothing invented")
+
+
+def test_build_prompt_sizing_block_reads_the_active_limits_not_hardcoded_defaults():
+    """2026-08-31: a real smoke test showed Hermes reasoning from a stale
+    1% §2a figure -- the prompt never stated the real percentage or
+    formula at all. This proves build_prompt renders whatever `limits`
+    instance it's actually given (non-default 7.5%/33.0%), not a second,
+    independently hard-coded 2.0/20.0 -- so a future approved RULES.md
+    change stays correct here automatically."""
+    account = {"equity": 100_000.0, "cash": 100_000.0, "exposure_pct": 0.0,
+              "daily_pl_pct": 0.0, "weekly_pl_pct": 0.0, "drawdown_pct": 0.0}
+    non_default = RiskLimits(risk_budget_pct=7.5, max_position_pct=33.0)
+    prompt = build_prompt("Day 1", account, [], [], [], limits=non_default)
+
+    assert "7.5% of equity risked per trade" in prompt
+    assert "33.0% of equity in one name" in prompt
+    assert "(7.5 / 100)" in prompt and "(33.0 / 100)" in prompt
+    # The stale defect this guards against: the OLD default values must
+    # NOT leak in when a non-default instance was explicitly supplied.
+    assert "2.0% of equity" not in prompt and "20.0% of equity in one name" not in prompt
+    print("  ok  the POSITION SIZING block renders the actual supplied RiskLimits values and "
+          "formulas, not a second hard-coded 2.0/20.0 copy")
+
+    # No `limits` argument at all still works (existing callers) and falls
+    # back to RiskLimits()'s own real default -- 2.0/20.0 today, whatever
+    # RiskLimits() itself says tomorrow.
+    default_prompt = build_prompt("Day 1", account, [], [], [])
+    default_limits = RiskLimits()
+    assert f"{default_limits.risk_budget_pct:.1f}% of equity risked per trade" in default_prompt
+    assert f"{default_limits.max_position_pct:.1f}% of equity in one name" in default_prompt
+    print("  ok  omitting `limits` falls back to RiskLimits()'s own real default, not a stale copy")
 
 
 # --------------------------------------------------------------------------

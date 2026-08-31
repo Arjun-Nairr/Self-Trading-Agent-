@@ -439,17 +439,20 @@ function renderBars(snaps) {
   const dayNum = latest?.day_label ? parseInt(latest.day_label.replace(/\D/g, ""), 10) || 0 : 0;
   const dayPct = Math.min(100, dayNum / WINDOW_DAYS * 100);
 
-  // Single source of truth: quota_pacer.py's own real count and budget, as
+  // Single source of truth: quota_pacer.py's own real ISO-week count, as
   // of the latest cycle, mirrored onto that snapshot row by run_backtest.py
-  // (record_snapshot). NOT re-derived here -- a second independent count
-  // (e.g. "snapshots in the last 7 days") can silently disagree with the
-  // pacer's real ISO-week accounting (which also counts failed/retried
+  // (record_snapshot_once). NOT re-derived here -- a second independent
+  // count (e.g. "snapshots in the last 7 days") can silently disagree with
+  // the pacer's real accounting (which also counts failed/retried
   // invocations the moment Hermes is actually called, not after a cycle
   // fully succeeds -- see run_backtest.py's mark_invoked).
+  //
+  // 2026-08-31: the 175 weekly threshold this used to gate training on was
+  // never a real OpenAI limit, just a guessed local safety brake -- real
+  // usage stayed at 1-3% of the visible weekly allowance. Training no
+  // longer stops on it (see quota_pacer.py); this is now a plain, honest
+  // observability count, not a progress bar toward an artificial ceiling.
   const used = latest?.hermes_calls_used;
-  const budget = latest?.weekly_budget;
-  const quotaKnown = used != null && budget != null;
-  const quotaPct = quotaKnown ? Math.min(100, used / budget * 100) : 0;
 
   el("bars").innerHTML = `
     <div class="bar-cell">
@@ -457,8 +460,7 @@ function renderBars(snaps) {
       <div class="bar-track"><div class="bar-fill" style="width:${dayPct}%"></div></div>
     </div>
     <div class="bar-cell">
-      <div class="bar-head"><span>Weekly quota</span><span><b>${quotaKnown ? used : "—"}</b> / ${quotaKnown ? budget : "—"} cycles</span></div>
-      <div class="bar-track"><div class="bar-fill ${quotaPct>75?"warn":""}" style="width:${quotaPct}%"></div></div>
+      <div class="bar-head"><span>Hermes invocations this week</span><span><b>${used != null ? used : "—"}</b></span></div>
     </div>`;
 }
 

@@ -1,49 +1,33 @@
-"""
-quota_pacer.py — stops the backtest from blowing through the shared weekly
-ChatGPT Plus quota.
+"""quota_pacer.py — real, observability-only Hermes-invocation counting.
 
-THE PROBLEM: live trading self-paces (the market's only open certain hours,
-so there's a hard ceiling on how many decision cycles happen per real
-week). Backtesting has no such brake -- it can compress months of
-simulated trading into an afternoon, which could burn an entire week's
-quota in hours and starve every other use of the same ChatGPT account for
-the rest of that week.
+HISTORY: this used to be a hard weekly GATE (`can_run_cycle`/`budget`) that
+stopped the backtest loop once a locally-guessed weekly ceiling (last set to
+175) was hit -- a defensive brake against blowing through the shared
+ChatGPT Plus weekly quota. That ceiling was never a measured fact (see the
+git history on this file / HANDOFF.md's 2026-08-29 note): real usage across
+125 real cycles (run 1) stayed at roughly 1-3% of the visible weekly
+allowance in the ChatGPT app. 2026-08-31: the user reviewed that evidence
+and approved removing the gate entirely -- training no longer stops on a
+local invocation count, and this module does not invent a replacement
+number to stop on.
 
-THE APPROACH: count real cycles against a real calendar week (Monday-
-start, ISO week number -- an unambiguous, standard definition of "a week",
-not "7 days since I last checked"). Once the count hits the budget, stop
-signaling cycles as allowed until the next real week starts.
+WHAT THIS STILL DOES: count real Hermes invocations against a real calendar
+week (Monday-start, ISO week number -- an unambiguous, standard definition
+of "a week", not "7 days since I last checked"), purely so the dashboard
+and HANDOFF.md can report truthful usage. Nothing reads this count to
+decide whether to make the next call.
 
-STATE: a local JSON file, not Neon. This is NOT the same durability problem
-`decision_id` idempotency solves in trade-journal-mcp -- that needed
-Postgres because multiple systems (broker + journal) had to agree on one
-trade's state after a crash. This is a single sequential loop counting its
-own calls; a local file surviving a script restart is enough, and it
-avoids making a network call to Neon just to decide whether to make a
-network call to OpenAI.
-
-THE UNKNOWN, STATED PLAINLY: the real weekly quota ceiling is undocumented
-by OpenAI. `DEFAULT_WEEKLY_BUDGET` is a starting guess from the one real
-reference point this project has (~32 decisions/week was established as
-known-safe for live trading), not a measured fact. Watch real usage on the
-first backtest run and adjust -- see `record_cycle`'s return value.
+STATE: a local JSON file, not Neon -- same reasoning as before: a single
+sequential loop counting its own calls doesn't need Postgres-grade
+durability, and a local file surviving a script restart is enough.
 """
 
 import json
 import os
 import tempfile
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
-
-# ponytail: still a guess, not a measured ceiling -- but a less blind one
-# than 32. Raised after burning 32 real cycles in one sitting (2026-08-21)
-# and confirming directly in the ChatGPT app that weekly usage hadn't
-# moved -- real evidence the true limit is well above 32, just not proof
-# of exactly where. Sized as a step up worth actually testing against,
-# not a new arbitrary ceiling; watch real usage again at this level and
-# adjust -- same process as before, better starting point.
-DEFAULT_WEEKLY_BUDGET = 175
 
 _DEFAULT_STATE_PATH = Path(__file__).parent / "quota_pacer_state.json"
 
@@ -58,17 +42,14 @@ def _week_key(day: date) -> str:
 
 @dataclass
 class QuotaPacer:
-    budget: int = DEFAULT_WEEKLY_BUDGET
     state_path: Path = field(default_factory=lambda: _DEFAULT_STATE_PATH)
 
     def _load(self) -> dict | None:
         """Returns `None` specifically to mean "state is unreadable" --
         distinct from `{}` ("no file yet, legitimately fresh install").
         Callers must NOT treat these the same: a missing file is a normal
-        first run (correctly starts at 0 used); an unreadable file is a
-        corruption signal that must fail CLOSED (budget-exhausted), not
-        fail open as a fresh week -- see used_this_week/remaining_this_week.
-        """
+        first run (correctly starts at 0 used); an unreadable file means
+        the count for this week is simply unknown -- see used_this_week."""
         if not self.state_path.exists():
             return {}
         try:
@@ -78,14 +59,11 @@ class QuotaPacer:
 
     def _save(self, state: dict) -> None:
         """Write-to-temp-then-atomic-rename, not a direct write_text().
-        write_text() is NOT atomic -- a process killed mid-write (the exact
-        scenario this pacer exists to survive: getting cut off for hitting
-        quota mid-cycle) can leave a half-written, corrupt file. `os.replace`
-        is atomic on both POSIX and Windows for a same-directory rename, so
-        the old, valid state is never destroyed by an interrupted write --
-        readers see either the fully-old or fully-new file, never a partial
-        one. This is what actually prevents the corruption case, not just
-        the fail-closed fallback below (belt AND braces, not either/or)."""
+        write_text() is NOT atomic -- a process killed mid-write can leave
+        a half-written, corrupt file. `os.replace` is atomic on both POSIX
+        and Windows for a same-directory rename, so the old, valid state is
+        never destroyed by an interrupted write -- readers see either the
+        fully-old or fully-new file, never a partial one."""
         fd, tmp_path = tempfile.mkstemp(
             dir=self.state_path.parent, prefix=".quota_pacer_", suffix=".tmp"
         )
@@ -100,53 +78,38 @@ class QuotaPacer:
                 pass
             raise
 
-    def used_this_week(self, today: date | None = None) -> int:
-        """Cycles already recorded in the real calendar week containing
-        `today` (defaults to actual today). Unreadable state reports as
-        FULLY USED (== budget), not 0 -- fail closed, see _load."""
+    def used_this_week(self, today: date | None = None) -> int | None:
+        """Real invocations already recorded in the calendar week
+        containing `today` (defaults to actual today). `None` means the
+        local state file is unreadable -- distinct from a legitimate `0`
+        for a fresh week. This is pure observability now: unlike the old
+        gated design, an unreadable count must never be reported as a
+        number a caller could mistake for "budget exhausted, stop" -- it's
+        simply unknown."""
         today = today or date.today()
         state = self._load()
         if state is None:
-            return self.budget
+            return None
         return state.get(_week_key(today), 0)
 
-    def remaining_this_week(self, today: date | None = None) -> int:
-        return max(0, self.budget - self.used_this_week(today))
-
-    def can_run_cycle(self, today: date | None = None) -> bool:
-        """The check a backtest driver makes before EVERY cycle -- real
-        gate, not advisory. False means stop for this real week, not just
-        a warning to log."""
-        return self.remaining_this_week(today) > 0
-
     def record_cycle(self, today: date | None = None) -> int:
-        """Call exactly once per real Hermes invocation, immediately after
-        it completes (not before -- a cycle that never ran should never be
-        counted). Returns the new count for this week, so the caller can
-        log/alert as it approaches budget without a separate query.
+        """Call once per real Hermes invocation, immediately after it
+        completes (not before -- an invocation that never happened should
+        never be counted). Returns the new count for this week.
 
-        2026-08-29 correctness pass #4 (item 6): called AFTER a real
-        Hermes call already happened -- an unreadable state file used to
-        crash here with a bare AttributeError (`None.get`), with no
-        indication the failure was quota-state corruption specifically,
-        right after real quota was already spent. Named and explicit
-        instead: `can_run_cycle`/`used_this_week` already fail closed on
-        the same unreadable state (see `_load`); this raises the same
-        signal loudly rather than crashing blind.
-        """
+        Raises if local state is unreadable -- named loudly (not a bare
+        AttributeError) so a caller that chooses to treat this as
+        observability-only (see run_backtest.py's mark_invoked) can catch
+        it deliberately rather than by accident. This function itself does
+        NOT swallow the error: whether a broken counter should ever stop
+        real work is the caller's decision, not this module's."""
         today = today or date.today()
         key = _week_key(today)
         state = self._load()
         if state is None:
             raise RuntimeError(
-                "quota state unreadable — repair or delete the file; failing closed"
+                "quota state unreadable — repair or delete the file to resume counting"
             )
         state[key] = state.get(key, 0) + 1
         self._save(state)
         return state[key]
-
-    def next_week_starts(self, today: date | None = None) -> date:
-        """When a paused backtest can resume -- the coming Monday."""
-        today = today or date.today()
-        days_until_monday = (7 - today.weekday()) % 7 or 7
-        return today + timedelta(days=days_until_monday)
