@@ -79,19 +79,30 @@ fourth `--reset` smoke test (`run_id 81db75e5-f9e9-48df-8bf1-0a2f581d3db8`)
 confirmed the fix** — every persisted BUY reasoning now explicitly computes
 `§2a size = floor(100000*0.02/...)`, the real 2%.
 
-**The separate, artificial 175-call weekly quota GATE has also been
-removed** (user-approved; real usage never approached it — see below).
-Local invocation counting is preserved for observability only; the
-dashboard now shows a truthful "Hermes invocations this week: N," never a
-`/175` denominator.
+**The separate, artificial 175-call weekly quota GATE was removed, and
+then the local weekly invocation counter itself (`quota_pacer.py`) was
+removed entirely** — real per-cycle token/API-call metrics already
+covered everything it existed to surface, so it was redundant, not just
+unused. The dashboard's quota bar/panel wording is gone; "Model Usage"
+shows real token/retry/failed-cycle counts only.
 
-**None of the four run_ids above should be resumed** — the first three
-are defective/superseded, and the fourth is a completed 3-cycle smoke
-test, not a resumable partial run; the next attempt starts its own fresh
-`run_id` via `--reset`. **Full training is safe to begin.** See the dated
-sections near the bottom of this file for the complete story of all four
-attempts, and "Exact next step" for what a full run needs before it
-starts.
+**The real 25-cycle Round 2 training tranche has now run**
+(`run_id e68525f9-ce89-4588-a57e-866f28cd99fd`) — the first actual
+training dataset, not a smoke test. All 25 cycles completed cleanly, zero
+crashes, zero `cycle_failed` rows. 8 BUYs filled, 7 positions closed (2
+winners, 5 losers — realized P&L **−$2,350.33**, a **29% win rate on a
+sample of 7**, too small to draw any strategy conclusion from and this
+file does not draw one), 1 position still open. Every one of the run's 28
+persisted BUY reasoning entries used the real 2% §2a risk budget (0 used
+the stale 1%) — direct confirmation the earlier sizing fix holds across a
+real, longer run, not just a 3-cycle smoke test. **State is preserved for
+resuming this exact run** (`backtest_state.json` cursor at `2026-03-24`,
+no checkpoint left behind) — see the dated section near the bottom of
+this file for the complete numbers and **"Exact next step" for the real
+next action: evaluate this dataset, not blindly continue training.**
+
+**None of the prior four smoke-test run_ids should ever be resumed** —
+all four are superseded/completed smoke tests, not this real tranche.
 
 ---
 
@@ -1053,26 +1064,146 @@ denominator** in the run-progress panel — the old quota bar and its
 **No other defect appeared.** Nothing beyond the two fixed issues (1%
 sizing, quota gate) needed stopping-and-documenting this pass.
 
-**Whether full training is safe to begin: YES — now genuinely verified,**
-including the specific thing the PRIOR "YES" missed (real-percentage
-sizing correctness, not just cycle-count success).
+**Whether full training was safe to begin: YES — genuinely verified.**
+See the next section for what actually happened once it started.
+
+### 2026-08-31 — real 25-cycle Round 2 training tranche run; weekly invocation counter removed; dashboard polish
+
+**Cleanup before training (Stages 1–3 of this pass).** The already-removed
+175/week gate left behind a now-pointless local ISO-week invocation
+counter (`quota_pacer.py`) — deleted entirely, along with its test file
+and the `pacer`/`on_invoked` plumbing threaded through `run_backtest.py`
+(`run_day`, `_run_cycle_or_halt`, `log_cycle_failure`,
+`record_snapshot_once`, `ask_hermes`/`_call_hermes`, `main()`). Per-cycle
+token counts, API-call counts, and retry accounting are unchanged and
+still real. `hermes_calls_used`/`weekly_budget` Neon columns are left in
+place (nullable) for compatibility, no destructive migration. Stale
+"quota"/"pacer" wording refreshed in `run_backtest.py` comments,
+`PROJECT_FRESH_START.md`, `alpaca-mcp/server.py`, `risk_checker.py`, and
+`trade-journal-mcp/server.py`. Separately, a small **CSS-only** dashboard
+pass (no query/JS logic changed) improved mobile layout: tables scroll
+horizontally instead of breaking at narrow widths, a `<=480px` breakpoint
+tightens spacing and switches the stat grid to 2 columns, and the stale
+"Model Usage & Quota" heading (the quota half no longer existed) was
+corrected to "Model Usage." Verified live at desktop width and 390px
+mobile — zero console errors at both, no horizontal page overflow, every
+existing query/filter/run-isolation rule unchanged. Full local suite (5
+test files + `py_compile`) passed. Committed as `750d80d`.
+
+**Exact command, from `backtest-harness`:**
+```
+python run_backtest.py --start 2026-02-17 --end 2026-08-14 --days 25 --reset
+```
+
+**Result: all 25 cycles completed successfully. Zero crashes, zero
+`cycle_failed` rows, `EXIT=0`.** New `run_id e68525f9-ce89-4588-a57e-866f28cd99fd`.
+Real trading days 2026-02-17 → 2026-03-23 (the harness's internal
+day-label reached "Day 35" because weekends/holidays consume a day-index
+slot without producing a cycle — 25 real cycles is the true count, matching
+`portfolio_snapshots`' row count for this run_id exactly).
+
+**Trade counts (Neon, scoped to this `run_id`, read-only):**
+- BUY: 8 filled, 20 rejected (28 total proposals)
+- SELL: 7 filled (6 mechanical exits — stop/time-stop — plus 1 real
+  discretionary exit, WMG, on Hermes's own "stop is already broken"
+  reasoning)
+- 1 position still open (pending, unrealized): DINO x324 @ $59.44 entry
+- 35 `trades` rows total; 29 `order_queued` activity events (28 BUY + 1
+  SELL)
+
+**P&L / equity (as of the final, 25th snapshot):**
+- Realized P&L: **−$2,350.33** (2 winners: SFM +$1,321.58, OLN +$776.44 —
+  both time-stops; 5 losers: WMG −$644.16, PLNT −$1,811.13, OLN −$635.70,
+  DINO −$603.63, ATI −$755.04)
+- Unrealized P&L (open DINO position): −$58.32
+- Equity: $97,590.04 (**−2.41%** total return) — Cash: $78,389.79 —
+  Exposure: 19.67% — Drawdown: −2.41% — Max drawdown: −2.46%
+- **These are ordinary losses from real trading, not a defect** — the
+  task's own instruction was explicit not to stop for this, and nothing
+  here is anomalous (real stop-outs, a real gap, a real time-stop cycle).
+
+**Rejection breakdown by RULES.md section** (`agent_activity`,
+`risk_check` + `order_rejected` event types, both decision-time and
+execution-time rejections, scoped to this run_id):
+- §2b (concentration cap): 29
+- §6b (reward:risk floor): 10
+- §6a (stop-distance floor — includes the specific stop-gap/execution
+  category, "stop must sit below entry"/"ordinary noise would trigger
+  it"): 6
+- §3 (cash): 3
+- §2 (general sizing mismatch): 3
+
+**Stop-gap/execution-rejection frequency specifically: 6 of 51
+section-tagged rejections (~12%) were §6a** — the class of rejection the
+`AGENTS.md` stress-test guidance (added in the prior pass) targets. One
+BUY reasoning entry in this run explicitly referenced "the ~3% adverse-gap
+check" by name, real evidence Hermes is applying that guidance — but §6a
+rejections did not disappear, so the guidance is a real influence, not a
+complete fix, and shouldn't be reported as having solved the pattern.
+
+**Confidence distribution** (28 BUY decisions with confidence recorded):
+confidence 3 → 18, confidence 4 → 10. No 1, 2, or 5 seen this tranche.
+
+**Closed-trade sample size: 7.** **Explicitly too small for any strategy
+conclusion** — 29% win rate, 2 wins / 5 losses, is a real observed number
+for this exact sample and nothing more; RULES.md's own reflection
+discipline (never draw a pattern from a tiny sample) applies here with the
+same force it applies to Hermes's own reflection cycles.
+
+**Token / API-call totals (sum across all 25 real snapshots, matches the
+console's own running total exactly):** 1,038,519 total tokens
+(41,541 avg/cycle) — input 209,344, output 200,439, reasoning 185,180,
+cache-read 628,736 — 35 real API calls (10 retries beyond the 25 base
+calls) — 0 failed cycles.
+
+**Sizing correctness, verified directly, not assumed:** all 28 persisted
+BUY `strategy_notes` rows were checked by direct query — 0 contain the
+stale bare `0.01`; every one computes against the real 2% budget (either
+literally `*0.02`/`2%`, or the equivalent `$1,992.85`-style absolute
+figure for `2% of that moment's real equity`, which moves as trades
+close). The Problem 1 fix holds across a real 25-cycle run, not just the
+prior 3-cycle smoke test.
+
+**Dashboard verification:** loaded live, zero console errors, numbers
+match the Neon queries above exactly (25 cycles, Day 35, $97,590.04
+equity, 1 open / 7 closed, 29% win rate n=7, real token/retry counts, no
+quota bar or "& Quota" heading anywhere).
+
+**No genuine integrity issue found.** Specifically checked and clear: no
+duplicate-ticker BUY proposed within any single cycle; cash reservation
+across same-cycle multi-BUY responses correct (visible directly in
+reasoning text, e.g. Day 17's 5-way BUY response and Day 4's 3-way
+response both show the running cash figure compounding correctly);
+`hermes_calls_used`/`weekly_budget` are `NULL` on every new snapshot,
+confirming the counter removal is live in the real path, not just in
+tests; all four prior smoke-test run_ids' Neon row counts are byte-for-
+byte unchanged from their last-verified values — nothing was
+cross-contaminated.
+
+**Exact command to resume this same run (no `--reset`):**
+```
+python run_backtest.py --start 2026-02-17 --end 2026-08-14 --days <N>
+```
+`backtest_state.json`'s stored `run_id`/cursor (`2026-03-24`) will be
+reused automatically — passing `--reset` here would incorrectly start a
+FIFTH, unrelated run and must not be done.
 
 ## Exact next step
 
-**Full training is unblocked.** The next action is to start the real
-training batch with a fresh `--reset` (do not resume any of
-`97d112e8-...`, `c55f0fc2-...`, `1bf9af3d-...`, or
-`81db75e5-f9e9-48df-8bf1-0a2f581d3db8` — all four are superseded/
-completed smoke tests, not the start of the real batch) and let it run
-the full `--start 2026-02-17 --end 2026-08-14` window rather than
-stopping at `--days 3`. Watch early cycles for the §6a stop-margin
-pattern seen across both the third and fourth smoke tests (queued BUYs
-rejected at execution because the stop sat too close to or above the
-real next-day entry) — the `AGENTS.md` stress-test guidance added in the
-prior pass targets exactly that, but it has not yet visibly changed
-Hermes's stop placement across a real multi-day run; watch whether it
-does. Tracked against the six-month target of 30–60 completed trades
-(`docs/PHASE1_AGGRESSIVE_DESIGN.md`).
+**Evaluate this 25-cycle dataset before deciding whether to continue
+training — do not extend the run merely because it ran cleanly.** The
+harness/infrastructure side is now thoroughly proven (four smoke tests
+plus one real 25-cycle tranche, all mechanically clean); what's still
+genuinely uncertain is judgment quality, and 7 closed trades is not
+enough evidence to assess it. Do not resume any of the five run_ids
+above without an explicit decision to continue THIS SPECIFIC run (the
+resume command above, not `--reset`). If continuing, watch whether the
+§6a stop-margin rate (6/51 this tranche) trends up or down as more
+cycles accumulate, and whether the AGENTS.md stress-test guidance's
+effect becomes clearer with more sample. Tracked against the six-month
+target of 30–60 completed trades (`docs/PHASE1_AGGRESSIVE_DESIGN.md`) —
+7 closed trades is early progress toward that, not yet meaningful
+evidence either way.
 
 ---
 
