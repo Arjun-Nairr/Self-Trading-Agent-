@@ -2147,6 +2147,23 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     return "\n".join(lines)
 
 
+def _candidate_status(candidates: list[dict], response: dict) -> list[dict]:
+    """Structural candidate_status -- an eligible candidate is 'proposed'
+    iff its alias appears in the validated response's own decisions list,
+    never an inference parsed out of Hermes' free-text reasoning. Pure and
+    takes `candidates`/`response` explicitly so a checkpoint replay (which
+    passes the CHECKPOINTED input_payload["candidates"] and response, never
+    a freshly re-fetched `candidates` local) produces byte-identical status
+    to the original attempt -- see run_day's checkpoint-replay branch."""
+    proposed_aliases = {
+        d.get("alias") for d in response.get("decisions", []) if isinstance(d, dict)
+    }
+    return [
+        {"alias": c["alias"], "status": "proposed" if c["alias"] in proposed_aliases else "no_proposal"}
+        for c in candidates
+    ]
+
+
 @dataclass(frozen=True)
 class HermesResult:
     """ask_hermes's real return shape -- the validated response plus enough
@@ -2244,6 +2261,26 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False)
         usage_totals["estimated_cost_usd"] = (
             (usage_totals.get("estimated_cost_usd") or 0.0) + (usage.get("estimated_cost_usd") or 0.0)
         )
+        # 2026-08-31 (gap fix): identity fields, not numeric -- copied
+        # verbatim when a real usage payload actually supplies one, never
+        # summed/derived. A retry reporting a DIFFERENT non-null identity
+        # for the same field than an earlier attempt this cycle is a real
+        # ambiguity (which one actually produced the final response?) --
+        # fails loudly rather than silently keeping whichever happened to
+        # write last. Absent from every attempt -> stays absent (None),
+        # never defaulted to the currently configured model.
+        for key in ("model", "provider", "reasoning_effort"):
+            value = usage.get(key)
+            if value is None:
+                continue
+            existing = usage_totals.get(key)
+            if existing is not None and existing != value:
+                raise ValueError(
+                    f"conflicting {key} across retry attempts for this cycle: "
+                    f"{existing!r} (earlier attempt) vs {value!r} (this attempt) -- "
+                    "refusing to store an ambiguous runtime identity"
+                )
+            usage_totals[key] = value
 
     raw, usage = _call_hermes(prompt)
     _accumulate(usage)
@@ -2788,10 +2825,20 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # The exact masked structured objects build_prompt is about to render --
     # passed straight through to record_cycle_evidence later, never
     # reconstructed from a different source (evidence instrumentation).
+    # active_limits, JSON-safe -- the exact RiskLimits values that shaped
+    # build_prompt's own rendering below, taken from the SAME instance, not
+    # a second hard-coded copy (gap fix: these numbers materially affect
+    # the prompt but were previously absent from the structured evidence).
+    active_limits_payload = {
+        "risk_budget_pct": active_limits.risk_budget_pct,
+        "max_position_pct": active_limits.max_position_pct,
+        "min_reward_risk": active_limits.min_reward_risk,
+    }
     input_payload = {
         "day_label": masking.day_index(day), "account": account_view,
         "positions": positions_view, "candidates": candidates,
         "recent_insights": recent_insights, "reflection_trades": reflection_trades,
+        "active_limits": active_limits_payload,
     }
     prompt = build_prompt(masking.day_index(day), account_view,
                           positions_view, candidates, recent_insights,
@@ -2855,13 +2902,13 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # uncaught, halting the cycle -- the checkpoint (already saved above,
     # on both the fresh and replay paths reaching this point) means a
     # rerun replays this exact write without a second Hermes call.
-    proposed_aliases = {
-        d.get("alias") for d in response.get("decisions", []) if isinstance(d, dict)
-    }
-    candidate_status = [
-        {"alias": c["alias"], "status": "proposed" if c["alias"] in proposed_aliases else "no_proposal"}
-        for c in candidates
-    ]
+    # input_payload["candidates"] -- NOT the local `candidates` variable --
+    # so a checkpoint replay (whose input_payload came from the checkpoint,
+    # not this attempt's freshly re-fetched local) derives statuses from
+    # exactly what was checkpointed, identically to the original attempt
+    # (gap fix: a rerun that fetched different candidates locally must not
+    # be able to alter the evidence record).
+    candidate_status = _candidate_status(input_payload["candidates"], response)
     usage_for_evidence = summary["usage"] or {}
     record_cycle_evidence(
         cycle_id=cycle_id, run_id=run_key, day_label=masking.day_index(day),

@@ -576,12 +576,13 @@ unchanged from the original calculation.
 | DINO #2 | 60.22 | 59.44 | −0.78 | −1.30% |
 
 7 of 8 filled BUYs' next-day fill landed below the decision-day proposed
-price -- a real, consistent pattern, not noise, and **price-favourable for
-the entry itself** (a long that fills cheaper than it was proposed at is a
-better fill, not a worse one). It is also consistent with the watchlist
-skewing toward names with real overnight softness between the decision day
-and the fill day -- a pattern worth investigating on its own terms, not as
-an execution-quality complaint. (See §5, item 5's caveat that "proposed"
+price, and **price-favourable for the entry itself** (a long that fills
+cheaper than it was proposed at is a better fill, not a worse one). **Eight
+observations are too few to distinguish a repeatable pattern from noise** --
+this dataset does not support a claim about *why* fills skew lower, only
+that they did seven of eight times in this tranche. The finding here is
+that this metric is worth tracking across future tranches, not an
+explanation of its cause now. (See §5, item 5's caveat that "proposed"
 here is a derived, not directly stored, figure -- a gap this instrumentation
 task's own Implementation Decision 4 closes going forward by persisting
 `proposed_entry_price` directly.)

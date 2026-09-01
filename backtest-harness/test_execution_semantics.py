@@ -25,7 +25,8 @@ from run_backtest import (
     PROFILE_BASE, PROFILE_ESCALATED, PROFILE_LEGACY, PROFILE_MIN_REWARD_RISK,
     STARTING_EQUITY, TIME_STOP_TRADING_DAYS,
     Holding, HermesResult, Portfolio, QueuedOrder, ResponseValidationError, ask_hermes,
-    PROMPT_SCHEMA_VERSION, _atomic_write_json, _clear_checkpoint, _expected_session_bar_times,
+    PROMPT_SCHEMA_VERSION, _atomic_write_json, _candidate_status, _clear_checkpoint,
+    _expected_session_bar_times,
     _file_sha256, _limits_for_profile,
     _load_checkpoint, _maybe_advance_activity_block, _record_trade_completion,
     _resolve_seed, _resolve_window, _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
@@ -2387,6 +2388,174 @@ def test_load_checkpoint_stays_readable_without_the_new_optional_evidence_fields
     assert loaded.get("attempt_count") is None
     print("  ok  an old-shaped checkpoint (missing the new optional evidence fields) "
           "remains safely readable via .get(..., default)")
+
+
+def test_checkpoint_replay_derives_candidate_status_from_the_checkpoint_not_a_fresh_fetch():
+    """Gap fix 1 -- a checkpoint replay with deliberately DIFFERENT newly
+    fetched candidates must still produce candidate statuses from the
+    CHECKPOINTED input_payload/response, never the fresh local `candidates`
+    the replay attempt happens to (re-)fetch."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    run_start = date(2026, 2, 17)
+    run_key = str(uuid.uuid4())
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}, {"symbol": "DINO", "sector": "Energy"}]
+    masking = RunMasking(
+        {"OLN": ["Olin Corporation", "Olin"], "DINO": ["HollyFrontier Corporation", "HollyFrontier"]},
+        run_start=run_start, seed=DEFAULT_MASKING_SEED,
+    )
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
+
+    fake_bars = {t: {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5} for t in ("OLN", "DINO")}
+    both_technicals = {t: {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
+                           "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
+                           "support": [95.0], "resistance": [110.0]} for t in ("OLN", "DINO")}
+    # Replay-time fetch deliberately returns a DIFFERENT candidate set (DINO
+    # dropped) -- must have zero effect on the recorded evidence.
+    only_olin_technicals = {"OLN": both_technicals["OLN"]}
+
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+        return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualified"},
+                            attempt_count=1, retry_diagnostics=[])
+
+    evidence_attempts = {"n": 1}
+    evidence_calls = []
+
+    def fake_record_cycle_evidence(**kwargs):
+        evidence_calls.append(kwargs)
+        if evidence_attempts["n"] > 0:
+            evidence_attempts["n"] -= 1
+            raise RuntimeError("simulated evidence-write failure")
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=both_technicals), \
+         patch("run_backtest.fetch_news", return_value={"OLN": [], "DINO": []}), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_cycle_evidence", side_effect=fake_record_cycle_evidence):
+        try:
+            run_day(run_start, 0, portfolio, masking, watchlist, {}, run_key)
+            raise AssertionError("expected the simulated evidence-write failure to propagate")
+        except RuntimeError:
+            pass
+
+        # Replay -- now with a DIFFERENT fresh technicals fetch (DINO missing).
+        with patch("run_backtest.fetch_technicals", return_value=only_olin_technicals):
+            run_day(run_start, 0, portfolio, masking, watchlist, {}, run_key)
+
+    assert len(evidence_calls) == 2
+    original, replay = evidence_calls
+    replay_aliases = {c["alias"] for c in replay["candidate_status"]}
+    assert replay_aliases == {masking.alias("OLN"), masking.alias("DINO")}, (
+        "the replay must derive candidate_status from the checkpointed candidates "
+        "(both OLN and DINO), not the freshly (re-)fetched set (OLN only)"
+    )
+    # Testing Decision #2 -- fresh (original) and replayed evidence must be
+    # byte-identical, not merely "close": prompt, structured inputs, and
+    # derived statuses all match exactly.
+    assert replay["candidate_status"] == original["candidate_status"]
+    assert replay["input_payload"] == original["input_payload"]
+    assert replay["prompt_text"] == original["prompt_text"]
+    assert replay["cycle_id"] == original["cycle_id"]
+    print("  ok  checkpoint replay's candidate_status comes from the checkpointed "
+          "input_payload/response, immune to a differently-fetched local `candidates`, "
+          "and the fresh vs. replayed evidence payloads are byte-identical")
+
+
+def test_active_limits_reflects_a_non_default_risklimits_instance():
+    """Gap fix 2 -- input_payload["active_limits"] must reflect the ACTUAL
+    RiskLimits instance passed to build_prompt, not a hard-coded default --
+    proven here by escalating the profile (min_reward_risk 1.5 -> 1.25)."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    run_start = date(2026, 2, 17)
+    run_key = str(uuid.uuid4())
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
+    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
+                         seed=DEFAULT_MASKING_SEED)
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6,
+                          profile_level=PROFILE_ESCALATED)
+    fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
+    fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
+                               "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
+                               "support": [95.0], "resistance": [110.0]}}
+
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+        return HermesResult(response={"decisions": [], "no_action_reason": "n/a"},
+                            attempt_count=1, retry_diagnostics=[])
+
+    evidence_calls = []
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
+         patch("run_backtest.fetch_news", return_value={"OLN": []}), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_cycle_evidence", side_effect=lambda **kw: evidence_calls.append(kw)), \
+         patch("run_backtest.record_queued_decision", return_value=None), \
+         patch("run_backtest.record_snapshot_once", return_value=True), \
+         patch("run_backtest.log_activity", return_value=None):
+        run_day(run_start, 0, portfolio, masking, watchlist, {}, run_key)
+
+    active_limits = evidence_calls[0]["input_payload"]["active_limits"]
+    default_limits = RiskLimits()
+    assert active_limits["min_reward_risk"] == PROFILE_MIN_REWARD_RISK[PROFILE_ESCALATED] == 1.25
+    assert active_limits["min_reward_risk"] != default_limits.min_reward_risk
+    assert active_limits["risk_budget_pct"] == default_limits.risk_budget_pct
+    assert active_limits["max_position_pct"] == default_limits.max_position_pct
+    print("  ok  active_limits in the structured payload reflects the real, "
+          "non-default RiskLimits instance actually passed to build_prompt")
+
+
+def test_ask_hermes_copies_supplied_runtime_model_metadata_without_arithmetic():
+    """Gap fix 3 -- a real usage payload's model/provider/reasoning_effort
+    (nonnumeric) must reach usage_totals verbatim, not be dropped by
+    _accumulate's numeric-only loop."""
+    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "api_calls": 1,
+             "model": "claude-sonnet-5", "provider": "anthropic", "reasoning_effort": "high"}
+    good_raw = json.dumps({"decisions": [], "no_action_reason": "n/a"})
+    usage_totals = {}
+    with patch("run_backtest._call_hermes", return_value=(good_raw, usage)):
+        ask_hermes("irrelevant prompt", usage_totals, is_reflection_day=False)
+
+    assert usage_totals["model"] == "claude-sonnet-5"
+    assert usage_totals["provider"] == "anthropic"
+    assert usage_totals["reasoning_effort"] == "high"
+    print("  ok  supplied runtime model/provider/reasoning_effort reach usage_totals unchanged")
+
+
+def test_ask_hermes_leaves_runtime_metadata_null_when_not_supplied():
+    """Gap fix 3 -- when the real usage payload never includes model/
+    provider/reasoning_effort (today's actual observed behaviour), those
+    keys must stay absent/null -- never defaulted to the configured model."""
+    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "api_calls": 1}
+    good_raw = json.dumps({"decisions": [], "no_action_reason": "n/a"})
+    usage_totals = {}
+    with patch("run_backtest._call_hermes", return_value=(good_raw, usage)):
+        ask_hermes("irrelevant prompt", usage_totals, is_reflection_day=False)
+
+    assert usage_totals.get("model") is None
+    assert usage_totals.get("provider") is None
+    assert usage_totals.get("reasoning_effort") is None
+    print("  ok  absent runtime metadata stays null, never hard-coded")
+
+
+def test_ask_hermes_fails_loudly_on_conflicting_metadata_across_a_retry():
+    """Gap fix 3 -- two attempts within one cycle reporting DIFFERENT
+    non-null model identities is a genuine ambiguity and must raise, not
+    silently keep one of the two values."""
+    bad_raw = "not even json"
+    good_raw = json.dumps({"decisions": [], "no_action_reason": "n/a"})
+    usage1 = {"input_tokens": 5, "model": "model-a"}
+    usage2 = {"input_tokens": 5, "model": "model-b"}
+    usage_totals = {}
+    with patch("run_backtest._call_hermes", side_effect=[(bad_raw, usage1), (good_raw, usage2)]):
+        try:
+            ask_hermes("irrelevant prompt", usage_totals, is_reflection_day=False)
+            raise AssertionError("expected a ValueError on conflicting model identity")
+        except ValueError as exc:
+            assert "model" in str(exc) and "model-a" in str(exc) and "model-b" in str(exc)
+    print("  ok  conflicting non-null runtime identity across a retry fails loudly")
 
 
 def main():
