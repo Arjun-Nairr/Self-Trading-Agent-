@@ -545,9 +545,26 @@ this exact position was entered on Day 4 (2026-02-20), **before** that guidance
 existed in `AGENTS.md` (added 2026-08-31, per `HANDOFF.md`), so it does not by
 itself show the guidance failing to prevent a gap loss on a *later* decision.
 
-### Proposed vs. fill price (slippage/gap), filled BUYs only (n=8)
+### Proposed vs. fill price (decision-to-fill price movement), filled BUYs only (n=8)
 
-| Ticker | Proposed (derived) | Fill | Slippage | Slippage % |
+**Correction (see §5, item 5): the earlier version of this table labeled the
+gap between the decision-day proposed price and the next-day fill "slippage"
+and called it adverse. That was wrong on two counts.** First, "proposed"
+here is a *decision-time* price (2026-08-14T close-of-data, the day Hermes
+reasoned from); "fill" is the *next real trading day's* 09:45 execution --
+the difference is real overnight/next-morning price movement between two
+different points in time, not execution slippage against a single moment
+(`run_backtest.py`'s actual 5bps slippage model is a separate, much smaller
+effect applied AT the 09:45 fill itself, not measured by this table at all).
+Second, and more importantly: **a lower BUY fill is price-favourable by
+itself** -- paying less for the same long is a better fill, not a worse
+one -- though a fill consistently below the prior day's proposed price can
+also be a signal of real overnight weakness in the name, worth noting
+separately from whether the fill itself was "good execution." The table
+below is therefore renamed and reframed; every underlying number is
+unchanged from the original calculation.
+
+| Ticker | Decision-day proposed (derived) | Next-day fill | Price movement | Movement % |
 |---|---:|---:|---:|---:|
 | PLNT | 91.13 | 91.16 | +0.03 | +0.03% |
 | WMG | 29.73 | 29.23 | −0.50 | −1.68% |
@@ -558,11 +575,16 @@ itself show the guidance failing to prevent a gap loss on a *later* decision.
 | ATI | 150.09 | 148.31 | −1.78 | −1.19% |
 | DINO #2 | 60.22 | 59.44 | −0.78 | −1.30% |
 
-7 of 8 filled BUYs slipped *against* the position (fill price below the
-derived-proposed price on a long — a real, adverse, and consistent pattern,
-not noise) — consistent with `run_backtest.py`'s documented 5bps slippage
-model plus the real T+1 09:45 fill mechanic (see §5, item 5's caveat that
-"proposed" here is a derived, not directly stored, figure).
+7 of 8 filled BUYs' next-day fill landed below the decision-day proposed
+price -- a real, consistent pattern, not noise, and **price-favourable for
+the entry itself** (a long that fills cheaper than it was proposed at is a
+better fill, not a worse one). It is also consistent with the watchlist
+skewing toward names with real overnight softness between the decision day
+and the fill day -- a pattern worth investigating on its own terms, not as
+an execution-quality complaint. (See §5, item 5's caveat that "proposed"
+here is a derived, not directly stored, figure -- a gap this instrumentation
+task's own Implementation Decision 4 closes going forward by persisting
+`proposed_entry_price` directly.)
 
 ### Stop-distance and target-distance distributions (all 28 BUY proposals)
 
@@ -725,11 +747,26 @@ same cycle's open-position count; not merely assumed from the count alone.
 real closed-trade count at that exact timestamp** (counting how many of the 7
 exits in the ledger above had already occurred before each reflection's
 `created_at`) **and matches exactly in all 5 cases, with no discrepancy** —
-this field is trustworthy, not merely self-reported. Note also: reflections 3
-through 5 correctly follow RULES.md/`AGENTS.md`'s reflection discipline
-(explicitly declining to draw a strategy conclusion from a small sample,
-repeatedly, in its own words) — this is a real, positive, directly-observed
-behavior, not an inference.
+the structured `sample_size` field itself is trustworthy, not merely
+self-reported.
+
+**Real evidence-reading defect, reflection #2: the structured `sample_size`
+field (2) is correct, but Hermes's own free-text opens with "With zero
+closed trades..." — directly contradicting the very number in the same row.**
+Two real closed trades (PLNT, WMG) existed by 2026-08-31T16:35:09, the
+timestamp of this exact reflection. This is not a data-adequacy gap in what
+was persisted — both the true count and Hermes's stated claim are captured
+verbatim above, which is exactly how this contradiction is provable — it is
+a real reasoning failure to correctly read its own evidence at that moment.
+Reflections 1, 3, 4, and 5 do not show this problem (reflection 1's "no
+closed trades exist yet" was genuinely true at that exact moment, seconds
+before WMG's own exit filled — see §3's ledger — not a contradiction).
+
+Reflections 3 through 5 (sample_size 6 and 7) correctly follow
+RULES.md/`AGENTS.md`'s reflection discipline (explicitly declining to draw a
+strategy conclusion from a small sample, repeatedly, in their own words) —
+a real, positive, directly-observed behavior, not an inference, and
+unaffected by reflection #2's separate defect above.
 
 ---
 

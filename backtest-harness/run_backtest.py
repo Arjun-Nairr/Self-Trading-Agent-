@@ -51,6 +51,7 @@ Usage:
 """
 import argparse
 import copy
+import hashlib
 import json
 import math
 import os
@@ -80,6 +81,12 @@ STATE_PATH = Path(__file__).resolve().parent / "backtest_state.json"
 # _save_checkpoint / _clear_checkpoint.
 CHECKPOINT_PATH = Path(__file__).resolve().parent / "cycle_checkpoint.json"
 STARTING_EQUITY = 100_000.0
+# build_prompt's rendered format, versioned so a stored evidence row can be
+# told apart from a future prompt-format change without guessing from the
+# text itself (see backtest_cycle_evidence.prompt_schema_version). Bump this
+# any time build_prompt's structure changes in a way that would matter to
+# someone auditing an old evidence row against the current prompt shape.
+PROMPT_SCHEMA_VERSION = 1
 # The masking seed used when nothing is stored yet and no --seed is given
 # (a fresh or --reset run) -- was argparse's own default before item 7's
 # seed-persistence fix; unchanged in value, only in where it lives.
@@ -218,6 +225,14 @@ def json_from(text: str) -> dict:
     if start == -1 or end == -1:
         raise ValueError(f"no JSON found in:\n{text[:500]}")
     return json.loads(text[start : end + 1])
+
+
+def _file_sha256(path: Path) -> str:
+    """SHA-256 of a file's real bytes at the moment it's read -- used to
+    stamp exactly which RULES.md/AGENTS.md/SOUL.md content a cycle's
+    evidence was actually generated under, without persisting the files
+    themselves (see backtest_cycle_evidence)."""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 # --------------------------------------------------------------------------
@@ -1123,12 +1138,32 @@ def _load_checkpoint(run_id: str, day_index: int) -> dict | None:
     return None
 
 
-def _save_checkpoint(run_id: str, day_index: int, response: dict, usage: dict) -> None:
+def _save_checkpoint(run_id: str, day_index: int, response: dict, usage: dict,
+                     prompt_text: str | None = None, input_payload: dict | None = None,
+                     attempt_count: int | None = None,
+                     retry_diagnostics: list | None = None) -> None:
     """Atomic (see _atomic_write_json) -- a crash mid-write must never
-    leave a half-written checkpoint that a retry could partially trust."""
-    _atomic_write_json(CHECKPOINT_PATH, {
-        "run_id": run_id, "day_index": day_index, "response": response, "usage": usage,
-    })
+    leave a half-written checkpoint that a retry could partially trust.
+
+    2026-08-31 (evidence instrumentation): the four new fields are
+    optional/additive so a checkpoint written by this exact call remains
+    exactly what a retry needs to reproduce the cycle's evidence write
+    WITHOUT recomputing it and WITHOUT calling Hermes again -- see run_day's
+    checkpoint-replay branch. Existing callers passing only the original
+    four positional args still work; `_load_checkpoint` reading an OLDER
+    checkpoint file that predates this simply finds these keys absent,
+    handled with `.get(..., default)` wherever they're read (never a
+    required field on read)."""
+    data = {"run_id": run_id, "day_index": day_index, "response": response, "usage": usage}
+    if prompt_text is not None:
+        data["prompt_text"] = prompt_text
+    if input_payload is not None:
+        data["input_payload"] = input_payload
+    if attempt_count is not None:
+        data["attempt_count"] = attempt_count
+    if retry_diagnostics is not None:
+        data["retry_diagnostics"] = retry_diagnostics
+    _atomic_write_json(CHECKPOINT_PATH, data)
 
 
 def _clear_checkpoint() -> None:
@@ -1364,7 +1399,15 @@ def record_queued_decision(decision: dict, real_ticker: str, decision_id: str,
     from scratch with a DIFFERENT decision_id (kind="queued_fill") than
     anything a decision-time risk-check activity line could have linked
     to. Journaling here, with the id the caller already generated at
-    decision time, is what makes that link real."""
+    decision time, is what makes that link real.
+
+    proposed_entry_price: the exact entry_price Hermes proposed, on a BUY
+    only -- passed straight through from `decision["entry_price"]` (the
+    same source intended_notional is computed from, never a division
+    performed on the notional afterward). NULL for a discretionary SELL --
+    nothing was "proposed" for an exit; see AGENTS.md's exit reasoning
+    contract."""
+    proposed_entry_price = float(decision["entry_price"]) if decision["action"] == "BUY" else None
     script = f'''
 import asyncio
 from server import _record_decision
@@ -1389,6 +1432,47 @@ async def main():
         run_id={run_id!r},
         strategy_profile={strategy_profile!r},
         min_reward_risk_used={min_reward_risk_used!r},
+        proposed_entry_price={proposed_entry_price!r},
+    )
+
+asyncio.run(main())
+'''
+    run_in("trade-journal", script)
+
+
+def record_cycle_evidence(cycle_id: str, run_id: str, day_label: str, prompt_text: str,
+                          input_payload: dict, validated_response: dict,
+                          candidate_status: list, attempt_count: int,
+                          retry_diagnostics: list, rules_md_sha256: str,
+                          agents_md_sha256: str, soul_md_sha256: str,
+                          model: str | None = None, provider: str | None = None,
+                          reasoning_effort: str | None = None) -> None:
+    """One exact evidence record per successful backtest cycle -- see
+    _record_cycle_evidence's own docstring in trade-journal-mcp/server.py
+    for the full idempotency/collision contract (same discipline as
+    record_queued_decision's above).
+
+    ESSENTIAL: called by run_day right after Hermes's validated response is
+    known (fresh call or checkpoint replay) and the checkpoint is durably
+    saved, BEFORE any portfolio-state mutation (STEP D's queueing loop). A
+    failure here propagates uncaught -- the cycle halts, the checkpoint
+    (which by then already holds prompt_text/input_payload/response/
+    attempt_count/retry_diagnostics) survives, and a rerun replays this
+    exact evidence write without calling Hermes again."""
+    script = f'''
+import asyncio
+from server import _record_cycle_evidence
+
+async def main():
+    await _record_cycle_evidence(
+        cycle_id={cycle_id!r}, run_id={run_id!r}, day_label={day_label!r},
+        prompt_text={prompt_text!r}, input_payload={input_payload!r},
+        validated_response={validated_response!r}, candidate_status={candidate_status!r},
+        attempt_count={attempt_count!r}, retry_diagnostics={retry_diagnostics!r},
+        prompt_schema_version={PROMPT_SCHEMA_VERSION!r},
+        rules_md_sha256={rules_md_sha256!r}, agents_md_sha256={agents_md_sha256!r},
+        soul_md_sha256={soul_md_sha256!r}, model={model!r}, provider={provider!r},
+        reasoning_effort={reasoning_effort!r},
     )
 
 asyncio.run(main())
@@ -2063,6 +2147,30 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     return "\n".join(lines)
 
 
+@dataclass(frozen=True)
+class HermesResult:
+    """ask_hermes's real return shape -- the validated response plus enough
+    to explain a retry after the fact (docs/evaluations/
+    round2_tranche1_evaluation_extract.md's own coverage gap, item 15).
+
+    response: the final, schema-validated reply -- unchanged in meaning
+      from what ask_hermes used to return directly.
+    attempt_count: how many real _call_hermes invocations this cycle took
+      (1 = succeeded first try, 2 = one retry -- capped at 2, unchanged
+      retry policy).
+    retry_diagnostics: one entry per UNSUCCESSFUL attempt, in order --
+      {"attempt": N, "error_category": <exception class name>,
+      "error_message": <str(exc), truncated>}. Empty when attempt_count==1.
+      Deliberately just the exception's own class name and a bounded
+      message -- never a credential, environment value, or container
+      command (none of those ever reach this exception in the first
+      place; _call_hermes's own RuntimeError on a nonzero returncode is
+      NOT caught here and is not a retry case -- see ask_hermes)."""
+    response: dict
+    attempt_count: int
+    retry_diagnostics: list[dict]
+
+
 def _call_hermes(prompt: str) -> str:
     escaped = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
     # --usage-file: real per-call token accounting (input/output/cache/
@@ -2092,7 +2200,7 @@ def _call_hermes(prompt: str) -> str:
     return result.stdout, usage
 
 
-def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False) -> dict:
+def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False) -> HermesResult:
     """One retry on a malformed OR semantically invalid reply — a real
     failure mode, seen on the very first live cycle (an unescaped quote
     inside the reasoning text broke the whole object and cost the cycle).
@@ -2117,6 +2225,12 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False)
     hook a callback through `_call_hermes` for every real call was removed
     entirely -- usage_totals' own api_calls/token fields already carry the
     real per-cycle signal it existed to surface.
+
+    2026-08-31 (evidence instrumentation): now returns a `HermesResult`
+    instead of the bare response dict, exposing attempt_count and
+    retry_diagnostics -- purely additive observability. Retry count (still
+    capped at one), validation rules, and model invocation behavior are
+    completely unchanged; this only makes what already happened visible.
     """
     def _accumulate(usage: dict) -> None:
         # usage.get(key, 0) only substitutes 0 for a MISSING key -- a real
@@ -2136,8 +2250,16 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False)
     try:
         response = json_from(raw)
         validate_hermes_response(response, is_reflection_day)
-        return response
+        return HermesResult(response=response, attempt_count=1, retry_diagnostics=[])
     except (ValueError, json.JSONDecodeError) as exc:
+        # error_message bounded to 500 chars -- the same message a raised
+        # exception already carries (never a credential, env value, or
+        # container command; none of those appear in a JSON-parse or
+        # semantic-validation error in the first place).
+        retry_diagnostics = [{
+            "attempt": 1, "error_category": type(exc).__name__,
+            "error_message": str(exc)[:500],
+        }]
         retry = (
             f"{prompt}\n\n---\nYour previous reply was invalid ({exc}). "
             "Return ONLY a corrected JSON object satisfying every "
@@ -2149,9 +2271,11 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False)
         _accumulate(usage2)
         # A second failure (parse OR validation) propagates uncaught --
         # fail closed, exactly like the pre-existing JSON-only contract.
+        # (No cycle evidence is ever written for a cycle that ends this
+        # way -- evidence is recorded only for a successful cycle.)
         response2 = json_from(raw2)
         validate_hermes_response(response2, is_reflection_day)
-        return response2
+        return HermesResult(response=response2, attempt_count=2, retry_diagnostics=retry_diagnostics)
 
 
 def _execute_exit(working: "Portfolio", ticker: str, quantity: int, entry_price: float,
@@ -2661,6 +2785,14 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         fetch_recent_closed_trades(masking, run_id=run_key) if is_reflection_day else None
     )
 
+    # The exact masked structured objects build_prompt is about to render --
+    # passed straight through to record_cycle_evidence later, never
+    # reconstructed from a different source (evidence instrumentation).
+    input_payload = {
+        "day_label": masking.day_index(day), "account": account_view,
+        "positions": positions_view, "candidates": candidates,
+        "recent_insights": recent_insights, "reflection_trades": reflection_trades,
+    }
     prompt = build_prompt(masking.day_index(day), account_view,
                           positions_view, candidates, recent_insights,
                           reflection_trades, limits=active_limits)
@@ -2674,11 +2806,22 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     if checkpoint is not None:
         response = checkpoint["response"]
         summary["usage"] = checkpoint.get("usage") or {}
+        # 2026-08-31 (evidence instrumentation): reuse the CHECKPOINTED
+        # prompt/payload/attempt data when present, so a rerun's evidence
+        # write is byte-identical to what the original attempt would have
+        # written -- not a fresh recomputation. Older checkpoints written
+        # before this field existed simply fall back to this attempt's own
+        # freshly-built prompt/input_payload (deterministic point-in-time
+        # fetches reproduce the same values regardless).
+        prompt = checkpoint.get("prompt_text", prompt)
+        input_payload = checkpoint.get("input_payload", input_payload)
+        attempt_count = checkpoint.get("attempt_count", 1)
+        retry_diagnostics = checkpoint.get("retry_diagnostics", [])
         print(f"  REPLAYING checkpointed response for day_index={day_index} "
               "-- no new Hermes call")
     else:
         try:
-            response = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day)
+            hermes_result = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day)
         except Exception as exc:
             # Tag with whatever real usage ask_hermes accumulated before
             # failing (a validation-retry exhaustion still burns 1-2 real
@@ -2689,12 +2832,53 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             # have no real usage to tag beyond what's already accumulated here.
             exc.usage = summary["usage"]
             raise
+        response = hermes_result.response
+        attempt_count = hermes_result.attempt_count
+        retry_diagnostics = hermes_result.retry_diagnostics
         # Durably save the validated response BEFORE any further essential
         # mutation (reflection insight, decision journaling, all below) --
         # this is the checkpoint fix: the cycle's whole "intent" now
         # exists outside this function's local variables the instant it's
-        # known, not only once the whole cycle succeeds.
-        _save_checkpoint(run_key, day_index, response, summary["usage"])
+        # known, not only once the whole cycle succeeds. Now also carries
+        # prompt_text/input_payload/attempt_count/retry_diagnostics, so a
+        # retry of the evidence write below never has to call Hermes again
+        # or recompute anything to reproduce it exactly.
+        _save_checkpoint(run_key, day_index, response, summary["usage"],
+                         prompt_text=prompt, input_payload=input_payload,
+                         attempt_count=attempt_count, retry_diagnostics=retry_diagnostics)
+
+    # -- ESSENTIAL: persist this cycle's exact evidence (2026-08-31) ------
+    # Structural only -- an eligible candidate is 'proposed' iff its alias
+    # appears in the validated response's own decisions list, never an
+    # inference parsed out of Hermes' free-text reasoning. Runs BEFORE any
+    # portfolio-state mutation below (STEP D); a failure here propagates
+    # uncaught, halting the cycle -- the checkpoint (already saved above,
+    # on both the fresh and replay paths reaching this point) means a
+    # rerun replays this exact write without a second Hermes call.
+    proposed_aliases = {
+        d.get("alias") for d in response.get("decisions", []) if isinstance(d, dict)
+    }
+    candidate_status = [
+        {"alias": c["alias"], "status": "proposed" if c["alias"] in proposed_aliases else "no_proposal"}
+        for c in candidates
+    ]
+    usage_for_evidence = summary["usage"] or {}
+    record_cycle_evidence(
+        cycle_id=cycle_id, run_id=run_key, day_label=masking.day_index(day),
+        prompt_text=prompt, input_payload=input_payload, validated_response=response,
+        candidate_status=candidate_status, attempt_count=attempt_count,
+        retry_diagnostics=retry_diagnostics,
+        rules_md_sha256=_file_sha256(REPO / "RULES.md"),
+        agents_md_sha256=_file_sha256(REPO / "AGENTS.md"),
+        soul_md_sha256=_file_sha256(REPO / "SOUL.md"),
+        # Only ever a real value if the Hermes usage report itself included
+        # one -- never a hard-coded assumption (see HermesResult/ask_hermes;
+        # the actual --usage-file report has never been observed to carry
+        # these keys, so this is None today, but stays correct if it ever does).
+        model=usage_for_evidence.get("model"),
+        provider=usage_for_evidence.get("provider"),
+        reasoning_effort=usage_for_evidence.get("reasoning_effort"),
+    )
 
     summary["no_action_reason"] = response.get("no_action_reason", "")
     # Activity narration is BEST-EFFORT OBSERVABILITY -- appended to the

@@ -200,6 +200,7 @@ def _decision_field_mismatches(
     target_price: float | None, limit_price: float | None, run_id: str | None,
     execution_mode: str, strategy_profile: str | None = None,
     min_reward_risk_used: float | None = None,
+    proposed_entry_price: float | None = None,
 ) -> list[str]:
     """Every field that DEFINES the decision -- not only the four
     (ticker/action/quantity/order_type) the prior check compared. A genuine
@@ -231,6 +232,7 @@ def _decision_field_mismatches(
         # NULL) must compare equal, same as every other nullable field here.
         ("strategy_profile", row["strategy_profile"] == strategy_profile),
         ("min_reward_risk_used", _num_close(row["min_reward_risk_used"], min_reward_risk_used)),
+        ("proposed_entry_price", _num_close(row["proposed_entry_price"], proposed_entry_price)),
     ]
     return [name for name, ok in checks if not ok]
 
@@ -256,6 +258,7 @@ async def _record_decision(
     execution_mode: str = "simulated",
     strategy_profile: str | None = None,
     min_reward_risk_used: float | None = None,
+    proposed_entry_price: float | None = None,
 ) -> dict[str, Any]:
     """decision_id: optional caller-supplied id. Live Hermes never passes
     one (always gets a fresh uuid4, unchanged behavior). The backtest
@@ -279,7 +282,13 @@ async def _record_decision(
     ('aggressive_v1_base'/'aggressive_v1_escalated') and threshold this
     decision was actually validated against. NULL for every pre-Phase-1
     row and for any caller that doesn't pass them (e.g. live Hermes' own
-    public record_decision tool, unaffected by this profile)."""
+    public record_decision tool, unaffected by this profile).
+
+    proposed_entry_price: the exact entry_price Hermes proposed (backtest
+    BUY decisions only) -- persisted directly, never derived later from
+    intended_notional / intended_quantity (that division is a reconstructed
+    guess, not the real proposed figure). NULL for mechanical SELLs and
+    every pre-existing row."""
     _validate_decision_fields(
         action, confidence, primary_signal, expected_reward_risk,
         invalidation_condition, strategy_notes, technical_basis,
@@ -294,8 +303,9 @@ async def _record_decision(
                              expected_reward_risk, invalidation_condition,
                              strategy_notes, data_timestamps, stop_price,
                              target_price, run_id, execution_mode,
-                             strategy_profile, min_reward_risk_used)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+                             strategy_profile, min_reward_risk_used,
+                             proposed_entry_price)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
         ON CONFLICT (decision_id) DO NOTHING
         RETURNING *
         """,
@@ -304,7 +314,7 @@ async def _record_decision(
         expected_reward_risk, invalidation_condition, strategy_notes,
         json.dumps(_normalize_data_timestamps(data_timestamps)) if data_timestamps else None,
         stop_price, target_price, run_id, execution_mode,
-        strategy_profile, min_reward_risk_used,
+        strategy_profile, min_reward_risk_used, proposed_entry_price,
     )
     if row is None:
         # A caller-supplied decision_id that already exists -- a retry of
@@ -327,6 +337,7 @@ async def _record_decision(
             data_timestamps=data_timestamps, stop_price=stop_price, target_price=target_price,
             limit_price=limit_price, run_id=run_id, execution_mode=execution_mode,
             strategy_profile=strategy_profile, min_reward_risk_used=min_reward_risk_used,
+            proposed_entry_price=proposed_entry_price,
         )
         if mismatches:
             raise ValueError(
@@ -334,6 +345,109 @@ async def _record_decision(
                 f"mismatched field(s): {', '.join(mismatches)}. This should never "
                 "happen for a genuine retry of the same event -- failing loudly "
                 "instead of silently returning a different trade's data."
+            )
+    return dict(row)
+
+
+def _cycle_evidence_mismatches(
+    row: "asyncpg.Record", *, run_id: str, day_label: str, prompt_text: str,
+    input_payload: dict[str, Any], validated_response: dict[str, Any],
+    candidate_status: list[Any], attempt_count: int, retry_diagnostics: list[Any],
+    prompt_schema_version: int, rules_md_sha256: str, agents_md_sha256: str,
+    soul_md_sha256: str, model: str | None, provider: str | None,
+    reasoning_effort: str | None,
+) -> list[str]:
+    """Same discipline as _decision_field_mismatches -- every field that
+    defines this cycle's evidence, so a genuine retry (identical payload)
+    stays a no-op while a collision under the same cycle_id but DIFFERENT
+    evidence fails loudly, naming exactly what differed."""
+    checks: list[tuple[str, bool]] = [
+        ("run_id", _uuid_equal(row["run_id"], run_id)),
+        ("day_label", row["day_label"] == day_label),
+        ("prompt_text", row["prompt_text"] == prompt_text),
+        ("input_payload", _json_equal(row["input_payload"], input_payload)),
+        ("validated_response", _json_equal(row["validated_response"], validated_response)),
+        ("candidate_status", _json_equal(row["candidate_status"], candidate_status)),
+        ("attempt_count", _int_equal(row["attempt_count"], attempt_count)),
+        ("retry_diagnostics", _json_equal(row["retry_diagnostics"], retry_diagnostics)),
+        ("prompt_schema_version", _int_equal(row["prompt_schema_version"], prompt_schema_version)),
+        ("rules_md_sha256", row["rules_md_sha256"] == rules_md_sha256),
+        ("agents_md_sha256", row["agents_md_sha256"] == agents_md_sha256),
+        ("soul_md_sha256", row["soul_md_sha256"] == soul_md_sha256),
+        ("model", row["model"] == model),
+        ("provider", row["provider"] == provider),
+        ("reasoning_effort", row["reasoning_effort"] == reasoning_effort),
+    ]
+    return [name for name, ok in checks if not ok]
+
+
+async def _record_cycle_evidence(
+    cycle_id: str, run_id: str, day_label: str, prompt_text: str,
+    input_payload: dict[str, Any], validated_response: dict[str, Any],
+    candidate_status: list[Any], attempt_count: int, retry_diagnostics: list[Any],
+    prompt_schema_version: int, rules_md_sha256: str, agents_md_sha256: str,
+    soul_md_sha256: str, model: str | None = None, provider: str | None = None,
+    reasoning_effort: str | None = None,
+) -> dict[str, Any]:
+    """One exact evidence record per successful backtest cycle -- the
+    precise masked inputs Hermes was shown, the exact rendered prompt, and
+    the final validated response, so a tranche can be audited later, not
+    just scored (docs/evaluations/round2_tranche1_evaluation_extract.md's
+    §6 coverage gaps are exactly what this closes).
+
+    cycle_id is the SAME deterministic key portfolio_snapshots/insight_log
+    already use for this exact cycle -- ON CONFLICT DO NOTHING makes a
+    retried write (evidence write failed, cycle halted, harness reruns and
+    reuses the checkpointed prompt/payload/response) a true no-op. A
+    collision under the same cycle_id carrying genuinely DIFFERENT evidence
+    fails loudly instead of silently keeping the stale row -- same
+    discipline as _record_decision.
+
+    Never call this with anything that still carries a real ticker-to-alias
+    mapping -- prompt_text/input_payload/validated_response must already be
+    masked by the caller (run_backtest.py's masking.assert_clean gate runs
+    BEFORE this is ever reached); this function does not itself know or
+    check the real mapping."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO backtest_cycle_evidence (
+            cycle_id, run_id, day_label, prompt_text, input_payload,
+            validated_response, candidate_status, attempt_count, retry_diagnostics,
+            prompt_schema_version, rules_md_sha256, agents_md_sha256, soul_md_sha256,
+            model, provider, reasoning_effort
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        ON CONFLICT (cycle_id) DO NOTHING
+        RETURNING *
+        """,
+        cycle_id, run_id, day_label, prompt_text, json.dumps(input_payload),
+        json.dumps(validated_response), json.dumps(candidate_status), attempt_count,
+        json.dumps(retry_diagnostics), prompt_schema_version,
+        rules_md_sha256, agents_md_sha256, soul_md_sha256, model, provider, reasoning_effort,
+    )
+    if row is None:
+        row = await pool.fetchrow(
+            "SELECT * FROM backtest_cycle_evidence WHERE cycle_id = $1", cycle_id,
+        )
+        if row is None:
+            raise ValueError(
+                f"cycle_id {cycle_id} conflicted on insert but no row exists -- unexpected state"
+            )
+        mismatches = _cycle_evidence_mismatches(
+            row, run_id=run_id, day_label=day_label, prompt_text=prompt_text,
+            input_payload=input_payload, validated_response=validated_response,
+            candidate_status=candidate_status, attempt_count=attempt_count,
+            retry_diagnostics=retry_diagnostics, prompt_schema_version=prompt_schema_version,
+            rules_md_sha256=rules_md_sha256, agents_md_sha256=agents_md_sha256,
+            soul_md_sha256=soul_md_sha256, model=model, provider=provider,
+            reasoning_effort=reasoning_effort,
+        )
+        if mismatches:
+            raise ValueError(
+                f"cycle_id {cycle_id} collision with DIFFERENT evidence -- "
+                f"mismatched field(s): {', '.join(mismatches)}. This should never "
+                "happen for a genuine retry of the same cycle -- failing loudly "
+                "instead of silently returning stale evidence."
             )
     return dict(row)
 

@@ -24,8 +24,9 @@ from run_backtest import (
     ACTIVITY_BLOCK_TRADING_DAYS, ACTIVITY_TARGET_TRADES, DEFAULT_MASKING_SEED,
     PROFILE_BASE, PROFILE_ESCALATED, PROFILE_LEGACY, PROFILE_MIN_REWARD_RISK,
     STARTING_EQUITY, TIME_STOP_TRADING_DAYS,
-    Holding, Portfolio, QueuedOrder, ResponseValidationError, ask_hermes,
-    _atomic_write_json, _clear_checkpoint, _expected_session_bar_times, _limits_for_profile,
+    Holding, HermesResult, Portfolio, QueuedOrder, ResponseValidationError, ask_hermes,
+    PROMPT_SCHEMA_VERSION, _atomic_write_json, _clear_checkpoint, _expected_session_bar_times,
+    _file_sha256, _limits_for_profile,
     _load_checkpoint, _maybe_advance_activity_block, _record_trade_completion,
     _resolve_seed, _resolve_window, _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
     build_decision_time_context, build_prompt,
@@ -399,7 +400,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
         hermes_calls.append(1)
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
-        return {
+        return HermesResult(response={
             "decisions": [{
                 "alias": alias, "action": "BUY", "quantity": 200, "entry_price": 100.0,
                 "stop_price": 93.0, "target_price": 115.0, "confidence": 3,
@@ -408,7 +409,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
                 "reasoning": "clean breakout with volume confirmation",
             }],
             "no_action_reason": "",
-        }
+        }, attempt_count=1, retry_diagnostics=[])
 
     fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
     fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
@@ -433,6 +434,11 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
     def fake_log_activity(events, run_id=None, cycle_id=None):
         pass
 
+    evidence_calls = []
+
+    def fake_record_cycle_evidence(**kwargs):
+        evidence_calls.append(kwargs)
+
     def run_one_attempt():
         return run_day(day, day_index, portfolio, masking, watchlist, {}, run_key)
 
@@ -442,6 +448,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
          patch("run_backtest.fetch_news", return_value=fake_news), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
          patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_cycle_evidence", side_effect=fake_record_cycle_evidence), \
          patch("run_backtest.record_queued_decision", side_effect=fake_record_queued_decision), \
          patch("run_backtest.record_snapshot_once", side_effect=fake_record_snapshot_once), \
          patch("run_backtest.log_activity", side_effect=fake_log_activity):
@@ -457,6 +464,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
             "the validated response must already be checkpointed before an essential failure"
         )
         assert not state_path.exists(), "local state must NOT advance after an essential failure"
+        assert len(evidence_calls) == 1, "cycle evidence must be written once, before the failing journal write"
         print("  ok  attempt 1: fake Hermes called exactly once, response checkpointed, "
               "essential journal failure halts before state advancement")
 
@@ -467,8 +475,15 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
             "the retry must re-attempt the SAME essential journal write with the "
             f"IDENTICAL decision_id, not a fresh one: {journal_calls}"
         )
+        assert len(evidence_calls) == 2, "the retry must re-attempt the evidence write too"
+        assert evidence_calls[0]["prompt_text"] == evidence_calls[1]["prompt_text"], (
+            "a retry's evidence write must be byte-identical to the original attempt's "
+            "(reused from the checkpoint, not recomputed)"
+        )
+        assert evidence_calls[0]["attempt_count"] == evidence_calls[1]["attempt_count"] == 1
         print("  ok  attempt 2 (retry): reuses the checkpointed response verbatim -- "
-              "no second Hermes call, essential records complete idempotently")
+              "no second Hermes call, essential records (including cycle evidence) "
+              "complete idempotently")
 
         # -- atomic local-state commit, THEN checkpoint clear -------------
         _atomic_write_json(state_path, {"portfolio": working.to_dict(),
@@ -958,8 +973,10 @@ def test_ask_hermes_treats_an_explicit_null_usage_field_as_zero():
     }
     with patch("run_backtest._call_hermes", return_value=(clean_reply, usage_with_null)):
         totals: dict = {}
-        response = ask_hermes("irrelevant prompt", totals, is_reflection_day=False)
-    assert response == {"decisions": [], "no_action_reason": "nothing qualified"}
+        result = ask_hermes("irrelevant prompt", totals, is_reflection_day=False)
+    assert result.response == {"decisions": [], "no_action_reason": "nothing qualified"}
+    assert result.attempt_count == 1
+    assert result.retry_diagnostics == []
     assert totals["cache_read_tokens"] == 0, "an explicit null must become 0, not crash or stay None"
     assert totals["estimated_cost_usd"] == 0.0
     # Every other real field must still accumulate truthfully -- the null
@@ -1200,14 +1217,16 @@ def test_stopped_out_today_resets_unconditionally_even_on_a_quiet_day():
                                "support": [95.0], "resistance": [110.0]}}
 
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
-        return {"decisions": [], "no_action_reason": "nothing qualifies today"}
+        return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualifies today"},
+                            attempt_count=1, retry_diagnostics=[])
 
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
          patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
          patch("run_backtest.fetch_news", return_value={"OLN": []}), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
-         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes):
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_cycle_evidence", return_value=None):
         working, summary, _do_observability = run_day(
             run_start, 0, portfolio, masking, watchlist, {}, str(uuid.uuid4()),
         )
@@ -1996,7 +2015,11 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
         captured_prompts.append(prompt)
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
-        return {"decisions": decisions_to_propose, "no_action_reason": "n/a" if decisions_to_propose else "nothing today"}
+        return HermesResult(
+            response={"decisions": decisions_to_propose,
+                     "no_action_reason": "n/a" if decisions_to_propose else "nothing today"},
+            attempt_count=1, retry_diagnostics=[],
+        )
 
     def fake_record_queued_decision(decision, real_ticker, decision_id, run_id=None,
                                     strategy_profile=None, min_reward_risk_used=None,
@@ -2005,7 +2028,13 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
             "ticker": real_ticker, "strategy_profile": strategy_profile,
             "min_reward_risk_used": min_reward_risk_used,
             "data_timestamps": data_timestamps,
+            "proposed_entry_price": (
+                float(decision["entry_price"]) if decision["action"] == "BUY" else None
+            ),
         })
+
+    def fake_record_cycle_evidence(**kwargs):
+        pass
 
     fake_bars = {t["symbol"]: {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0}
                 for t in watchlist}
@@ -2026,6 +2055,7 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
          patch("run_backtest.fetch_news", return_value=fake_news), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
          patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_cycle_evidence", side_effect=fake_record_cycle_evidence), \
          patch("run_backtest.record_queued_decision", side_effect=fake_record_queued_decision), \
          patch("run_backtest.resolve_trade_fill", return_value=None), \
          patch("run_backtest.resolve_trade_rejection", return_value=None), \
@@ -2131,6 +2161,232 @@ def test_activity_escalation_transition_at_the_real_orchestration_boundary():
     assert dino_order.min_reward_risk_used == 1.25
     print("  ok  the resulting QueuedOrder object itself stores escalated/1.25 -- no decision "
           "can carry a profile label that disagrees with its enforced/stored threshold")
+
+
+# --------------------------------------------------------------------------
+# 2026-08-31 -- backtest cycle evidence instrumentation
+# --------------------------------------------------------------------------
+
+def _evidence_scenario(decisions_to_propose, tmp_dir):
+    """Runs one real run_day() cycle over a 2-ticker watchlist (OLN, DINO),
+    only true I/O mocked, and returns the single kwargs dict
+    record_cycle_evidence was called with. Reused by every evidence test
+    below so each one only needs to vary `decisions_to_propose`."""
+    run_start = date(2026, 2, 17)
+    run_key = str(uuid.uuid4())
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}, {"symbol": "DINO", "sector": "Energy"}]
+    masking = RunMasking(
+        {"OLN": ["Olin Corporation", "Olin"], "DINO": ["HollyFrontier Corporation", "HollyFrontier"]},
+        run_start=run_start, seed=DEFAULT_MASKING_SEED,
+    )
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
+
+    fake_bars = {t: {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5} for t in ("OLN", "DINO")}
+    fake_technicals = {t: {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
+                           "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
+                           "support": [95.0], "resistance": [110.0]} for t in ("OLN", "DINO")}
+    fake_news = {"OLN": [], "DINO": []}
+
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+        return HermesResult(
+            response={"decisions": decisions_to_propose,
+                     "no_action_reason": "n/a" if decisions_to_propose else "nothing qualified"},
+            attempt_count=1, retry_diagnostics=[],
+        )
+
+    evidence_calls = []
+
+    def fake_record_cycle_evidence(**kwargs):
+        evidence_calls.append(kwargs)
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
+         patch("run_backtest.fetch_news", return_value=fake_news), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_cycle_evidence", side_effect=fake_record_cycle_evidence), \
+         patch("run_backtest.record_queued_decision", return_value=None), \
+         patch("run_backtest.record_snapshot_once", return_value=True), \
+         patch("run_backtest.log_activity", return_value=None):
+        run_day(run_start, 0, portfolio, masking, watchlist, {}, run_key)
+
+    assert len(evidence_calls) == 1, f"expected exactly one evidence write, got {len(evidence_calls)}"
+    return evidence_calls[0], masking
+
+
+def test_cycle_evidence_records_the_exact_masked_prompt_and_inputs_once():
+    """Item 1 -- the exact rendered prompt and the exact already-masked
+    structured objects build_prompt was called with are persisted once per
+    successful cycle, not reconstructed from a different source later."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    evidence, masking = _evidence_scenario([], tmp_dir)
+
+    assert evidence["prompt_text"].startswith("BACKTEST CYCLE — Day 1"), (
+        "prompt_text must be the real rendered prompt, not a placeholder"
+    )
+    payload = evidence["input_payload"]
+    assert payload["day_label"] == "Day 1"
+    assert {c["alias"] for c in payload["candidates"]} == {masking.alias("OLN"), masking.alias("DINO")}, (
+        "input_payload must carry the SAME masked candidate objects build_prompt used"
+    )
+    assert evidence["attempt_count"] == 1 and evidence["retry_diagnostics"] == []
+    assert evidence["run_id"] and evidence["cycle_id"], "run_id/cycle_id must be real, not blank"
+    assert evidence["rules_md_sha256"] and evidence["agents_md_sha256"] and evidence["soul_md_sha256"], (
+        "all three file hashes must be real, non-empty values"
+    )
+    print("  ok  the exact rendered prompt and its exact masked input_payload are recorded once")
+
+
+def test_cycle_evidence_never_leaks_the_real_ticker_alias_mapping():
+    """Item 2 -- no real ticker string reaches stored evidence, only the
+    masked alias. Mirrors anonymize.py's own assert_clean discipline,
+    applied to the evidence payload specifically."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    evidence, masking = _evidence_scenario([], tmp_dir)
+
+    blob = evidence["prompt_text"] + json.dumps(evidence["input_payload"])
+    for real_ticker in ("OLN", "DINO", "Olin Corporation", "HollyFrontier Corporation"):
+        assert real_ticker not in blob, (
+            f"real identifier {real_ticker!r} leaked into stored cycle evidence"
+        )
+    print("  ok  no real ticker or company name leaked into the stored evidence payload")
+
+
+def test_cycle_evidence_marks_every_candidate_no_proposal_when_nothing_is_proposed():
+    """Item 3 -- a cycle with zero proposals still records every eligible
+    candidate as 'no_proposal', not simply omitted."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    evidence, masking = _evidence_scenario([], tmp_dir)
+
+    statuses = {c["alias"]: c["status"] for c in evidence["candidate_status"]}
+    assert statuses == {masking.alias("OLN"): "no_proposal", masking.alias("DINO"): "no_proposal"}
+    print("  ok  a no-proposal cycle records every eligible candidate as 'no_proposal'")
+
+
+def test_cycle_evidence_marks_a_real_proposal_as_proposed_structurally():
+    """Item 4 -- a real proposal is recorded as 'proposed' purely because
+    its alias appears in the validated response's own decisions list --
+    never by parsing Hermes' free-text reasoning into an invented
+    classification."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    olin_alias = RunMasking(
+        {"OLN": ["Olin Corporation", "Olin"], "DINO": ["HollyFrontier Corporation", "HollyFrontier"]},
+        run_start=date(2026, 2, 17), seed=DEFAULT_MASKING_SEED,
+    ).alias("OLN")
+    proposal = dict(_VALID_DECISION, alias=olin_alias)
+    evidence, masking = _evidence_scenario([proposal], tmp_dir)
+
+    statuses = {c["alias"]: c["status"] for c in evidence["candidate_status"]}
+    assert statuses[masking.alias("OLN")] == "proposed"
+    assert statuses[masking.alias("DINO")] == "no_proposal"
+    print("  ok  a real proposal is marked 'proposed' by alias membership in the response, "
+          "the untouched candidate stays 'no_proposal'")
+
+
+def test_ask_hermes_records_a_failed_first_attempt_in_retry_diagnostics():
+    """Item 5 -- a malformed first reply that triggers the existing one-
+    retry contract must surface in HermesResult as attempt_count=2 with the
+    first attempt's error named and bounded -- not silently dropped."""
+    bad_raw = "not even json"
+    good_raw = json.dumps({"decisions": [], "no_action_reason": "nothing qualified"})
+    usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "api_calls": 1}
+    with patch("run_backtest._call_hermes", side_effect=[(bad_raw, usage), (good_raw, usage)]):
+        result = ask_hermes("irrelevant prompt", {}, is_reflection_day=False)
+
+    assert result.attempt_count == 2
+    assert len(result.retry_diagnostics) == 1
+    diag = result.retry_diagnostics[0]
+    assert diag["attempt"] == 1
+    assert diag["error_category"] in ("ValueError", "JSONDecodeError")
+    assert "no JSON found" in diag["error_message"] or diag["error_message"], (
+        "the first attempt's real error must be named, not blank"
+    )
+    assert len(diag["error_message"]) <= 500, "error_message must be bounded"
+    assert result.response == {"decisions": [], "no_action_reason": "nothing qualified"}
+    print("  ok  a failed first attempt is recorded in retry_diagnostics with attempt_count=2")
+
+
+def test_evidence_write_failure_then_replay_does_not_call_hermes_twice():
+    """Item 6 -- an essential evidence-write failure halts the cycle,
+    retains the checkpoint (now including prompt_text/input_payload/
+    attempt_count/retry_diagnostics), and a rerun replays the SAME
+    evidence write without a second Hermes invocation."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    run_start = date(2026, 2, 17)
+    run_key = str(uuid.uuid4())
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
+    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
+                         seed=DEFAULT_MASKING_SEED)
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
+
+    fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
+    fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
+                               "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
+                               "support": [95.0], "resistance": [110.0]}}
+
+    hermes_calls = []
+
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+        hermes_calls.append(1)
+        return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualified"},
+                            attempt_count=1, retry_diagnostics=[])
+
+    evidence_attempts = {"n": 1}  # attempt 1 fails, attempt 2 (replay) succeeds
+    evidence_calls = []
+
+    def fake_record_cycle_evidence(**kwargs):
+        evidence_calls.append(kwargs)
+        if evidence_attempts["n"] > 0:
+            evidence_attempts["n"] -= 1
+            raise RuntimeError("simulated evidence-write failure")
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
+         patch("run_backtest.fetch_news", return_value={"OLN": []}), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_cycle_evidence", side_effect=fake_record_cycle_evidence):
+        try:
+            run_day(run_start, 0, portfolio, masking, watchlist, {}, run_key)
+            raise AssertionError("expected the simulated evidence-write failure to propagate")
+        except RuntimeError as exc:
+            assert "simulated evidence-write failure" in str(exc)
+        assert len(hermes_calls) == 1
+        assert (tmp_dir / "cycle_checkpoint.json").exists(), (
+            "the checkpoint must survive an evidence-write failure"
+        )
+        print("  ok  an evidence-write failure halts the cycle and retains the checkpoint")
+
+        # -- replay: reuses the checkpoint, no second Hermes call ---------
+        run_day(run_start, 0, portfolio, masking, watchlist, {}, run_key)
+        assert len(hermes_calls) == 1, "the replay must NOT call Hermes again"
+        assert len(evidence_calls) == 2
+        assert evidence_calls[0]["prompt_text"] == evidence_calls[1]["prompt_text"], (
+            "the replay's evidence write must be byte-identical to the original attempt's"
+        )
+        print("  ok  the replay reuses the checkpointed prompt/payload/response and "
+              "re-attempts the SAME evidence write -- no second Hermes call")
+
+
+def test_load_checkpoint_stays_readable_without_the_new_optional_evidence_fields():
+    """Item 12 -- a checkpoint written by an older version of
+    _save_checkpoint (only run_id/day_index/response/usage) must remain
+    safely readable -- the new fields are simply absent, never required."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    ckpt_path = tmp_dir / "cycle_checkpoint.json"
+    with patch("run_backtest.CHECKPOINT_PATH", ckpt_path):
+        # The OLD 4-positional-arg call shape -- no prompt_text/input_payload/
+        # attempt_count/retry_diagnostics.
+        _save_checkpoint("run-x", 0, {"decisions": [], "no_action_reason": "ok"}, {"total_tokens": 10})
+        loaded = _load_checkpoint("run-x", 0)
+    assert loaded is not None
+    assert loaded["response"] == {"decisions": [], "no_action_reason": "ok"}
+    assert loaded.get("prompt_text") is None
+    assert loaded.get("attempt_count") is None
+    print("  ok  an old-shaped checkpoint (missing the new optional evidence fields) "
+          "remains safely readable via .get(..., default)")
 
 
 def main():

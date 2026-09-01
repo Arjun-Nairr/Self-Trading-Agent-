@@ -209,7 +209,11 @@ async def test_execution_result_retry_does_not_double_write():
         )
         print(f"first call: status={first['status']} fill_price={first['fill_price']}")
         assert first["status"] == "filled"
-        assert str(first["fill_price"]) == "99.50"
+        # 2026-08-31: fill_price widened to NUMERIC(18,6) (see
+        # docs/evaluations/round2_tranche1_evaluation_extract.md's $1.31
+        # rounding finding) -- compare numerically, not against a fixed
+        # 2-decimal string the wider scale no longer produces.
+        assert float(first["fill_price"]) == 99.5
 
         # Retry with different (wrong) fill data — must be ignored, not applied.
         second = await _record_execution_result(
@@ -293,6 +297,132 @@ async def test_strategy_profile_collision_and_null_rows_stay_readable():
         await pool.execute("DELETE FROM trades WHERE decision_id = $1", null_id)
 
 
+async def test_proposed_entry_price_is_stored_directly():
+    """2026-08-31 evidence instrumentation, Implementation Decision 4:
+    proposed_entry_price must round-trip exactly as given -- never derived
+    later from intended_notional / intended_quantity. A 3+ decimal value
+    (a real slipped price, e.g. 78.125) must survive without being reduced
+    to two decimals -- the whole reason fill_price/proposed_entry_price
+    were widened to NUMERIC(18,6)."""
+    decision_id = str(uuid.uuid4())
+    decision = await _record_decision(
+        ticker="TEST.NS", action="BUY", intended_quantity=10,
+        intended_notional=781.25, order_type="MARKET",
+        confidence=3, primary_signal="technical", technical_basis="rsi",
+        expected_reward_risk=2.0, invalidation_condition="proposed_entry_price round-trip test",
+        decision_id=decision_id, proposed_entry_price=78.125,
+    )
+    try:
+        assert float(decision["proposed_entry_price"]) == 78.125, (
+            f"proposed_entry_price must survive at full precision, got {decision['proposed_entry_price']!r}"
+        )
+        print("  ok  proposed_entry_price (78.125) is stored directly, not reduced to two decimals")
+
+        # An identical retry is a no-op; a genuinely different proposed
+        # price under the same decision_id fails loudly, naming it -- same
+        # discipline as every other decision-defining field.
+        again = await _record_decision(
+            ticker="TEST.NS", action="BUY", intended_quantity=10,
+            intended_notional=781.25, order_type="MARKET",
+            confidence=3, primary_signal="technical", technical_basis="rsi",
+            expected_reward_risk=2.0, invalidation_condition="proposed_entry_price round-trip test",
+            decision_id=decision_id, proposed_entry_price=78.125,
+        )
+        assert str(again["decision_id"]) == decision_id
+        print("  ok  an identical retry with the same proposed_entry_price is a no-op")
+
+        try:
+            await _record_decision(
+                ticker="TEST.NS", action="BUY", intended_quantity=10,
+                intended_notional=781.25, order_type="MARKET",
+                confidence=3, primary_signal="technical", technical_basis="rsi",
+                expected_reward_risk=2.0, invalidation_condition="proposed_entry_price round-trip test",
+                decision_id=decision_id, proposed_entry_price=99.99,
+            )
+            raise AssertionError("expected a collision error for a changed proposed_entry_price")
+        except ValueError as exc:
+            assert "proposed_entry_price" in str(exc), f"error did not name it: {exc}"
+            print("  ok  a changed proposed_entry_price under the same decision_id fails loudly, naming it")
+    finally:
+        pool = await get_pool()
+        await pool.execute("DELETE FROM trades WHERE decision_id = $1", decision_id)
+
+
+async def test_fill_price_survives_three_decimal_places():
+    """Same widened-precision guarantee (NUMERIC(18,6)) on the fill side --
+    the real $1.31 reconciliation gap documented in
+    docs/evaluations/round2_tranche1_evaluation_extract.md traced to
+    exactly this kind of value being silently reduced to two decimals."""
+    decision_id = str(uuid.uuid4())
+    await _record_decision(
+        ticker="TEST.NS", action="BUY", intended_quantity=10,
+        intended_notional=781.25, order_type="MARKET",
+        confidence=3, primary_signal="technical", technical_basis="rsi",
+        expected_reward_risk=2.0, invalidation_condition="fill_price precision test",
+        decision_id=decision_id,
+    )
+    try:
+        result = await _record_execution_result(
+            decision_id, status="filled", broker_order_id="ORD-PRECISION",
+            fill_price=78.125, fill_quantity=10,
+        )
+        assert float(result["fill_price"]) == 78.125, (
+            f"fill_price must survive at full precision, got {result['fill_price']!r}"
+        )
+        print("  ok  a fill_price of 78.125 survives the journal at full precision, "
+              "not silently rounded to 78.12 or 78.13")
+    finally:
+        pool = await get_pool()
+        await pool.execute("DELETE FROM trades WHERE decision_id = $1", decision_id)
+
+
+async def test_cycle_evidence_identical_replay_is_idempotent_and_mismatch_fails_loudly():
+    """Items 7/8 -- backtest_cycle_evidence follows the exact same
+    idempotency discipline as _record_decision: an identical retry under
+    the same cycle_id is a true no-op, and a collision carrying genuinely
+    DIFFERENT evidence fails loudly, naming the mismatched field(s)."""
+    from server import _record_cycle_evidence  # type: ignore
+
+    cycle_id = str(uuid.uuid4())
+    run_id = str(uuid.uuid4())
+    kwargs = dict(
+        cycle_id=cycle_id, run_id=run_id, day_label="Day 1",
+        prompt_text="BACKTEST CYCLE — Day 1\n...",
+        input_payload={"day_label": "Day 1", "candidates": []},
+        validated_response={"decisions": [], "no_action_reason": "nothing qualified"},
+        candidate_status=[{"alias": "ALPHA", "status": "no_proposal"}],
+        attempt_count=1, retry_diagnostics=[], prompt_schema_version=1,
+        rules_md_sha256="a" * 64, agents_md_sha256="b" * 64, soul_md_sha256="c" * 64,
+    )
+    row = await _record_cycle_evidence(**kwargs)
+    print(f"created cycle evidence {cycle_id}")
+
+    try:
+        # An IDENTICAL retry (same cycle_id, same payload) is a true no-op.
+        again = await _record_cycle_evidence(**kwargs)
+        assert str(again["cycle_id"]) == cycle_id
+        assert again["attempt_count"] == 1
+        print("  ok  an identical retry under the same cycle_id is a no-op")
+
+        for field, override in (
+            ("prompt_text", {"prompt_text": "a completely different prompt"}),
+            ("validated_response", {"validated_response": {"decisions": [], "no_action_reason": "different"}}),
+            ("candidate_status", {"candidate_status": [{"alias": "ALPHA", "status": "proposed"}]}),
+            ("attempt_count", {"attempt_count": 2}),
+            ("rules_md_sha256", {"rules_md_sha256": "d" * 64}),
+        ):
+            bad_kwargs = dict(kwargs, **override)
+            try:
+                await _record_cycle_evidence(**bad_kwargs)
+                raise AssertionError(f"expected a collision error for changed {field}")
+            except ValueError as exc:
+                assert field in str(exc), f"error for changed {field} did not name it: {exc}"
+                print(f"  ok  a changed {field} under the same cycle_id fails loudly, naming it")
+    finally:
+        pool = await get_pool()
+        await pool.execute("DELETE FROM backtest_cycle_evidence WHERE cycle_id = $1", cycle_id)
+
+
 async def main():
     await test_decision_collision_detects_every_field()
     await test_identical_retry_with_real_run_id_is_a_no_op()
@@ -300,6 +430,9 @@ async def main():
     await test_null_confidence_collision_reports_named_mismatch_not_typeerror()
     await test_execution_result_retry_does_not_double_write()
     await test_strategy_profile_collision_and_null_rows_stay_readable()
+    await test_proposed_entry_price_is_stored_directly()
+    await test_fill_price_survives_three_decimal_places()
+    await test_cycle_evidence_identical_replay_is_idempotent_and_mismatch_fails_loudly()
 
 
 if __name__ == "__main__":

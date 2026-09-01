@@ -367,3 +367,93 @@ ALTER TABLE trades ADD COLUMN IF NOT EXISTS strategy_profile TEXT;
 -- single query instead of parsing Hermes' prose or cross-referencing which
 -- block a decision's date fell into.
 ALTER TABLE trades ADD COLUMN IF NOT EXISTS min_reward_risk_used NUMERIC(6, 2);
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-08-31) -- per-cycle backtest evidence + price precision.
+-- Additive only, same idempotent pattern as above.
+-- ---------------------------------------------------------------------------
+
+-- The exact entry_price Hermes proposed for a BUY, persisted directly --
+-- previously not stored at all (only intended_notional/intended_quantity
+-- existed, and dividing them back apart to reconstruct "what price did
+-- Hermes actually propose" is a derived guess, not a fact; see
+-- docs/evaluations/round2_tranche1_evaluation_extract.md §6 item 5). NULL
+-- for mechanical SELLs (nothing was "proposed", the exit is deterministic)
+-- and for every pre-existing row -- honestly absent, not backfilled.
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS proposed_entry_price NUMERIC(18, 6);
+
+-- Widened from NUMERIC(14,2): a real intraday slipped price can land on a
+-- third decimal (e.g. 78.125) and silently round to 78.13 or 78.12
+-- depending on which code path formats it -- see the same evaluation doc's
+-- documented $1.31 reconciliation gap on exactly this. Widening precision
+-- is data-preserving for every existing 2-decimal value; nothing here
+-- changes fill mechanics or historical figures, only how precisely a
+-- future one is stored.
+ALTER TABLE trades ALTER COLUMN fill_price TYPE NUMERIC(18, 6);
+
+-- backtest_cycle_evidence -- one exact record per successful backtest
+-- cycle: the precise masked inputs Hermes was shown, the exact rendered
+-- prompt, and the final validated response. Round 2 tranche 1 could
+-- measure outcomes but not audit whether Hermes actually read the
+-- technicals/headlines/reflections it was given -- this table exists so a
+-- future tranche can be audited, not just scored. cycle_id is the same
+-- deterministic key portfolio_snapshots/insight_log already use for this
+-- exact cycle, so ON CONFLICT DO NOTHING makes a retried write a true
+-- no-op, matching every other essential write's idempotency discipline in
+-- this schema (see _record_decision's own docstring).
+--
+-- Deliberately NOT granted to the `anonymous` role and NOT RLS-enabled below
+-- (unlike trades/insight_log/agent_activity/portfolio_snapshots) -- this
+-- table can carry the full rendered prompt and masked payload, a finer
+-- granularity of raw model input/output than the public read-only
+-- dashboard was ever meant to expose. No GRANT here means the anonymous
+-- Data API role cannot see this table at all, by Postgres default.
+CREATE TABLE IF NOT EXISTS backtest_cycle_evidence (
+    cycle_id              UUID PRIMARY KEY,
+    run_id                UUID NOT NULL,
+    -- The masked "Day N" label, matching portfolio_snapshots.day_label /
+    -- what Hermes itself saw this cycle.
+    day_label             TEXT NOT NULL,
+    -- Exact rendered prompt text (build_prompt's own output) -- the same
+    -- masked object, not a reconstruction after the fact.
+    prompt_text           TEXT NOT NULL,
+    -- The already-masked structured objects build_prompt was called with
+    -- (account/positions/candidates/recent_insights/reflection_trades) --
+    -- passed straight through from the same call site, never rebuilt
+    -- later from a different source.
+    input_payload         JSONB NOT NULL,
+    -- The final, schema-validated Hermes response for this cycle.
+    validated_response    JSONB NOT NULL,
+    -- Every eligible candidate alias this cycle, each marked ONLY
+    -- 'proposed' or 'no_proposal' -- a purely structural classification
+    -- (whether that alias appears in validated_response's own decisions
+    -- list), never an inference parsed out of Hermes' free-text reasoning.
+    candidate_status       JSONB NOT NULL,
+    -- Real attempt count from ask_hermes (1 = succeeded first try, 2 = one
+    -- retry) -- makes the "10 extra calls" pattern seen in tranche 1
+    -- explainable per-cycle instead of only visible as a run-wide total.
+    attempt_count          INTEGER NOT NULL,
+    -- Ordered [{"attempt": N, "error_category": "...", "error_message":
+    -- "..."}] for every UNSUCCESSFUL attempt this cycle -- error_message is
+    -- caller-bounded (never raw/unbounded), never a credential, env value,
+    -- or container command.
+    retry_diagnostics       JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- Which build_prompt schema version rendered prompt_text -- lets a
+    -- future prompt-format change be told apart from an older cycle's
+    -- evidence without guessing from the text itself.
+    prompt_schema_version  INTEGER NOT NULL,
+    -- SHA-256 of RULES.md/AGENTS.md/SOUL.md AT THE TIME this cycle ran --
+    -- proves (or disproves) which exact instructions Hermes was actually
+    -- operating under, without persisting the files themselves.
+    rules_md_sha256        TEXT NOT NULL,
+    agents_md_sha256       TEXT NOT NULL,
+    soul_md_sha256         TEXT NOT NULL,
+    -- Real runtime metadata, only when the Hermes usage report itself
+    -- actually included it -- NULL rather than a hard-coded assumption
+    -- when it didn't (see run_backtest.py's ask_hermes/HermesResult).
+    model                  TEXT,
+    provider               TEXT,
+    reasoning_effort       TEXT,
+    created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_backtest_cycle_evidence_run_id ON backtest_cycle_evidence(run_id);
