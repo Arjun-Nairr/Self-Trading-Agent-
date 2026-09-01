@@ -1032,6 +1032,76 @@ def test_validate_hermes_response_catches_bad_reward_risk_self_report():
     print("  ok  a self-reported reward:risk that contradicts the trade's own stop/target math is rejected")
 
 
+def test_validate_hermes_response_expected_reward_risk_is_action_aware():
+    """2026-09-01 contract-mismatch fix, Testing Decisions 1-6: BUY still
+    requires a real, finite, strictly positive expected_reward_risk; SELL
+    (a closing decision) permits a finite value >= 0 -- 0.0 is the HONEST
+    report for a decision with no forward reward:risk (e.g. a discretionary
+    time-stop close), not a missing or fabricated one. Negative/missing/
+    boolean/NaN/infinite remain invalid for either action."""
+    # -- BUY: unchanged from before this fix --------------------------------
+    validate_hermes_response(_response(expected_reward_risk=2.1), is_reflection_day=False)
+    for bad in (0, 0.0, -1, None, True, False, float("nan"), float("inf"), float("-inf")):
+        try:
+            validate_hermes_response(_response(expected_reward_risk=bad), is_reflection_day=False)
+            raise AssertionError(f"BUY expected_reward_risk={bad!r} should be rejected")
+        except ResponseValidationError:
+            pass
+    print("  ok  BUY: positive finite reward passes; 0/negative/missing/bool/NaN/inf rejected")
+
+    # -- SELL: a closing decision -- stop/target/self-report-match are
+    # skipped (entry-only concerns), but expected_reward_risk is still
+    # required and shape-checked, now permitting 0.0 --------------------
+    sell_decision = dict(_VALID_DECISION, action="SELL",
+                         invalidation_condition="the 5-day time stop has been reached")
+    del sell_decision["stop_price"], sell_decision["target_price"]  # entry-only, never required for SELL
+    def _sell_response(**overrides):
+        return {"decisions": [dict(sell_decision, **overrides)], "no_action_reason": ""}
+
+    validate_hermes_response(_sell_response(expected_reward_risk=0.0), is_reflection_day=False)
+    validate_hermes_response(_sell_response(expected_reward_risk=1.75), is_reflection_day=False)
+    for bad in (-0.01, -5, None, True, False, float("nan"), float("inf"), float("-inf")):
+        try:
+            validate_hermes_response(_sell_response(expected_reward_risk=bad), is_reflection_day=False)
+            raise AssertionError(f"SELL expected_reward_risk={bad!r} should be rejected")
+        except ResponseValidationError:
+            pass
+    print("  ok  SELL: 0.0 (an honest closing decision) and positive finite reward "
+          "both pass; negative/missing/bool/NaN/inf rejected")
+
+
+def test_validate_hermes_response_accepts_the_real_day_50_checkpointed_sell_payload():
+    """Item 10 -- the ACTUAL Day 50 checkpoint payload that halted Round 2
+    tranche 2 (three discretionary time-stop SELLs, each with
+    expected_reward_risk=0.0) must pass validation unmodified -- this is
+    the concrete failure this fix closes, not a synthetic stand-in."""
+    real_sell_decisions = [
+        {"alias": "MIKE", "action": "SELL", "quantity": 130, "entry_price": 147.28,
+         "stop_price": 143.5, "target_price": 166.38, "confidence": 3,
+         "primary_signal": "technical", "technical_basis": "other",
+         "expected_reward_risk": 0.0,
+         "invalidation_condition": "The 5-day time stop has been reached, so the hold is no longer valid.",
+         "reasoning": "Closed because the time stop expired before the setup reached its target or stop; exits come before new entries."},
+        {"alias": "GOLF", "action": "SELL", "quantity": 684, "entry_price": 28.93,
+         "stop_price": 27.3, "target_price": 31.75, "confidence": 3,
+         "primary_signal": "technical", "technical_basis": "other",
+         "expected_reward_risk": 0.0,
+         "invalidation_condition": "The 5-day time stop has been reached, so the hold is no longer valid.",
+         "reasoning": "Closed because the time stop expired before the setup reached its target or stop; exits come before new entries."},
+        {"alias": "CHARLIE", "action": "SELL", "quantity": 597, "entry_price": 33.4,
+         "stop_price": 31.25, "target_price": 36.33, "confidence": 3,
+         "primary_signal": "technical", "technical_basis": "other",
+         "expected_reward_risk": 0.0,
+         "invalidation_condition": "The 5-day time stop has been reached, so the hold is no longer valid.",
+         "reasoning": "Closed because the time stop expired before the setup reached its target or stop; exits come before new entries."},
+    ]
+    validate_hermes_response(
+        {"decisions": real_sell_decisions, "no_action_reason": ""}, is_reflection_day=False,
+    )
+    print("  ok  the real Day 50 checkpointed SELL payload (3 decisions, "
+          "expected_reward_risk=0.0 each) passes validation unmodified")
+
+
 def test_validate_hermes_response_rejects_non_finite_and_bad_fields():
     for bad_qty in (0, -5, float("nan"), "ten", 3.5):
         try:

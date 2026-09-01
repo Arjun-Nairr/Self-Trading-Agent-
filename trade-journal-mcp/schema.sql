@@ -56,7 +56,19 @@ CREATE TABLE IF NOT EXISTS trades (
     -- The reward:risk ratio actually calculated for this trade -- lets
     -- RULES.md §6b's active minimum be verified after the fact with a query,
     -- not by re-deriving it from entry/stop/target by hand.
-    expected_reward_risk  NUMERIC(6, 2) CHECK (expected_reward_risk > 0),
+    --
+    -- Action-aware (contract-mismatch fix, 2026-09-01): a BUY is a new
+    -- entry, so its ratio must be a real positive number. A SELL is a
+    -- closing decision -- prospective entry reward doesn't apply to it, so
+    -- 0.0 is the HONEST value (e.g. a discretionary time-stop close,
+    -- RULES.md §6c), not a missing or fabricated one. NULL still passes
+    -- (Postgres's own 3-valued CHECK semantics) for pre-migration rows
+    -- that predate this column entirely. Mirrors server.py's
+    -- `_valid_expected_reward_risk` / run_backtest.py's own copy exactly.
+    expected_reward_risk  NUMERIC(6, 2) CHECK (
+        (action = 'BUY' AND expected_reward_risk > 0)
+        OR (action <> 'BUY' AND expected_reward_risk >= 0)
+    ),
     -- One sentence: what would prove this trade wrong. RULES.md §6d --
     -- lets a later reflection check whether the predicted failure mode
     -- matched the trade's actual exit reason.
@@ -457,3 +469,28 @@ CREATE TABLE IF NOT EXISTS backtest_cycle_evidence (
     created_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_backtest_cycle_evidence_run_id ON backtest_cycle_evidence(run_id);
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-09-01) -- action-aware expected_reward_risk constraint.
+--
+-- Contract mismatch found live on Round 2 tranche 2, cycle 9 (day_index=49):
+-- Hermes returned legitimate discretionary time-stop SELL decisions with
+-- expected_reward_risk=0.0 -- 0.0 is the honest value for a closing
+-- decision (prospective entry reward doesn't apply to an exit), but the old
+-- blanket `expected_reward_risk > 0` constraint rejected every one of them,
+-- halting the run. Replaces the old constraint with the same action-aware
+-- rule now enforced in server.py's `_valid_expected_reward_risk` and
+-- run_backtest.py's own copy: BUY requires > 0, SELL (or any non-BUY
+-- action) permits >= 0. Idempotent -- DROP CONSTRAINT IF EXISTS is a safe
+-- no-op on rerun, and the guarded ADD CONSTRAINT below mirrors the existing
+-- DO $$ ... EXCEPTION WHEN duplicate_object pattern used elsewhere in this
+-- file. Preserves every existing row -- purely a constraint swap, no data
+-- touched.
+-- ---------------------------------------------------------------------------
+ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_expected_reward_risk_check;
+DO $$ BEGIN
+    ALTER TABLE trades ADD CONSTRAINT trades_expected_reward_risk_check CHECK (
+        (action = 'BUY' AND expected_reward_risk > 0)
+        OR (action <> 'BUY' AND expected_reward_risk >= 0)
+    );
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;

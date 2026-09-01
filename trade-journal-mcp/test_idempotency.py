@@ -423,6 +423,69 @@ async def test_cycle_evidence_identical_replay_is_idempotent_and_mismatch_fails_
         await pool.execute("DELETE FROM backtest_cycle_evidence WHERE cycle_id = $1", cycle_id)
 
 
+async def test_sell_decision_with_zero_reward_journals_and_replays_idempotently():
+    """2026-09-01 contract-mismatch fix, Testing Decisions 7/8: a validated
+    discretionary SELL with expected_reward_risk=0.0 (the honest value for
+    a closing decision, e.g. a time-stop close) must journal successfully
+    -- the real Day 50 failure this fix closes -- and a deterministic
+    replay of that same decision_id must remain a true no-op, exactly like
+    every other decision-defining field."""
+    decision_id = str(uuid.uuid4())
+    kwargs = dict(
+        ticker="TEST.NS", action="SELL", intended_quantity=100,
+        intended_notional=5000.0, order_type="MARKET",
+        confidence=3, primary_signal="technical", technical_basis="other",
+        expected_reward_risk=0.0,
+        invalidation_condition="the 5-day time stop has been reached",
+        strategy_notes="closing because the time stop expired",
+        decision_id=decision_id,
+    )
+    decision = await _record_decision(**kwargs)
+    try:
+        assert float(decision["expected_reward_risk"]) == 0.0, (
+            f"expected_reward_risk=0.0 must round-trip honestly, got {decision['expected_reward_risk']!r}"
+        )
+        print("  ok  a validated SELL with expected_reward_risk=0.0 journals successfully "
+              "(the real Day 50 failure this fix closes)")
+
+        again = await _record_decision(**kwargs)
+        assert str(again["decision_id"]) == decision_id
+        assert float(again["expected_reward_risk"]) == 0.0
+        print("  ok  a deterministic replay of that SELL is idempotent (a true no-op)")
+    finally:
+        pool = await get_pool()
+        await pool.execute("DELETE FROM trades WHERE decision_id = $1", decision_id)
+
+
+async def test_buy_decision_with_zero_reward_still_rejected_at_the_db():
+    """2026-09-01 contract-mismatch fix: the action-aware DB constraint
+    still rejects a BUY with expected_reward_risk<=0 -- this fix widens
+    the rule for SELL, it does not loosen it for BUY. Bypasses
+    _validate_decision_fields (Python-level) by going straight at the DB
+    constraint, so this specifically proves the CONSTRAINT itself, not
+    just the Python-level check duplicated in front of it."""
+    pool = await get_pool()
+    decision_id = str(uuid.uuid4())
+    try:
+        await pool.execute(
+            """INSERT INTO trades (decision_id, ticker, action, intended_quantity,
+                                    intended_notional, order_type, confidence,
+                                    primary_signal, expected_reward_risk,
+                                    invalidation_condition, execution_mode)
+               VALUES ($1, 'TEST.NS', 'BUY', 10, 500.0, 'MARKET', 3,
+                       'technical', 0.0, 'db constraint test', 'backtest')""",
+            decision_id,
+        )
+        raise AssertionError("expected the DB CHECK constraint to reject a BUY with reward=0.0")
+    except Exception as exc:
+        assert "expected_reward_risk" in str(exc) or "check" in str(exc).lower(), (
+            f"unexpected error, not the reward constraint: {exc}"
+        )
+        print("  ok  the DB constraint still rejects a BUY with expected_reward_risk=0.0")
+    finally:
+        await pool.execute("DELETE FROM trades WHERE decision_id = $1", decision_id)
+
+
 async def main():
     await test_decision_collision_detects_every_field()
     await test_identical_retry_with_real_run_id_is_a_no_op()
@@ -433,6 +496,8 @@ async def main():
     await test_proposed_entry_price_is_stored_directly()
     await test_fill_price_survives_three_decimal_places()
     await test_cycle_evidence_identical_replay_is_idempotent_and_mismatch_fails_loudly()
+    await test_sell_decision_with_zero_reward_journals_and_replays_idempotently()
+    await test_buy_decision_with_zero_reward_still_rejected_at_the_db()
 
 
 if __name__ == "__main__":

@@ -1359,7 +1359,13 @@ async def main():
         confidence={int(decision.get("confidence", 3))},
         primary_signal={decision.get("primary_signal", "technical")!r},
         technical_basis={decision.get("technical_basis") or "multiple"!r},
-        expected_reward_risk={float(decision.get("expected_reward_risk", 2.0))},
+        # No fallback default (contract-mismatch fix, 2026-09-01): every
+        # Hermes-authored decision reaching this point has already passed
+        # validate_hermes_response's own expected_reward_risk shape check
+        # (finite >0 for BUY, finite >=0 for SELL) -- a missing value here
+        # would mean that gate was bypassed, which should fail loudly
+        # (KeyError), never silently journal a fabricated 2.0.
+        expected_reward_risk={float(decision["expected_reward_risk"])},
         invalidation_condition={decision.get("invalidation_condition", "n/a")!r},
         strategy_notes={decision.get("reasoning", "")[:900]!r},
         stop_price={decision.get("stop_price")!r},
@@ -1423,7 +1429,13 @@ async def main():
         confidence={int(decision.get("confidence", 3))},
         primary_signal={decision.get("primary_signal", "technical")!r},
         technical_basis={decision.get("technical_basis") or "multiple"!r},
-        expected_reward_risk={float(decision.get("expected_reward_risk", 2.0))},
+        # No fallback default (contract-mismatch fix, 2026-09-01): every
+        # Hermes-authored decision reaching this point has already passed
+        # validate_hermes_response's own expected_reward_risk shape check
+        # (finite >0 for BUY, finite >=0 for SELL) -- a missing value here
+        # would mean that gate was bypassed, which should fail loudly
+        # (KeyError), never silently journal a fabricated 2.0.
+        expected_reward_risk={float(decision["expected_reward_risk"])},
         invalidation_condition={decision.get("invalidation_condition", "n/a")!r},
         strategy_notes={decision.get("reasoning", "")[:900]!r},
         data_timestamps={data_timestamps!r},
@@ -1853,6 +1865,27 @@ def _finite_positive(x) -> bool:
     )
 
 
+def _valid_expected_reward_risk(action: str, value) -> bool:
+    """Action-aware expected_reward_risk shape check (contract-mismatch
+    fix, 2026-09-01): a BUY is a new entry, so its expected_reward_risk
+    must be a real, finite, strictly positive number -- same as
+    `_finite_positive`. A SELL is a closing decision, and "prospective
+    entry reward" simply does not apply to it -- 0.0 is the HONEST value
+    for e.g. a discretionary time-stop close (RULES.md §6c), not a missing
+    or fabricated one. So a SELL permits finite >= 0. Booleans, NaN,
+    infinities, and missing values (None) are invalid for EITHER action,
+    exactly like `_finite_positive` already rejected them for BUY.
+
+    Duplicated (not imported) in trade-journal-mcp/server.py's own
+    `_valid_expected_reward_risk` -- same reasoning as BUY_SLIPPAGE_BPS
+    elsewhere in this file: the two are isolated processes (hub-and-spoke,
+    RULES.md/AGENTS.md §12B), so if this contract ever changes, both
+    copies must change together."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        return False
+    return value > 0 if action == "BUY" else value >= 0
+
+
 _VALID_PRIMARY_SIGNALS = {"technical", "sentiment", "both", "other"}
 _VALID_TECHNICAL_BASES = {"rsi", "macd", "support_resistance", "trend", "multiple", "other"}
 
@@ -1926,7 +1959,18 @@ def _validate_decision_shape(d: dict, i: int) -> None:
         raise ResponseValidationError(f"{tag}: 'other' requires an explanation in reasoning")
 
     if action != "BUY":
-        return  # stop/target/R:R are entry-only concerns (RULES.md §6a/§6b)
+        # stop/target/self-report-match are entry-only concerns (RULES.md
+        # §6a/§6b) -- but expected_reward_risk itself is still required and
+        # shape-checked for a SELL: 0.0 is the honest value for a closing
+        # decision (contract-mismatch fix, 2026-09-01), negative/missing/
+        # boolean/NaN/infinite are not.
+        if not _valid_expected_reward_risk("SELL", d.get("expected_reward_risk")):
+            raise ResponseValidationError(
+                f"{tag}: expected_reward_risk must be a finite number >= 0 for a "
+                f"SELL (0.0 is valid -- prospective entry reward does not apply "
+                f"to a close), got {d.get('expected_reward_risk')!r}"
+            )
+        return
 
     entry = float(d["entry_price"])
     if not _finite_positive(d.get("stop_price")):
@@ -1939,7 +1983,7 @@ def _validate_decision_shape(d: dict, i: int) -> None:
     if target <= entry:
         raise ResponseValidationError(f"{tag}: target_price must be above entry_price for a long")
 
-    if not _finite_positive(d.get("expected_reward_risk")):
+    if not _valid_expected_reward_risk("BUY", d.get("expected_reward_risk")):
         raise ResponseValidationError(
             f"{tag}: expected_reward_risk must be a finite positive number, got {d.get('expected_reward_risk')!r}"
         )

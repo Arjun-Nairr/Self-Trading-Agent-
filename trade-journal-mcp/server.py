@@ -21,6 +21,7 @@ else (§6b) — decision_id already exists in that row, nothing needs to be
 regenerated or remembered across the crash.
 """
 import json
+import math
 import os
 import uuid
 from datetime import datetime, timezone
@@ -59,6 +60,26 @@ _VALID_PRIMARY_SIGNALS = {"technical", "sentiment", "both", "other"}
 _VALID_TECHNICAL_BASES = {"rsi", "macd", "support_resistance", "trend", "multiple", "other"}
 
 
+def _valid_expected_reward_risk(action: str, value: Any) -> bool:
+    """Action-aware expected_reward_risk shape check (contract-mismatch
+    fix, 2026-09-01): a BUY is a new entry, so its expected_reward_risk
+    must be a real, finite, strictly positive number. A SELL is a closing
+    decision -- "prospective entry reward" simply does not apply to it, so
+    0.0 is the HONEST value for e.g. a discretionary time-stop close
+    (RULES.md §6c), not a missing or fabricated one. SELL therefore
+    permits finite >= 0. Booleans, NaN, infinities, and missing values
+    (None) are invalid for EITHER action.
+
+    Duplicated (not imported) in backtest-harness/run_backtest.py's own
+    `_valid_expected_reward_risk` -- same reasoning as that file's
+    BUY_SLIPPAGE_BPS duplication: the two are isolated processes (hub-and-
+    spoke, RULES.md/AGENTS.md §12B), so if this contract ever changes,
+    both copies must change together."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(value):
+        return False
+    return value > 0 if action == "BUY" else value >= 0
+
+
 def _validate_decision_fields(
     action: str,
     confidence: int | None,
@@ -93,8 +114,14 @@ def _validate_decision_fields(
             f"primary_signal must be one of {sorted(_VALID_PRIMARY_SIGNALS)}, "
             f"got {primary_signal!r}"
         )
-    if expected_reward_risk <= 0:
-        raise ValueError(f"expected_reward_risk must be > 0, got {expected_reward_risk}")
+    if not _valid_expected_reward_risk(action, expected_reward_risk):
+        if action == "BUY":
+            raise ValueError(f"expected_reward_risk must be a finite number > 0 for a BUY, got {expected_reward_risk!r}")
+        raise ValueError(
+            f"expected_reward_risk must be a finite number >= 0 for a {action} "
+            f"(0.0 is valid -- prospective entry reward does not apply to a "
+            f"close), got {expected_reward_risk!r}"
+        )
     if not invalidation_condition or not invalidation_condition.strip():
         raise ValueError("invalidation_condition is required and cannot be blank")
 
@@ -672,8 +699,12 @@ async def record_decision(
       technical_basis: required when primary_signal is 'technical' or
         'both' -- which maverick-mcp signal ('rsi', 'macd',
         'support_resistance', 'trend', 'multiple', or 'other').
-      expected_reward_risk: the actual ratio you calculated (target distance
-        ÷ stop distance) -- must be ≥ 2.0 per RULES.md §6b.
+      expected_reward_risk: on a BUY, the actual ratio you calculated
+        (target distance ÷ stop distance) -- must be a real positive number
+        meeting RULES.md §6b's current minimum. On a SELL (a closing
+        decision), prospective entry reward doesn't apply -- report 0.0
+        honestly rather than a fabricated ratio; any other non-negative
+        finite number is also accepted if genuinely applicable.
       invalidation_condition: one sentence -- what specific thing happening
         would prove this trade wrong. Be concrete (a price level, a signal
         reversing), not vague ("if it goes down").

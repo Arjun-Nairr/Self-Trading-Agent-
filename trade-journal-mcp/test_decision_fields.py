@@ -2,7 +2,9 @@
 the tool's own docstring claim it does -- no DB needed, pure function.
 Run: docker exec hermes-trading-agent-trade-journal python test_decision_fields.py
 """
-from server import _validate_decision_fields
+import math
+
+from server import _validate_decision_fields, _valid_expected_reward_risk
 
 
 def _valid(**overrides) -> dict:
@@ -115,6 +117,52 @@ def main():
     assert _rejects(confidence=0) is not None
     assert _rejects(primary_signal="vibes") is not None
     print("  ok  a real (non-None) confidence still enforces every check as before")
+
+    # -- 2026-09-01 contract-mismatch fix: action-aware expected_reward_risk --
+    # BUY: still requires a real, finite, strictly positive number.
+    assert _valid_expected_reward_risk("BUY", 2.5) is True
+    for bad in (0, 0.0, -1, None, True, False, math.nan, math.inf, -math.inf):
+        assert _valid_expected_reward_risk("BUY", bad) is False, f"BUY should reject {bad!r}"
+    _validate_decision_fields(**_valid(action="BUY", expected_reward_risk=2.5))
+    assert _rejects(action="BUY", expected_reward_risk=0.0) is not None
+    assert _rejects(action="BUY", expected_reward_risk=True) is not None
+    assert _rejects(action="BUY", expected_reward_risk=math.nan) is not None
+    assert _rejects(action="BUY", expected_reward_risk=math.inf) is not None
+    print("  ok  BUY: positive finite reward passes; 0/negative/bool/NaN/inf rejected")
+
+    # SELL: 0.0 is the HONEST value for a closing decision (no forward
+    # reward:risk on an exit) -- must be ACCEPTED, never treated as missing
+    # or fabricated. Any other finite non-negative number is also fine.
+    # Negative/missing/boolean/NaN/infinite remain invalid, same as BUY.
+    assert _valid_expected_reward_risk("SELL", 0.0) is True
+    assert _valid_expected_reward_risk("SELL", 1.75) is True
+    for bad in (-0.01, -5, None, True, False, math.nan, math.inf, -math.inf):
+        assert _valid_expected_reward_risk("SELL", bad) is False, f"SELL should reject {bad!r}"
+    _validate_decision_fields(**_valid(
+        action="SELL", expected_reward_risk=0.0,
+        invalidation_condition="n/a -- this is the exit",
+    ))
+    _validate_decision_fields(**_valid(
+        action="SELL", expected_reward_risk=1.75,
+        invalidation_condition="n/a -- this is the exit",
+    ))
+    assert _rejects(action="SELL", expected_reward_risk=-0.01) is not None
+    assert _rejects(action="SELL", expected_reward_risk=True) is not None
+    assert _rejects(action="SELL", expected_reward_risk=math.nan) is not None
+    assert _rejects(action="SELL", expected_reward_risk=math.inf) is not None
+    print("  ok  SELL: 0.0 (an honest closing decision) and positive finite reward "
+          "both pass; negative/bool/NaN/inf rejected")
+
+    # Mechanical exits (confidence=None) skip this check entirely regardless
+    # of action -- already covered above, re-asserted here for this specific
+    # field to nail down "retain their existing behaviour" explicitly.
+    _validate_decision_fields(
+        action="SELL", confidence=None, primary_signal="other",
+        expected_reward_risk=-99, invalidation_condition="",
+        strategy_notes=None, technical_basis=None,
+    )
+    print("  ok  a mechanical exit (confidence=None) is unaffected by the "
+          "action-aware reward check -- validation is skipped entirely")
 
     print("PASS: decision-field validation enforces every rule it claims to")
 
