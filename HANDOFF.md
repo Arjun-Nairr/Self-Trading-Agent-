@@ -63,9 +63,10 @@ Two rounds so far:
 - **50 completed trading cycles** (`trading_days_elapsed` = 50). Cursor
   now `2026-04-29`.
 - **Equity: $103,696.08 — total return +3.70%.** Cash $83,111.53.
-- **16 closed trades total** across the run (win/loss mix documented per-
-  tranche in `docs/evaluations/round2_tranche1_evaluation_extract.md` for
-  cycles 1–25; cycles 26–50 not yet separately evaluated — see §10).
+- **16 closed trades total** across the run — full evaluation (all 50
+  cycles, tranche comparison, data-adequacy verdict) is in
+  `docs/evaluations/round2_50cycle_evaluation_extract.md`, the active
+  compact evaluation brief — see §10.
 - **1 open position: WMG**, 721 shares @ $28.20, stop $27.00 / target
   $31.54, entered trading-day 50.
 - **0 pending orders.**
@@ -258,18 +259,7 @@ Two different levels of detail exist across the 50 completed cycles —
   outcome data**, but **no exact per-cycle prompt/input/response
   evidence** — the `backtest_cycle_evidence` table did not exist yet when
   these cycles ran, and they were deliberately never backfilled (out of
-  scope, would require re-deriving masked inputs after the fact). Fully
-  evaluated in `docs/evaluations/round2_tranche1_evaluation_extract.md`:
-  run-integrity extraction, account reconciliation (a real, documented
-  $1.31 gap traced to one trade's stored `fill_price` precision, now
-  fixed going forward), complete verbatim trade ledger, performance
-  statistics with sample sizes, rejection/no-trade breakdown by
-  `RULES.md` section, all reflection entries with `sample_size` accuracy
-  independently checked, a 19-item data-adequacy coverage matrix, and a
-  SQL/formula reproducibility appendix. Two corrections applied in
-  `7c4ac06`: a lower BUY fill vs. proposed price is price-favourable
-  movement, not "adverse slippage," and the 7-of-8 pattern is too small a
-  sample (n=8) to explain, only to keep tracking.
+  scope, would require re-deriving masked inputs after the fact).
 - **Cycles 26–50 (25 more cycles, same `run_id`): exact masked-prompt/
   input/response evidence exists for every one** — `backtest_cycle_evidence`
   holds one row per cycle: the verbatim rendered prompt, the exact masked
@@ -280,12 +270,21 @@ Two different levels of detail exist across the 50 completed cycles —
   `AGENTS.md`/`SOUL.md` as they stood that cycle. This makes it possible
   to audit not just *what* Hermes decided in this range but whether it
   actually read what it was shown — something tranche 1 cannot support.
-  **Not yet evaluated** — no report exists for cycles 26–50 yet. This is
-  the next task (§10).
 - Real runtime `model`/`provider`/`reasoning_effort` fields on evidence
   rows are `NULL` for every row so far — the real Hermes `--usage-file`
   report has never been observed to include those keys. Not a bug; will
   populate automatically if a future Hermes version reports them.
+
+**Evaluation status:** the full 50-cycle run has been evaluated. Read
+first: `docs/evaluations/round2_50cycle_evaluation_extract.md` — the
+active, compact evaluation brief (headline facts only, clearly labeled
+verified/interpretation/unknown). For row-level detail (the complete
+trade ledger with verbatim reasoning, all 10 reflections verbatim, exact
+SQL) consult the archived raw reports it links to:
+`docs/history/evaluations/round2_50cycle_evaluation_extract_RAW.md`
+(cycles 1–50) and `docs/history/evaluations/round2_tranche1_evaluation_extract.md`
+(cycles 1–25, narrower). Do not open the archives unless the task
+genuinely needs that row-level detail.
 
 ---
 
@@ -363,31 +362,24 @@ number needs to go through the user explicitly.
 
 ## 10. Exact next step
 
-**A read-only evaluation of the complete 50-cycle run — not more
-training.** Specifically, it must distinguish:
+**The read-only evaluation of the complete 50-cycle run is done.** See
+`docs/evaluations/round2_50cycle_evaluation_extract.md` (§7 above) — it
+covers performance/lifecycle evidence across all 50 cycles, the deeper
+prompt/evidence auditing available only for cycles 26–50, tranche 1 vs.
+tranche 2 behaviour, and an explicit data-adequacy verdict (labeled
+confident/weak/unknown per question).
 
-- Performance and lifecycle evidence available across **all 50 cycles**
-  (trade ledger, P&L, rejections, sizing correctness — the same kind of
-  extraction tranche 1 already received).
-- The deeper prompt/evidence auditing available **only for cycles
-  26–50** (§7) — whether Hermes actually read the technicals, headlines,
-  reflections, and account state it was shown, not just what it decided.
-- **Tranche 1 (cycles 1–25) vs. tranche 2 (cycles 26–50) behaviour** —
-  whether judgment quality, rejection patterns, or the §6a stop-margin
-  rate changed across the resume, and whether the Day 50 contract-mismatch
-  incident affected anything beyond the three SELLs it originally blocked.
-- **Whether this 50-cycle, 16-closed-trade dataset is adequate for
-  changing judgment guidance** (`AGENTS.md`/`SOUL.md`) — or still too
-  small, the same honesty standard `RULES.md`/`SOUL.md` already apply to
-  Hermes' own reflections.
-- **Whether any measurement gap remains** before further training would
-  be worth running (e.g., anything §8's limitations list still leaves
-  open).
+**The actual next step is to review that evaluation brief with the
+user** and decide, together, whether the dataset is adequate to discuss
+changing judgment guidance (`AGENTS.md`/`SOUL.md`) or whether another
+unchanged tranche is worth running first (the brief's own verdict: 16
+closed trades is still short of `RULES.md` §6b's stated 30–60-trade
+target — meaningful but not decisive either way).
 
-**Do not, until that evaluation is reviewed with the user:** start, reset,
-or resume training; change `RULES.md`/`AGENTS.md`/`SOUL.md`; change the
-model/provider/reasoning-effort configuration; do fundamental-data work;
-redesign the dashboard; or begin any live deployment work.
+**Do not, until that review happens:** start, reset, or resume training;
+change `RULES.md`/`AGENTS.md`/`SOUL.md`; change the model/provider/
+reasoning-effort configuration; do fundamental-data work; redesign the
+dashboard; or begin any live deployment work.
 
 ---
 
@@ -409,7 +401,8 @@ redesign the dashboard; or begin any live deployment work.
 | `watchlist/watchlist.json` | The fixed 10-ticker eligible universe. |
 | `docs/PHASE1_AGGRESSIVE_DESIGN.md` | The aggressive profile — numbers, escalation mechanism, what stays mandatory. |
 | `docs/evaluations/run1_evaluation_extract.md` | Round 1's full extract (125 cycles, zero fills). |
-| `docs/evaluations/round2_tranche1_evaluation_extract.md` | Cycles 1–25 full extract — see §7. |
+| `docs/evaluations/round2_50cycle_evaluation_extract.md` | **Active** — compact Round 2 evaluation brief (all 50 cycles) — see §7. |
+| `docs/history/evaluations/` | Archived raw Round 2 evaluation reports (full ledgers, verbatim reasoning/reflections, SQL) — consult only for row-level detail. |
 | `docs/history/` | Archived/superseded material — see §9. Consult only when a task needs that specific detail. |
 
 ---
