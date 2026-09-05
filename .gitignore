@@ -14,6 +14,13 @@ quota_pacer_state.json
 backtest_state.json
 cycle_checkpoint.json
 
+# Machine-readable raw output of the human-only offline diagnostics
+# (geometry_scan.py / counterfactual.py / benchmark_sensitivity.py) --
+# regenerate by re-running the script, never the source of truth itself
+.geometry_scan_data.json
+.counterfactual_data.json
+.benchmark_sensitivity_data.json
+
 # Auto-installed third-party skill plugin (Leonxlnx/taste-skill), unrelated
 # to this project -- not our source, don't want it in this repo's history
 .agents/
