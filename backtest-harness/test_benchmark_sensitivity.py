@@ -38,12 +38,31 @@ def ibar(t: str, o: float, h: float, l: float, c: float) -> dict:
     return {"time": t, "open": o, "high": h, "low": l, "close": c}
 
 
+FULL_SESSION_TIMES = None  # filled lazily on first use -- bs must be imported first
+
+
 def full_intraday(entry_open: float, extra_bars: list[dict] | None = None) -> list[dict]:
-    """A 09:30/09:45 pair plus whatever later-in-the-day bars a test
-    needs, all at a flat price unless overridden."""
-    bars = [ibar("09:30", entry_open, entry_open, entry_open, entry_open),
-            ibar("09:45", entry_open, entry_open, entry_open, entry_open)]
-    return bars + (extra_bars or [])
+    """A COMPLETE flat regular-session (09:30-16:00) 15-minute bar grid at
+    `entry_open`. `extra_bars` OVERRIDE the bar at their own timestamp
+    (not appended) -- technical_baseline_curve now requires the full
+    session before any stop/target walk (Fix 1), so a test can no longer
+    get away with a sparse 2-bar day; this generates a complete one by
+    default and lets a test perturb just the specific bar(s) it cares
+    about."""
+    global FULL_SESSION_TIMES
+    if FULL_SESSION_TIMES is None:
+        FULL_SESSION_TIMES = bs._expected_session_bar_times("09:30", "16:00")
+    bars = {t: ibar(t, entry_open, entry_open, entry_open, entry_open) for t in FULL_SESSION_TIMES}
+    for b in (extra_bars or []):
+        bars[b["time"]] = b
+    return [bars[t] for t in FULL_SESSION_TIMES]
+
+
+def full_session_hours(trading_days: list[date]) -> dict[str, tuple[str, str]]:
+    """Synthetic session_hours for technical_baseline_curve's new
+    coverage check -- every test day is a full regular 09:30-16:00
+    session (no half days in this synthetic calendar)."""
+    return {str(d): ("09:30", "16:00") for d in trading_days}
 
 
 # ===========================================================================
@@ -153,7 +172,7 @@ gapped = {"AAA": dict(daily_bars["AAA"])}
 del gapped["AAA"][str(lookback_days[3])]  # remove one lookback bar
 bs.fetch_intraday_bars = patch_intraday({})
 try:
-    technical_baseline_curve(["AAA"], gapped, lookback_days, trading_days)
+    technical_baseline_curve(["AAA"], gapped, lookback_days, trading_days, full_session_hours(trading_days))
     raised = False
 except MissingDataError:
     raised = True
@@ -163,7 +182,7 @@ check_true("technical_baseline_curve raises MissingDataError on a missing SMA-hi
 # -- 4. signal date differs from entry date (issue #4) ----------------------
 trading_days, lookback_days, daily_bars = build_scenario()
 bs.fetch_intraday_bars = patch_intraday({})  # everything flat at 11.0, no touches -> survives to time stop
-curve, trades, rejected = technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days)
+curve, trades, rejected = technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
 check_true("technical baseline produced at least one trade in the synthetic scenario", len(trades) >= 1)
 tr = trades[0]
 check_true("entry_date is strictly later than signal_date", tr["entry_date"] > tr["signal_date"])
@@ -180,7 +199,7 @@ trading_days, lookback_days, daily_bars = build_scenario()
 # 3-12% stop-distance band off the real fill ((11.5-10.45)/11.5 ~= 9.1%).
 gapped_entry = {"2026-01-07": full_intraday(11.5)}
 bs.fetch_intraday_bars = patch_intraday(gapped_entry)
-curve, trades, rejected = technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days)
+curve, trades, rejected = technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
 check_true("a gapped entry still produces a trade (stop is within band off the higher fill)", len(trades) >= 1)
 tr = trades[0]
 risk = tr["entry_price"] - tr["stop_price"]
@@ -198,7 +217,7 @@ trading_days, lookback_days, daily_bars = build_scenario()
 # stop distance ~79%, far outside the 3-12% band.
 huge_gap_entry = {"2026-01-07": full_intraday(50.0)}
 bs.fetch_intraday_bars = patch_intraday(huge_gap_entry)
-curve, trades, rejected = technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days)
+curve, trades, rejected = technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
 check("an out-of-band gapped entry is rejected, not traded", len(trades), 0)
 check_true("the rejection is recorded in diagnostic output", len(rejected) >= 1)
 check("rejection reason names the stop-distance band", "band" in rejected[0]["reason"], True)
@@ -211,7 +230,7 @@ trading_days, lookback_days, daily_bars = build_scenario()
 # A later same-day bar's high blows through the target.
 same_day_target = {"2026-01-07": full_intraday(11.0, [ibar("10:00", 11.0, 12.5, 11.0, 12.0)])}
 bs.fetch_intraday_bars = patch_intraday(same_day_target)
-curve, trades, rejected = technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days)
+curve, trades, rejected = technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
 check_true("a same-day target touch produces exactly one closed trade", len(trades) == 1)
 tr = trades[0]
 check("the trade exits on its OWN entry day, not a later day", tr["exit_date"], tr["entry_date"])
@@ -230,7 +249,7 @@ flat_days = {str(trading_days[j]): full_intraday(11.0) for j in range(2, 7)}  # 
 time_stop_day = trading_days[2 + TIME_STOP_TRADING_DAYS]
 daily_bars["AAA"][str(time_stop_day)] = bar(11.0, 20.0, 11.0, 15.0)  # open=11.0, high=20 blows through target
 bs.fetch_intraday_bars = patch_intraday(flat_days)
-curve, trades, rejected = technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days)
+curve, trades, rejected = technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
 check_true("exactly one trade closes via the time stop", any(t["outcome"] == "time_stop" for t in trades))
 tstop_trade = next(t for t in trades if t["outcome"] == "time_stop")
 check("time-stop exit price is the OPEN, not the target the day's range later touched",
@@ -263,7 +282,7 @@ bs.RISK_PCT, bs.MAX_POS_PCT = 1.0, 1.0
 bs.STARTING_EQUITY = 10_000.0
 try:
     bs.fetch_intraday_bars = per_ticker_day_intraday(overrides, daily_bars)
-    curve, trades, rejected = technical_baseline_curve(["AAA", "BBB"], daily_bars, lookback_days, trading_days)
+    curve, trades, rejected = technical_baseline_curve(["AAA", "BBB"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
 finally:
     bs.RISK_PCT, bs.MAX_POS_PCT = orig_risk_pct, orig_max_pos_pct
     bs.STARTING_EQUITY = orig_starting_equity
@@ -306,7 +325,7 @@ bs.RISK_PCT, bs.MAX_POS_PCT = 1.0, 1.0
 bs.STARTING_EQUITY = 10_000.0
 try:
     bs.fetch_intraday_bars = per_ticker_day_intraday(overrides, daily_bars)
-    curve, trades, rejected = technical_baseline_curve(["AAA", "BBB"], daily_bars, lookback_days, trading_days)
+    curve, trades, rejected = technical_baseline_curve(["AAA", "BBB"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
 finally:
     bs.RISK_PCT, bs.MAX_POS_PCT = orig_risk_pct, orig_max_pos_pct
     bs.STARTING_EQUITY = orig_starting_equity
@@ -336,7 +355,7 @@ next_day = str(trading_days[3])
 missing_930_only[("AAA", next_day)] = None
 bs.fetch_intraday_bars = per_ticker_day_intraday(missing_930_only, daily_bars)
 try:
-    technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days)
+    technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
     raised, msg = False, ""
 except MissingDataError as exc:
     raised, msg = True, str(exc)
@@ -367,7 +386,7 @@ overrides = {
 bs.STARTING_EQUITY = 10_000.0
 try:
     bs.fetch_intraday_bars = per_ticker_day_intraday(overrides, daily_bars)
-    curve, trades, rejected = technical_baseline_curve(["AAA", "BBB"], daily_bars, lookback_days, trading_days)
+    curve, trades, rejected = technical_baseline_curve(["AAA", "BBB"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
 finally:
     bs.STARTING_EQUITY = orig_starting_equity
 
@@ -410,7 +429,7 @@ entry_day = "2026-01-07"
 no_945_bar = {("AAA", entry_day): [ibar("09:30", 11.0, 11.0, 11.0, 11.0)]}  # 09:30 only, no 09:45
 bs.fetch_intraday_bars = per_ticker_day_intraday(no_945_bar, daily_bars)
 try:
-    technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days)
+    technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
     raised, msg = False, ""
 except MissingDataError as exc:
     raised, msg = True, str(exc)
@@ -433,7 +452,7 @@ overrides = {
 }
 bs.fetch_intraday_bars = per_ticker_day_intraday(overrides, daily_bars)
 try:
-    technical_baseline_curve(["AAA", "BBB"], daily_bars, lookback_days, trading_days)
+    technical_baseline_curve(["AAA", "BBB"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
     raised, msg = False, ""
 except MissingDataError as exc:
     raised, msg = True, str(exc)
@@ -441,6 +460,28 @@ check_true("a carried position missing its 09:30 mark raises MissingDataError, "
            "never silently valued at cost basis or skipped", raised)
 check_true("the error names the carried ticker", "AAA" in msg)
 check_true("the error names the date sizing was needed", bbb_entry_day in msg)
+
+
+# -- Fix 1 (this pass): an incomplete intraday session -- one POST-09:45 --
+#    bar missing from an otherwise-complete held-position session -- must
+#    fail loudly before any stop/target walk uses it, never silently walk
+#    whatever bars happen to be present (a missing afternoon bar could
+#    hide the touch that would have closed the position).
+trading_days, lookback_days, daily_bars = build_scenario()
+entry_day = "2026-01-07"
+complete_session = full_intraday(11.0)  # complete flat 09:30-16:00 grid, no touches
+incomplete_session = [b for b in complete_session if b["time"] != "14:00"]  # remove ONE afternoon bar
+bs.fetch_intraday_bars = per_ticker_day_intraday({("AAA", entry_day): incomplete_session}, daily_bars)
+try:
+    technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days, full_session_hours(trading_days))
+    raised, msg = False, ""
+except MissingDataError as exc:
+    raised, msg = True, str(exc)
+check_true("one missing post-09:45 bar in an otherwise-complete session raises "
+           "MissingDataError -- incomplete sessions cannot silently alter results", raised)
+check_true("the error names the ticker", "AAA" in msg)
+check_true("the error names the date", entry_day in msg)
+check_true("the error names the specific missing timestamp", "14:00" in msg)
 
 
 # -- pooled exposure: >20% total while never >20% in any ONE position ------
@@ -455,7 +496,7 @@ for d in all_days:
     for t in tickers:
         daily_bars_multi[t][str(d)] = bar(close, close + 0.1, close - 0.1, close)
 bs.fetch_intraday_bars = patch_intraday({})  # flat everywhere, all three survive to time stop concurrently
-curve, trades, rejected = technical_baseline_curve(tickers, daily_bars_multi, lookback_days, trading_days)
+curve, trades, rejected = technical_baseline_curve(tickers, daily_bars_multi, lookback_days, trading_days, full_session_hours(trading_days))
 # Every ticker crosses the SAME day -> three concurrent entries the next day.
 entry_day_trades = [t for t in trades if t["entry_date"] == "2026-01-07"]
 check("all three tickers entered concurrently", len(entry_day_trades), 3)
@@ -605,6 +646,38 @@ check_true("risk/cap classification is NOT the stronger 'fully_replayable' claim
            classification != "fully_replayable")
 check("risk/cap classification names the cash-constrained approximation",
       classification, "chronological_cash_constrained_approximation")
+
+
+# ===========================================================================
+# Fix 2 (this pass): report-value reconciliation. Every percentage/dollar
+# pair the report displays must come from reconciliation_table -- never
+# typed independently -- so return_pct == dollar_pnl / STARTING_EQUITY *
+# 100 (within rounding) for every row, always.
+# ===========================================================================
+
+recon_rows = bs.reconciliation_table([
+    ("hermes_full_portfolio", 3696.08),
+    ("hermes_realized_only_ledger", bs.HARNESS_REALIZED_PNL),
+    ("ledger_recomputed_from_LEDGER", 3445.04),
+    ("technical_baseline", 388.80),
+    ("risk_cap_grid_2pct_20pct", 3502.44),
+])
+for r in recon_rows:
+    check_true(f"{r['label']}: return_pct is derived from dollar_pnl via ONE shared formula",
+               abs(r["return_pct"] - round(r["dollar_pnl"] / STARTING_EQUITY * 100, 3)) < 1e-9)
+
+# Known, independently-sourced correct values (not recomputed the way the
+# function itself computes them) -- guards the specific figures this
+# report relies on, not just the formula's shape.
+check("Hermes full-portfolio pairing matches the real recorded figures "
+      "(the exact pair a prior version of the report mismatched)",
+      (recon_rows[0]["dollar_pnl"], recon_rows[0]["return_pct"]), (3696.08, 3.696))
+check("Realized-only closed-ledger pairing matches the harness-authoritative "
+      "figures from docs/evaluations/round2_50cycle_evaluation_extract.md §2",
+      (recon_rows[1]["dollar_pnl"], recon_rows[1]["return_pct"]), (3443.73, 3.444))
+check_true("the full-portfolio and realized-only rows are DIFFERENT pairs -- "
+           "proving the function can't accidentally collapse them into one",
+           recon_rows[0] != recon_rows[1])
 
 
 print(f"{checks} checks passed")

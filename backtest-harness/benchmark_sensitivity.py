@@ -38,9 +38,9 @@ from statistics import pstdev
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from geometry_scan import fetch_trading_days                           # noqa: E402
 from run_backtest import (                                             # noqa: E402
-    REPO, STARTING_EQUITY, TIME_STOP_TRADING_DAYS, _slipped_buy_price,
-    evaluate_bar_stop_target, evaluate_opening_gap, fetch_bars,
-    fetch_intraday_bars, json_from, run_in,
+    REPO, STARTING_EQUITY, TIME_STOP_TRADING_DAYS, _expected_session_bar_times,
+    _slipped_buy_price, evaluate_bar_stop_target, evaluate_opening_gap,
+    fetch_bars, fetch_intraday_bars, json_from, run_in,
 )
 
 RUN_ID = "e68525f9-ce89-4588-a57e-866f28cd99fd"
@@ -143,6 +143,55 @@ asyncio.run(main())
         n = int(r["day_label"].split()[1])
         r["real_date"] = str(PERIOD_START + timedelta(days=n - 1))
     return rows
+
+
+def fetch_session_hours(start: date, end: date) -> dict[str, tuple[str, str]]:
+    """Real per-day regular-session (open, close) HH:MM ET times for every
+    trading day in [start, end] -- one batched /v2/calendar call, same
+    endpoint and batching style as geometry_scan.fetch_trading_days (kept
+    as a separate function here, not imported, only because that one
+    extracts "date" and discards "open"/"close"). Feeds
+    _expected_session_bar_times (run_backtest.py's own definition of a
+    complete session) so a shortened/half day gets its own correct,
+    shorter expected bar grid instead of an assumed fixed 09:30-16:00."""
+    script = f'''
+import asyncio, json, httpx
+from server import _headers, BASE_URL
+
+async def main():
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(f"{{BASE_URL}}/v2/calendar",
+                                 params={{"start": "{start}", "end": "{end}"}},
+                                 headers=_headers(), timeout=30)
+        resp.raise_for_status()
+        rows = resp.json()
+    print(json.dumps({{r["date"]: [r["open"], r["close"]] for r in rows}}))
+
+asyncio.run(main())
+'''
+    raw = json_from(run_in("alpaca-mcp", script))
+    return {d: (v[0], v[1]) for d, v in raw.items()}
+
+
+def _require_full_session_bars(ticker: str, day: date, bars: list[dict],
+                                session_hours: dict[str, tuple[str, str]]) -> None:
+    """A held position's post-09:45 stop/target walk needs the COMPLETE
+    expected regular-session 15-minute bar sequence for `day` -- a single
+    missing afternoon bar could hide the touch that would have closed it.
+    Reuses run_backtest.py's own `_expected_session_bar_times` (the same
+    session-completeness definition the real harness enforces via its own
+    `require_intraday_coverage`, respecting shortened/half sessions via
+    the real trading-calendar close time) rather than inventing a second,
+    possibly-conflicting definition of "complete" here."""
+    day_s = str(day)
+    hours = session_hours.get(day_s)
+    if hours is None:
+        raise MissingDataError(f"{ticker}: no trading-calendar session hours for {day} — fails closed")
+    expected = _expected_session_bar_times(*hours)
+    present = {b["time"] for b in bars}
+    missing = [t for t in expected if t not in present]
+    if missing:
+        raise MissingDataError(f"{ticker}: missing required intraday bar(s) {missing} on {day} — fails closed")
 
 
 def json_from_list(text: str) -> list:
@@ -333,7 +382,8 @@ def _resolve_carried_pre_945(bar_930: dict, stop: float, target: float, held_day
 
 
 def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str, dict]],
-                              lookback_days: list[date], trading_days: list[date]
+                              lookback_days: list[date], trading_days: list[date],
+                              session_hours: dict[str, tuple[str, str]]
                               ) -> tuple[Curve, list[dict], list[dict]]:
     all_days = lookback_days + trading_days
     _require_full_coverage(tickers, daily_bars, all_days)
@@ -474,6 +524,7 @@ def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str,
             if t not in positions:
                 continue  # shouldn't happen; guards against double-processing
             pos = positions[t]
+            _require_full_session_bars(t, day, intraday_today[t], session_hours)
             touch = _resolve_entry_day_exit(t, intraday_today[t], pos["stop"], pos["target"])
             if touch:
                 kind, exit_price = touch
@@ -487,6 +538,7 @@ def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str,
                 del positions[t]
 
         for t, f in filled_today.items():
+            _require_full_session_bars(t, day, f["entry_bars"], session_hours)
             exit_touch = _resolve_entry_day_exit(t, f["entry_bars"], f["stop"], f["target"])
             if exit_touch:
                 kind, exit_price = exit_touch
@@ -518,6 +570,36 @@ def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str,
     return (Curve("Technical baseline (SMA10 crossover, pooled account)",
                    [str(d) for d in trading_days], equity_curve, exposure_curve),
             trades_log, rejected_entries)
+
+
+# ---------------------------------------------------------------------
+# report reconciliation -- the single source of truth for every
+# percentage/dollar pair docs/evaluations/round2_benchmark_sensitivity.md
+# §3a displays. A prior version of that report paired Hermes' full-
+# portfolio return with the closed-ledger-only dollar figure by hand,
+# because the report's prose typed each number independently. This
+# function is the one place a (label, dollar_pnl) pair becomes a
+# (dollar_pnl, return_pct) row -- report authors read numbers FROM its
+# output, never type a percentage next to a dollar figure themselves.
+# ---------------------------------------------------------------------
+
+# The one genuinely EXTERNAL fact in the reconciliation table: the
+# harness-authoritative realized P&L for the 16 closed trades ONLY
+# (excludes the still-open position's unrealized P&L) -- this codebase
+# does not compute it, it is read from
+# docs/evaluations/round2_50cycle_evaluation_extract.md §2.
+HARNESS_REALIZED_PNL = 3443.73
+
+
+def reconciliation_table(pairs: list[tuple[str, float]]) -> list[dict]:
+    """Pure. `pairs` is (label, dollar_pnl); every row's `return_pct` is
+    ALWAYS derived from that SAME dollar_pnl via one formula -- never
+    typed independently -- so the two can never silently drift apart."""
+    return [
+        {"label": label, "dollar_pnl": round(pnl, 2),
+         "return_pct": round(pnl / STARTING_EQUITY * 100, 3)}
+        for label, pnl in pairs
+    ]
 
 
 # ---------------------------------------------------------------------
@@ -803,8 +885,12 @@ def main() -> None:
                                daily_bars, trading_days, day1_intraday)
     cash_c = cash_curve(trading_days)
 
+    print("fetching real trading-calendar session hours (respects shortened sessions)...", file=sys.stderr)
+    session_hours = fetch_session_hours(PERIOD_START, PERIOD_END)
+
     print("simulating SMA10-crossover technical baseline (pooled account)...", file=sys.stderr)
-    tech_curve, tech_trades, tech_rejected = technical_baseline_curve(watchlist, daily_bars, lookback_days, trading_days)
+    tech_curve, tech_trades, tech_rejected = technical_baseline_curve(
+        watchlist, daily_bars, lookback_days, trading_days, session_hours)
 
     print("fetching Hermes' own equity curve from Neon (read-only)...", file=sys.stderr)
     hermes_rows = fetch_hermes_equity_curve()
@@ -820,6 +906,20 @@ def main() -> None:
     print("recomputing sensitivity grid from the archived Round 2 ledger...", file=sys.stderr)
     sensitivity = sensitivity_analysis()
 
+    # The report's §3a reconciliation table -- generated here from the
+    # SAME structured results everything else above already computed, so
+    # every printed percentage is paired with the dollar figure it was
+    # actually derived from. See reconciliation_table's own docstring.
+    ledger_recomputed = min_rr_threshold_filter([1.5])["min_rr>=1.5"]
+    grid_2_20 = sensitivity["risk_pct_x_concentration_cap"]["grid"]["risk=2%_cap=20%"]
+    reconciliation = reconciliation_table([
+        ("hermes_full_portfolio", hermes_curve.equity[-1] - STARTING_EQUITY),
+        ("hermes_realized_only_ledger", HARNESS_REALIZED_PNL),
+        ("ledger_recomputed_from_LEDGER", ledger_recomputed["total_pnl"]),
+        ("technical_baseline", tech_curve.equity[-1] - STARTING_EQUITY),
+        ("risk_cap_grid_2pct_20pct", grid_2_20["total_pnl"]),
+    ])
+
     out = {
         "period": {"start": str(PERIOD_START), "end": str(PERIOD_END), "trading_days": len(trading_days)},
         "metrics": [metrics(cash_c), metrics(spy_curve), metrics(ew_curve), metrics(tech_curve), metrics(hermes_curve)],
@@ -827,6 +927,7 @@ def main() -> None:
         "technical_baseline_rejected_entries": tech_rejected,
         "hermes_snapshots": hermes_rows,
         "sensitivity": sensitivity,
+        "reconciliation": reconciliation,
         "curves": {c.label: {"dates": c.dates, "equity": c.equity, "exposure": c.exposure}
                    for c in [cash_c, spy_curve, ew_curve, tech_curve, hermes_curve]},
     }
@@ -835,6 +936,7 @@ def main() -> None:
     for m in out["metrics"]:
         print(m)
     print(f"technical baseline: {len(tech_trades)} trades, {len(tech_rejected)} rejected entries")
+    print("reconciliation:", json.dumps(reconciliation, indent=2))
     print(json.dumps(sensitivity, indent=2)[:2000])
 
 
