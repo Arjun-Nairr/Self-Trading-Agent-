@@ -17,9 +17,14 @@ has no personal notes in it; `.gitignore` keeps local Obsidian state
 | `03-project-workflow.canvas` | NOW (agreed implementation order) / NEXT / LATER (discussion items from `docs/PROJECT_BACKLOG.md`, not approved work). | 🟢 **Engineering ground truth** — a roadmap snapshot, not a plan Claude may execute unprompted |
 | `04-linkedin-story.canvas` | Four screenshot-ready frames explaining the project for an outside, non-technical audience. | 🟡 **Presentation-oriented** — simplified for readability; scrubbed of any run ID, credential, URL or internal path |
 
-Canvases 1–3 are the source to trust when reasoning about the real system.
-Canvas 4 deliberately trades precision for clarity and is not a substitute
-for 1–3.
+**Canvases 1–3 are maintained visual views derived from the repository —
+useful for orientation, not the authoritative source themselves.** When a
+canvas and the repo disagree, the repo wins. The actual authorities:
+`RULES.md` for numeric trading rules, `AGENTS.md` for cycle procedure,
+`docker-compose.yml` and the current code for implemented topology and
+behaviour, and `HANDOFF.md` for current project status and next actions.
+Canvas 4 goes further still — it trades precision for clarity on top of
+that — and is not a substitute for any of the above.
 
 ## Keeping this vault current
 

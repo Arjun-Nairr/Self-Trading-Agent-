@@ -1,370 +1,46 @@
 {
-  "nodes": [
-    {
-      "id": "legend2",
-      "type": "text",
-      "x": 40,
-      "y": 40,
-      "width": 1200,
-      "height": 90,
-      "text": "**Legend** \u2014 \ud83d\udfe3 Agent judgment \u00b7 \ud83d\udd34 Deterministic enforcement \u00b7 \ud83d\udfe0 State reconciliation/journaling. Numbered 1-12, left to right, wrapping to a second row.",
-      "color": "#868e96"
-    },
-    {
-      "id": "s1",
-      "type": "text",
-      "x": 40,
-      "y": 200,
-      "width": 360,
-      "height": 220,
-      "text": "**1. Reconcile prior pending activity**\n\nCheck any order still `pending` against REAL broker state (`get_order_status`). The broker is truth, never the journal \u2014 a prior cycle may have died mid-flight. No new order until this is clean.",
-      "color": "#f08c00"
-    },
-    {
-      "id": "s2",
-      "type": "text",
-      "x": 460,
-      "y": 200,
-      "width": 360,
-      "height": 220,
-      "text": "**2. Read RULES.md**\n\nRe-read the locked rules file at the start of EVERY cycle \u2014 position sizing, caps, circuit breaker, stop distances, prohibitions. Never worked from memory of what it said.",
-      "color": "#e03131"
-    },
-    {
-      "id": "s3",
-      "type": "text",
-      "x": 880,
-      "y": 200,
-      "width": 360,
-      "height": 220,
-      "text": "**3. Establish account & position state**\n\n`get_account` + `get_positions` \u2014 the broker's real numbers, not the journal's, which can drift. A null drawdown figure is treated as a tripped breaker, not \"fine.\"",
-      "color": "#f08c00"
-    },
-    {
-      "id": "s4",
-      "type": "text",
-      "x": 1300,
-      "y": 200,
-      "width": 360,
-      "height": 220,
-      "text": "**4. Manage exits first**\n\nBefore looking for anything new, per open position: stop/target hit? time stop expired (\u00a76c)? thesis invalidated (\u00a76d)? Exits are exempt from market-hours/circuit-breaker limits.",
-      "color": "#9c6ade"
-    },
-    {
-      "id": "s5",
-      "type": "text",
-      "x": 1720,
-      "y": 200,
-      "width": 360,
-      "height": 220,
-      "text": "**5. Screen & evaluate candidates**\n\nActively evaluate EVERY watchlist name not already held. Ordinary confidence (3) is a sufficient reason to act \u2014 this is a throughput-built sandbox, not a wait-for-perfect one.",
-      "color": "#9c6ade"
-    },
-    {
-      "id": "s6",
-      "type": "text",
-      "x": 2140,
-      "y": 200,
-      "width": 360,
-      "height": 220,
-      "text": "**6. Review technical evidence**\n\nmaverick-mcp technicals (RSI/MACD/support-resistance/trend). Is there a setup worth acting on? The agent's own judgment \u2014 deliberately no formula gate.",
-      "color": "#9c6ade"
-    },
-    {
-      "id": "s7",
-      "type": "text",
-      "x": 40,
-      "y": 480,
-      "width": 360,
-      "height": 220,
-      "text": "**7. Apply the news veto**\n\nAdverse news VETOES the entry. Positive news is NEVER a reason to buy \u2014 it can only fail to block one. Missing/unavailable news = skip the entry (\u00a75a), never \"assume clean.\"",
-      "color": "#e03131"
-    },
-    {
-      "id": "s8",
-      "type": "text",
-      "x": 460,
-      "y": 480,
-      "width": 360,
-      "height": 220,
-      "text": "**8. Propose stop, target & quantity**\n\nStop at a real technical level inside \u00a76a's 3-12% band. Target must clear the currently-binding \u00a76b reward:risk floor. Size = the SMALLER of \u00a72a risk-based and \u00a72b cap sizing.",
-      "color": "#9c6ade"
-    },
-    {
-      "id": "s9",
-      "type": "text",
-      "x": 880,
-      "y": 480,
-      "width": 360,
-      "height": 220,
-      "text": "**9. Deterministic risk validation**\n\nrisk_checker.py re-checks every RULES.md numeric limit in code, independent of the agent's own reasoning \u2014 pure functions, fail-closed on any unknown/non-finite value.",
-      "color": "#e03131"
-    },
-    {
-      "id": "s10",
-      "type": "text",
-      "x": 1300,
-      "y": 480,
-      "width": 360,
-      "height": 220,
-      "text": "**10. Queue & execute the order**\n\nDecision-time validation is advisory (today's state as a proxy). Execution resolves no earlier than the next real trading day's open \u2014 execution-time price is the sole authority.",
-      "color": "#e03131"
-    },
-    {
-      "id": "s11",
-      "type": "text",
-      "x": 1720,
-      "y": 480,
-      "width": 360,
-      "height": 220,
-      "text": "**11. Journal evidence & results**\n\n`record_decision` + `record_execution_result` \u2014 every decision, outcome and rejection reason logged, with the specific rule and number, not a mood.",
-      "color": "#f08c00"
-    },
-    {
-      "id": "s12",
-      "type": "text",
-      "x": 2140,
-      "y": 480,
-      "width": 360,
-      "height": 220,
-      "text": "**12. Reflect at the required cadence**\n\nReview recent decisions/outcomes; check `sample_size` before concluding anything. Never loosen a constraint from a reflection \u2014 only an explicit human decision changes RULES.md.",
-      "color": "#9c6ade"
-    },
-    {
-      "id": "warn_news",
-      "type": "text",
-      "x": 40,
-      "y": 760,
-      "width": 2740,
-      "height": 70,
-      "text": "\u26a0 **Chronology and news-veto discipline are not optional simplifications above:** exits (step 4) always run before new entries are even screened (step 5), and step 7's veto can only BLOCK a candidate that already cleared steps 5-6 on technicals \u2014 news alone never creates a BUY.",
-      "color": "#868e96"
-    },
-    {
-      "id": "grp_backtest",
-      "type": "group",
-      "x": 20,
-      "y": 860,
-      "width": 2860,
-      "height": 300,
-      "label": "Backtest-specific branch \u2014 steps 5-10 above collapse into ONE harness-orchestrated cycle"
-    },
-    {
-      "id": "b1",
-      "type": "text",
-      "x": 40,
-      "y": 920,
-      "width": 360,
-      "height": 200,
-      "text": "**Point-in-time data collection**\n\nHarness fetches technicals/news/bars as of the simulated date only \u2014 nothing that would not have existed yet.",
-      "color": "#e03131"
-    },
-    {
-      "id": "b2",
-      "type": "text",
-      "x": 440,
-      "y": 920,
-      "width": 360,
-      "height": 200,
-      "text": "**Identity masking**\n\nReal ticker/company identities reshuffled per run (`anonymize.py`). The agent never sees or can recover the real mapping.",
-      "color": "#e03131"
-    },
-    {
-      "id": "b3",
-      "type": "text",
-      "x": 840,
-      "y": 920,
-      "width": 360,
-      "height": 200,
-      "text": "**Prompt construction**\n\nOne rendered prompt per simulated trading day \u2014 masked inputs, the currently-binding rules threshold, no trade-count quota anywhere in it.",
-      "color": "#e03131"
-    },
-    {
-      "id": "b4",
-      "type": "text",
-      "x": 1240,
-      "y": 920,
-      "width": 360,
-      "height": 200,
-      "text": "**Trading-agent decision**\n\nThe agent calls NO tools in backtest \u2014 replies with the JSON decision object only, reasoning over exactly what the prompt shows it.",
-      "color": "#9c6ade"
-    },
-    {
-      "id": "b5",
-      "type": "text",
-      "x": 1640,
-      "y": 920,
-      "width": 360,
-      "height": 200,
-      "text": "**Next-day execution**\n\nA decision made on day T is queued and resolves no earlier than day T+1's real open \u2014 no same-day lookahead, ever.",
-      "color": "#e03131"
-    },
-    {
-      "id": "b6",
-      "type": "text",
-      "x": 2040,
-      "y": 920,
-      "width": 360,
-      "height": 200,
-      "text": "**Intraday stop/target simulation**\n\nReal 15-min bars: opening gap -> time-stops -> queued SELLs at 09:30 -> first-bar stop/target -> queued BUYs at 09:45 (re-validated on 09:45-known marks only) -> bar walk.",
-      "color": "#e03131"
-    },
-    {
-      "id": "b7",
-      "type": "text",
-      "x": 2440,
-      "y": 920,
-      "width": 360,
-      "height": 200,
-      "text": "**Durable state & evidence commit**\n\nEssential cycle data (decision, portfolio state, risk checks, evidence) commits atomically before best-effort observability \u2014 a crash after commit never double-trades.",
-      "color": "#e03131"
-    }
-  ],
-  "edges": [
-    {
-      "id": "e_row1_0",
-      "fromNode": "s1",
-      "toNode": "s2",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_row1_1",
-      "fromNode": "s2",
-      "toNode": "s3",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_row1_2",
-      "fromNode": "s3",
-      "toNode": "s4",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_row1_3",
-      "fromNode": "s4",
-      "toNode": "s5",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_row1_4",
-      "fromNode": "s5",
-      "toNode": "s6",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_row1_to_row2",
-      "fromNode": "s6",
-      "toNode": "s7",
-      "fromSide": "bottom",
-      "toSide": "top",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_row2_0",
-      "fromNode": "s7",
-      "toNode": "s8",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_row2_1",
-      "fromNode": "s8",
-      "toNode": "s9",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_row2_2",
-      "fromNode": "s9",
-      "toNode": "s10",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_row2_3",
-      "fromNode": "s10",
-      "toNode": "s11",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_row2_4",
-      "fromNode": "s11",
-      "toNode": "s12",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_bt_0",
-      "fromNode": "b1",
-      "toNode": "b2",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_bt_1",
-      "fromNode": "b2",
-      "toNode": "b3",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_bt_2",
-      "fromNode": "b3",
-      "toNode": "b4",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_bt_3",
-      "fromNode": "b4",
-      "toNode": "b5",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_bt_4",
-      "fromNode": "b5",
-      "toNode": "b6",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_bt_5",
-      "fromNode": "b6",
-      "toNode": "b7",
-      "fromSide": "right",
-      "toSide": "left",
-      "color": "#868e96"
-    },
-    {
-      "id": "e_link_main_to_backtest",
-      "fromNode": "s10",
-      "toNode": "b1",
-      "fromSide": "bottom",
-      "toSide": "top",
-      "label": "backtest mode",
-      "color": "#e03131"
-    }
-  ]
+	"nodes":[
+		{"id":"legend2","type":"text","x":40,"y":40,"width":1200,"height":90,"text":"**Legend** — 🟣 Agent judgment · 🔴 Deterministic enforcement · 🟠 State reconciliation/journaling. Numbered 1-12, left to right, wrapping to a second row.","color":"#868e96"},
+		{"id":"s1","type":"text","x":40,"y":200,"width":360,"height":220,"text":"**1. Reconcile prior pending activity**\n\nCheck any order still `pending` against REAL broker state (`get_order_status`). The broker is truth, never the journal — a prior cycle may have died mid-flight. No new order until this is clean.","color":"#f08c00"},
+		{"id":"s2","type":"text","x":460,"y":200,"width":360,"height":220,"text":"**2. Read RULES.md**\n\nRe-read the locked rules file at the start of EVERY cycle — position sizing, caps, circuit breaker, stop distances, prohibitions. Never worked from memory of what it said.","color":"#e03131"},
+		{"id":"s3","type":"text","x":880,"y":200,"width":360,"height":220,"text":"**3. Establish account & position state**\n\n`get_account` + `get_positions` — the broker's real numbers, not the journal's, which can drift. A null drawdown figure is treated as a tripped breaker, not \"fine.\"","color":"#f08c00"},
+		{"id":"s4","type":"text","x":1300,"y":200,"width":360,"height":220,"text":"**4. Manage exits first**\n\nBefore looking for anything new, per open position: stop/target hit? time stop expired (§6c)? thesis invalidated (§6d)? Exits are exempt from market-hours/circuit-breaker limits.","color":"#9c6ade"},
+		{"id":"s5","type":"text","x":1720,"y":200,"width":360,"height":220,"text":"**5. Screen & evaluate candidates**\n\nActively evaluate EVERY watchlist name not already held. Ordinary confidence (3) is a sufficient reason to act — this is a throughput-built sandbox, not a wait-for-perfect one.","color":"#9c6ade"},
+		{"id":"s6","type":"text","x":2140,"y":200,"width":360,"height":220,"text":"**6. Review technical evidence**\n\nmaverick-mcp technicals (RSI/MACD/support-resistance/trend). Is there a setup worth acting on? The agent's own judgment — deliberately no formula gate.","color":"#9c6ade"},
+		{"id":"s7","type":"text","x":40,"y":480,"width":360,"height":220,"text":"**7. Apply the news veto**\n\nAdverse news VETOES the entry. Positive news is NEVER a reason to buy — it can only fail to block one. Missing/unavailable news = skip the entry (§5a), never \"assume clean.\"","color":"#e03131"},
+		{"id":"s8","type":"text","x":460,"y":480,"width":360,"height":220,"text":"**8. Propose stop, target & quantity**\n\nStop at a real technical level inside §6a's 3-12% band. Target must clear the currently-binding §6b reward:risk floor. Size = the SMALLER of §2a risk-based and §2b cap sizing.","color":"#9c6ade"},
+		{"id":"s9","type":"text","x":880,"y":480,"width":360,"height":220,"text":"**9. Deterministic risk validation**\n\nrisk_checker.py re-checks every RULES.md numeric limit in code, independent of the agent's own reasoning — pure functions, fail-closed on any unknown/non-finite value.","color":"#e03131"},
+		{"id":"s10","type":"text","x":1300,"y":480,"width":360,"height":220,"text":"**10. Queue & execute the order**\n\nDecision-time validation is advisory (today's state as a proxy). **Live:** the order is placed with the broker in this same cycle. **Backtest:** execution is queued and resolves no earlier than the next real trading day's open (see the backtest branch below). Either way, the real execution-time price is the sole final authority.","color":"#e03131"},
+		{"id":"s11","type":"text","x":1720,"y":480,"width":360,"height":220,"text":"**11. Journal evidence & results**\n\n`record_decision` + `record_execution_result` — every decision, outcome and rejection reason logged, with the specific rule and number, not a mood.","color":"#f08c00"},
+		{"id":"s12","type":"text","x":2140,"y":480,"width":360,"height":220,"text":"**12. Reflect at the required cadence**\n\nReview recent decisions/outcomes; check `sample_size` before concluding anything. Never loosen a constraint from a reflection — only an explicit human decision changes RULES.md.","color":"#9c6ade"},
+		{"id":"warn_news","type":"text","x":40,"y":760,"width":2740,"height":70,"text":"⚠ **Chronology and news-veto discipline are not optional simplifications above:** exits (step 4) always run before new entries are even screened (step 5), and step 7's veto can only BLOCK a candidate that already cleared steps 5-6 on technicals — news alone never creates a BUY.","color":"#868e96"},
+		{"id":"grp_backtest","type":"group","x":20,"y":860,"width":2860,"height":300,"label":"Backtest-specific branch — steps 5-10 above collapse into ONE harness-orchestrated cycle"},
+		{"id":"b1","type":"text","x":40,"y":920,"width":360,"height":200,"text":"**Point-in-time data collection**\n\nHarness fetches technicals/news/bars as of the simulated date only — nothing that would not have existed yet.","color":"#e03131"},
+		{"id":"b2","type":"text","x":440,"y":920,"width":360,"height":200,"text":"**Identity masking**\n\nReal ticker/company identities reshuffled per run (`anonymize.py`). The agent never sees or can recover the real mapping.","color":"#e03131"},
+		{"id":"b3","type":"text","x":840,"y":920,"width":360,"height":200,"text":"**Prompt construction**\n\nOne rendered prompt per simulated trading day — masked inputs, the currently-binding rules threshold, no trade-count quota anywhere in it.","color":"#e03131"},
+		{"id":"b4","type":"text","x":1240,"y":920,"width":360,"height":200,"text":"**Trading-agent decision**\n\nThe agent calls NO tools in backtest — replies with the JSON decision object only, reasoning over exactly what the prompt shows it.","color":"#9c6ade"},
+		{"id":"b5","type":"text","x":1640,"y":920,"width":360,"height":200,"text":"**Next-day execution**\n\nA decision made on day T is queued and resolves no earlier than day T+1's real open — no same-day lookahead, ever.","color":"#e03131"},
+		{"id":"b6","type":"text","x":2040,"y":920,"width":360,"height":200,"text":"**Intraday stop/target simulation**\n\nReal 15-min bars: opening gap -> time-stops -> queued SELLs at 09:30 -> first-bar stop/target -> queued BUYs at 09:45 (re-validated on 09:45-known marks only) -> bar walk.","color":"#e03131"},
+		{"id":"b7","type":"text","x":2440,"y":920,"width":360,"height":200,"text":"**Durable state & evidence commit**\n\nEssential cycle data (decision, portfolio state, risk checks, evidence) commits atomically before best-effort observability — a crash after commit never double-trades.","color":"#e03131"}
+	],
+	"edges":[
+		{"id":"e_row1_0","fromNode":"s1","toNode":"s2","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_row1_1","fromNode":"s2","toNode":"s3","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_row1_2","fromNode":"s3","toNode":"s4","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_row1_3","fromNode":"s4","toNode":"s5","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_row1_4","fromNode":"s5","toNode":"s6","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_row1_to_row2","fromNode":"s6","toNode":"s7","fromSide":"bottom","toSide":"top","color":"#868e96"},
+		{"id":"e_row2_0","fromNode":"s7","toNode":"s8","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_row2_1","fromNode":"s8","toNode":"s9","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_row2_2","fromNode":"s9","toNode":"s10","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_row2_3","fromNode":"s10","toNode":"s11","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_row2_4","fromNode":"s11","toNode":"s12","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_bt_0","fromNode":"b1","toNode":"b2","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_bt_1","fromNode":"b2","toNode":"b3","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_bt_2","fromNode":"b3","toNode":"b4","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_bt_3","fromNode":"b4","toNode":"b5","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_bt_4","fromNode":"b5","toNode":"b6","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_bt_5","fromNode":"b6","toNode":"b7","fromSide":"right","toSide":"left","color":"#868e96"},
+		{"id":"e_link_main_to_backtest","fromNode":"s5","toNode":"b1","fromSide":"bottom","toSide":"top","label":"backtest mode: steps 5-10 collapse into this harness-orchestrated branch","color":"#e03131"}
+	]
 }
