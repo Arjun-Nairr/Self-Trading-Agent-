@@ -250,20 +250,25 @@ verbatim, exact SQL) consult the archived raw reports it links to:
 (cycles 1–25, narrower). Do not open the archives unless the task
 genuinely needs that row-level detail.
 
-**Benchmark and sensitivity pass (2026-09-05):**
+**Benchmark and sensitivity pass (2026-09-05, corrected 2026-09-06):**
 `docs/evaluations/round2_benchmark_sensitivity.md` — Hermes vs. cash/SPY/
 equal-weight-watchlist buy-and-hold/a defined SMA(10) technical baseline
 over the identical 50 dates, plus mechanical sensitivity to `RULES.md`'s
-risk%/cap%/reward-threshold parameters from the real 16-trade ledger.
-Headline: Hermes (+3.70%, −2.46% drawdown, 20.0% exposure) clearly beat
-the watchlist (−2.66%) and technical baseline (−7.35%) and had the best
-return-per-volatility ratio of any strategy, though SPY's raw return
-(+4.20%) edged it out at far higher exposure. The concentration cap
-dominates the risk/cap interaction; time-stop horizon and stop-distance
-bounds are **not mechanically identifiable** from stored evidence.
-**Verdict: improve measurement before optimizing or running another
-tranche** — not yet sufficient for Bayesian optimization, which remains
-unimplemented and unapproved.
+risk%/cap%/reward-threshold parameters. A 2026-09-06 pass fixed six
+calculation defects (entry-day exits never checked, target priced off
+the wrong day, wrong time-stop ordering, and more — see the report's own
+correction notice) and downgraded the risk/cap grid from an overclaimed
+"fully replayable" to a disclosed cash-constrained approximation.
+Corrected headline: Hermes (+3.70%, −2.46% drawdown, 20.0% exposure)
+clearly beat the watchlist (−2.66%) and technical baseline (−6.27%) and
+had the best return-per-volatility ratio of any strategy, though SPY's
+raw return (+4.20%) edged it out at far higher exposure — SPY/
+equal-weight also enter one day earlier than Hermes/the baseline
+structurally can. The concentration cap remains the more consequential
+lever; time-stop horizon and stop-distance bounds stay **not mechanically
+identifiable**. **Verdict unchanged: improve measurement before
+optimizing or running another tranche** — not sufficient for Bayesian
+optimization, still unimplemented and unapproved.
 
 ---
 

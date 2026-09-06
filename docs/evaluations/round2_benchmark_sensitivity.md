@@ -12,6 +12,22 @@ to optimize values, change trading behaviour, or run more training** — see
 machine-readable output, not committed). Tests:
 `python backtest-harness/test_benchmark_sensitivity.py`.
 
+> **Correction notice (2026-09-06):** this report replaces the version
+> committed in `1529438`. Review found six calculation defects in
+> `benchmark_sensitivity.py` that made parts of that version unreliable —
+> entry-day exits were never checked, the technical baseline's profit
+> target was computed from the wrong price, the time-stop/stop-target
+> chronology on carried positions was ordered wrong, the trade log
+> conflated signal date with entry date, missing SMA-history bars were
+> silently skipped instead of failing loudly, and portfolio drawdown/
+> volatility omitted the `$100,000 → day-1` transition. The
+> risk%×concentration-cap sensitivity grid was also overclaimed as "fully
+> replayable" without modeling cash, overlap, or exit timing. All six are
+> fixed in the code (see `git log` for the exact commit) and every number
+> below is regenerated from the corrected implementation — nothing from
+> the prior version is preserved on the strength of having been committed
+> first.
+
 ---
 
 ## 1. Configuration (exact, for reproduction)
@@ -36,14 +52,29 @@ here would have silently compared Hermes' 50 cycles against a 51-trading-day
 benchmark window. `benchmark_sensitivity.py` hard-fails
 (`len(trading_days) != 50`) if this ever drifts.
 
+### Entry timing is NOT identical across strategies — disclosed, not reconciled away
+
+- **Cash, SPY buy-and-hold, equal-weight watchlist buy-and-hold** enter on
+  **trading day 1 itself** — a real buy-and-hold investor's only decision
+  ("how much") is made before day 1 opens, so day 1's own 09:45 fill is
+  the natural, earliest entry.
+- **Hermes (actual) and the technical baseline** both require a prior
+  signal or decision, executed the **next** trading day — their earliest
+  possible entry is trading day 2, one full day later than the buy-and-hold
+  benchmarks. This is a structural, real difference in what each strategy
+  even *can* do on day 1, not a bug to fix or an oversight to reconcile —
+  it is called out explicitly here so the benchmark table below is not
+  misread as "identical entry timing for everyone."
+
 ---
 
 ## 2. Benchmark definitions
 
-All four alternatives share the same \$100,000 baseline, the same 50
-trading days, and the same entry-fill/slippage convention as Hermes' own
-first possible BUY (next-day 09:45, 5bps slippage). None use any
-information not available at that point in time.
+All four alternatives share the same \$100,000 baseline and the same 50
+trading days; entry timing differs as disclosed above, and every entry
+uses the same fill/slippage convention (`_slipped_buy_price`, 5bps,
+09:45 ET) as Hermes' own first possible BUY. None use any information not
+available at that point in time.
 
 - **Cash** — \$100,000 flat throughout. Trivial, included as the zero
   bound.
@@ -58,62 +89,102 @@ information not available at that point in time.
     own trailing 10-trading-day SMA of closes (`yesterday close ≤ SMA10
     yesterday` and `today close > SMA10 today`), using only closes up to
     and including "today" — no lookahead. A standard, un-tuned
-    trend-following entry, not fit to this window.
+    trend-following entry, not fit to this window. **Every daily bar
+    across the full warmup+evaluation window is required up front** — a
+    missing one raises `MissingDataError` naming the ticker and date
+    before any signal is computed, rather than silently shortening the
+    SMA window (the corrected behaviour; see the correction notice above).
   - **Entry:** next trading day, 09:45, same fill/slippage as above.
-  - **Stop:** a fixed 5% below the signal day's close (the midpoint of
+  - **Stop:** a fixed 5% below the **signal day's close** (the midpoint of
     `RULES.md` §6a's 3–12% band) — set at signal time, not re-derived from
     real support/resistance (keeps this baseline computable from the same
     daily bars already fetched for buy-hold, and keeps it un-tuned).
-  - **Target:** entry + 1.5 × risk (`RULES.md` §6b base tier).
+  - **Target:** the **real, slippage-adjusted fill** + 1.5 × (fill − stop)
+    — `RULES.md` §6b base tier, computed from the actual entry price, not
+    the signal day's close (the corrected behaviour — a version that
+    priced the target off the signal close instead of the fill was found
+    to silently distort the realized reward:risk whenever price moved
+    between signal and fill). **Before accepting the entry**, the
+    resulting stop distance relative to the real fill is checked against
+    the same 3–12% band (±0.10 tolerance) the baseline claims to follow —
+    an overnight gap large enough to invalidate the preselected stop
+    causes the entry to be **skipped and recorded as a rejection**
+    (`technical_baseline_rejected_entries` in the raw data), never
+    silently traded outside the declared rules. 2 of the run's rejections
+    were exactly this case (SFM and DINO signals whose real fills landed
+    the stop inside ~1–2%, below the 3% floor).
   - **Exit:** the same mechanical primitives Hermes' own trades use
-    (`evaluate_opening_gap`, `evaluate_bar_stop_target`), walked day by
-    day, with a 5-trading-day time stop (`RULES.md` §6c).
+    (`evaluate_opening_gap`, `evaluate_bar_stop_target`), with two
+    corrected ordering rules:
+    - A position **checks its own remaining entry-day bars immediately
+      after filling** — it can close the same day it opens. The prior
+      version deferred this check to a future iteration that never
+      actually ran it, so an entry-day stop/target touch was silently
+      missed entirely.
+    - A **carried** (already-open) position is resolved in the real
+      harness's own order: (1) opening-gap stop/target, (2) a time-stop
+      exit **at the open** if the horizon has expired, (3) only if still
+      open, the rest of that day's range. The prior version checked the
+      full day's range before the time-stop, which could let a
+      same-day target the price only reached *after* the time-stop
+      would have fired override a trade that should already have closed.
+    5-trading-day time stop (`RULES.md` §6c) throughout.
   - **Sizing:** `RULES.md` §2's own formula — 2% of **current account
     equity** risk per trade, capped at 20% of **current account equity**
     per position, never exceeding available cash — against **one pooled
     \$100,000 account** shared by all 10 tickers (not a pre-divided
-    per-ticker slice; a prior draft of this script made that mistake —
-    see §7). Multiple concurrent positions are possible, exactly as
-    Hermes' own run allows. One open lot per ticker at a time
-    (`RULES.md` §9.1).
+    per-ticker slice). Multiple concurrent positions are possible. One
+    open lot per ticker at a time (`RULES.md` §9.1).
   - **Tie-break:** same-day signals across tickers are processed in fixed
     alphabetical ticker order — deterministic, not a setup-quality
     ranking.
+  - **Trade log fields:** `signal_date` (the real crossover day) and
+    `entry_date` (the next trading day) are both recorded and are always
+    different — the prior version stored the entry day under
+    `signal_date`, silently discarding the actual signal date.
 - **Hermes (actual)** — the real, already-verified 50-cycle equity curve
   (`docs/evaluations/round2_50cycle_evaluation_extract.md`), re-pulled here
   directly from `portfolio_snapshots` for a same-source comparison.
 
 **Fail-loud data policy:** every curve raises `MissingDataError` immediately
-if a bar is absent for a ticker currently held or weighted — no held
-position's value is ever silently dropped from an equity mark (verified by
-`test_benchmark_sensitivity.py`). No such gap occurred in this window; the
-watchlist and SPY both have full daily coverage across it.
+if a bar is absent for a ticker currently held, weighted, or needed for the
+technical baseline's own signal history — no held position's value is ever
+silently dropped, and no signal-history gap is silently skipped (both
+verified by `test_benchmark_sensitivity.py`). No such gap occurred in this
+window; the watchlist and SPY both have full daily coverage across it.
 
 ---
 
-## 3. Benchmark results — 🟢 Verified
+## 3. Benchmark results — 🟢 Verified (corrected)
 
 | Strategy | End equity | Total return | Max drawdown | Ann. volatility | Return/volatility | Avg. exposure |
 |---|---|---|---|---|---|---|
 | Cash | \$100,000.00 | 0.00% | 0.00% | 0.00% | — | 0% |
-| SPY buy-and-hold | \$104,202.06 | **+4.20%** | −8.53% | 15.30% | 0.28 | 99.4% |
-| Equal-weight watchlist buy-and-hold | \$97,337.07 | **−2.66%** | −7.82% | 16.64% | −0.16 | 99.7% |
-| Technical baseline (SMA10, pooled) | \$92,647.02 | **−7.35%** | −8.28% | 16.01% | −0.46 | 33.9% |
-| **Hermes (actual)** | **\$103,696.08** | **+3.70%** | **−2.46%** | **9.04%** | **0.41** | **20.0%** |
+| SPY buy-and-hold | \$104,202.06 | **+4.20%** | −8.53% | 15.17% | 0.28 | 99.4% |
+| Equal-weight watchlist buy-and-hold | \$97,337.07 | **−2.66%** | −8.09% | 16.58% | −0.16 | 99.7% |
+| Technical baseline (SMA10, pooled) | \$93,733.42 | **−6.27%** | −7.51% | 15.45% | −0.41 | 34.4% |
+| **Hermes (actual)** | **\$103,696.08** | **+3.70%** | **−2.46%** | **8.95%** | **0.41** | **20.0%** |
 
 "Return/volatility" is a crude return-per-unit-of-risk ratio (no
 risk-free-rate subtraction — not a formal Sharpe ratio; flagged as an
-🟡 **Interpretation** aid, not a verified statistic on its own).
+🟡 **Interpretation** aid, not a verified statistic on its own). Max
+drawdown and volatility both now include the `$100,000 → day-1` opening
+observation (the corrected behaviour — omitting it could hide a real
+first-day loss; see §7).
 
 **Trade count / turnover:** Hermes — 16 closed + 1 open (verified,
 `docs/evaluations/round2_50cycle_evaluation_extract.md` §2). Technical
-baseline — 30 closed-or-resolved trades across the window (mechanically
-counted from its own trade log; win rate 11/30 = 36.7%). Buy-and-hold
-benchmarks and cash have no turnover by construction.
+baseline — **28** closed-or-resolved trades across the window (was
+incorrectly 30 under the uncorrected entry-day/time-stop logic), plus
+**3 rejected entries** (2 for an out-of-band stop distance once priced off
+the real fill, 1 for sizing rounding to zero shares); win rate 10/28 =
+35.7%. Buy-and-hold benchmarks and cash have no turnover by construction.
 
 **Reconciliation check:** Hermes' end equity here (\$103,696.08, +3.696%)
 matches the compact evaluation brief's own figure exactly — same source
-table, independently re-queried.
+table, independently re-queried; this figure is unaffected by any of the
+six corrections (all six were in the technical-baseline/metrics code,
+never in the Hermes-curve fetch).
 
 ### Did Hermes add measurable value?
 
@@ -122,22 +193,26 @@ table, independently re-queried.
   it sets.
 - **vs. SPY buy-and-hold:** 🟡 **Interpretation, not decisive.** SPY's raw
   return (+4.20%) edges Hermes' (+3.70%) by 0.5 points, but Hermes did it
-  at roughly a fifth of SPY's exposure (20.0% vs. 99.4%), a third of its
-  volatility (9.0% vs. 15.3%), and well under a third of its drawdown
-  (−2.46% vs. −8.53%) — Hermes' return-per-unit-of-risk ratio (0.41) is
-  the highest of any strategy compared, including SPY's (0.28). Whether
-  that risk-adjusted edge is "real" or an artifact of only 16 trades and
-  one favorable 50-day SPY stretch is exactly the kind of claim §6's
-  small-n uncertainty caveats.
+  at roughly a fifth of SPY's exposure (20.0% vs. 99.4%), and well under a
+  third of its volatility (8.95% vs. 15.17%) and drawdown (−2.46% vs.
+  −8.53%) — Hermes' return-per-unit-of-risk ratio (0.41) is the highest
+  of any strategy compared, including SPY's (0.28). Whether that
+  risk-adjusted edge is "real" or an artifact of only 16 trades and one
+  favorable 50-day SPY stretch is exactly the kind of claim §6's small-n
+  uncertainty caveats. **This comparison also has the disclosed entry-
+  timing asymmetry** (§1): SPY got a one-day head start Hermes structurally
+  could not have taken.
 - **vs. equal-weight watchlist buy-and-hold:** yes, clearly — the raw
   watchlist would have **lost** 2.66% held passively over the identical
   dates; Hermes' selectivity and exits produced a positive return over
   the same universe.
-- **vs. the technical baseline:** yes, clearly — the un-tuned SMA10
-  baseline lost 7.35% with worse volatility and a worse drawdown than
-  Hermes, despite similar-order exposure discipline (both well under
-  100%). This is the most direct same-universe, same-execution-timing
-  comparison available, and Hermes outperforms it by 11 points of return.
+- **vs. the technical baseline:** yes, clearly — the corrected SMA10
+  baseline lost 6.27% (was −7.35% before correction) with worse volatility
+  and a worse drawdown than Hermes, despite similar-order exposure
+  discipline (both well under 100%). This is the most directly comparable
+  same-universe, same-execution-timing, same-day-one-disadvantage
+  benchmark available, and Hermes outperforms it by exactly 10 points of
+  return.
 
 ### Limitations on this comparison
 
@@ -151,6 +226,9 @@ table, independently re-queried.
 - SPY buy-and-hold has no downside protection at all (no stop); Hermes
   and the technical baseline both do — the volatility/drawdown comparison
   partly reflects that structural difference, not skill.
+- SPY and equal-weight enter one trading day earlier than Hermes and the
+  technical baseline can (§1) — a real, structural difference, not
+  normalized away in the table above.
 
 ---
 
@@ -163,52 +241,67 @@ faithful alternative strategy run (per this task's own instructions).
 
 **Data source:** the real, hash-verified 16-trade closed ledger from
 `docs/history/evaluations/round2_50cycle_evaluation_extract_RAW.md` §3.1
-(fill/exit/qty/stop/target/expected-R:R/exit-reason for every trade),
-hardcoded in `benchmark_sensitivity.py`'s `LEDGER` constant and cross-checked
-against it. **Effective sample size: n = 16 closed trades** — well short of
-`RULES.md` §6b's own stated 30–60-trade six-month target; every finding
-below is qualified accordingly.
+(fill/exit/qty/stop/target/expected-R:R/exit-reason **and the archive's
+own masked "Entry day → Exit day" trading-day indices** for every trade),
+hardcoded in `benchmark_sensitivity.py`'s `LEDGER` constant. The day
+indices are masked trading-day labels from the run itself, used only to
+order and detect overlap between trades — never a real calendar date or
+ticker identity. **Effective sample size: n = 16 closed trades** — well
+short of `RULES.md` §6b's own stated 30–60-trade six-month target; every
+finding below is qualified accordingly.
 
-### 4.1 Risk-per-trade % × concentration cap % — 🟢 Mechanical counterfactual, fully replayable
+### 4.1 Risk-per-trade % × concentration cap % — 🟡 Mechanically reproducible, with one stated approximation
 
-**Classification: fully replayable.** Each historical trade's real
-entry/stop/exit *prices* are unchanged (mechanical and discretionary exits
-were price- or time-triggered, never size-triggered) — only quantity, and
-therefore \$ P&L, differs. **This parameter pair scales P&L; it does not
-change which trades win or lose, or how many complete.**
+**Classification: `chronological_cash_constrained_approximation`** — a
+correction from the prior version's overclaimed "fully replayable" label.
+What IS genuinely modeled and tested: trades are replayed in the archive's
+own entry/exit day order, an exit's cash is credited **before** same-day
+entries are sized, pooled cash is never allowed to go negative (a trade
+that cannot be afforded is skipped and counted, not silently allowed), and
+concurrent overlapping positions are tracked explicitly. What is **not**
+modeled: an open position's contribution to "current equity" during
+sizing is its **cost basis**, not a live mark-to-market value — the real
+intra-hold daily price path for each masked trade is not available to
+this report (recovering it would require resolving the masked-alias-to-
+real-ticker mapping, which this pass does not do — see §6). This is why
+the label stops short of "fully replayable": every input that could
+realistically be recovered from stored evidence *is* modeled; the one
+input that cannot be (true intra-hold equity) is disclosed, not hidden.
 
 | Risk % ＼ Cap % | 10% | 20% | 30% |
 |---|---|---|---|
-| **1%** | +1.79% | +3.51% | +4.22% |
-| **2%** (RULES.md current) | +1.79% | **+3.55%** | +5.31% |
-| **3%** | +1.79% | +3.55% | +5.31% |
+| **1%** | +1.78% | +3.49% | +4.29% |
+| **2%** (RULES.md current) | +1.78% | **+3.54%** | +3.79% † |
+| **3%** | +1.78% | +3.54% | +3.79% † |
 
-(2%/20% ≈ +3.55% vs. the real recorded +3.70%/+\$3,443.73 — the small gap
-is the sequential-equity-compounding approximation described in §7, not a
-data error.)
+† At cap=30%/risk≥2%, one trade is skipped outright (insufficient pooled
+cash when three positions are sized concurrently on the archive's Day 45)
+— a genuine finding this corrected, cash-aware replay can surface that the
+prior, cash-blind version could not: **loosening the cap without loosening
+the risk budget can make one of the run's own concurrent-entry days
+literally unaffordable**, not merely larger.
 
-**Strongest justified conclusion:** **the concentration cap, not the
-risk-per-trade percentage, is the binding constraint at every cap value
-this run's trade sizes actually needed.** At cap=10%, all three risk%
-values produce the identical return (1.79%) — the cap ceiling is reached
-before risk% ever matters. Risk% only starts to differentiate results once
-the cap is loosened to 30% AND risk% is dropped to 1% (4.22% vs. 5.31%
-at 2–3%). This is a real, mechanically verified interaction, not a
-guess: **loosening the cap has a larger effect on this ledger's return
-than loosening the risk budget does**, at every point checked in this
-grid.
+(2%/20% ≈ +3.54% vs. the real recorded +3.70%/+\$3,443.73 — the small gap
+is the cost-basis-equity-proxy approximation described above, not a data
+error.)
+
+**Strongest justified conclusion, still supported after correction:** **the
+concentration cap remains the more consequential lever than the risk-per-
+trade percentage at every cap level this run's trade sizes actually
+needed** — at cap=10%, all three risk% values produce the identical return
+(1.78%), and risk% only starts to differentiate results once the cap is
+loosened. The correction changes the exact numbers and adds the cap=30%
+affordability finding above, but does not overturn this ranking.
 
 ### 4.2 Minimum reward:risk threshold — 🟡 One-sided, filter-only counterfactual
 
-**Classification: one-sided/filter-only.** A trade whose recorded Expected
-R:R falls below the new threshold is removed entirely (never fills under
-that rule); this analysis has no row-level geometry for the 45 decision-time
-and 31 execution-time BUY proposals that were rejected before ever reaching
-the journal (see the compact evaluation's §4 funnel), so **a looser
-threshold's potential upside — trades that might have newly qualified — is
-not estimated.** This is a real limitation, not an oversight; the
-counterfactual can only ever look "worse," never "better," because of what
-data exists.
+**Classification: one-sided/filter-only** (unchanged by this correction —
+this section used only the real historical qty/fill/exit for retained
+trades, which none of the six defects touched). A trade whose recorded
+Expected R:R falls below the new threshold is removed entirely; this
+analysis has no row-level geometry for the 45 decision-time and 31
+execution-time BUY proposals rejected before ever reaching the journal, so
+**a looser threshold's potential upside is not estimated.**
 
 | Min R:R threshold | Trades retained | Total return | Win rate |
 |---|---|---|---|
@@ -246,7 +339,10 @@ not a formula — changing the 3–12% band would change *which technical
 level qualifies*, which only re-running Hermes' own reasoning against a new
 band can answer. This report does not simulate Hermes' judgment, so this
 parameter is labeled `not_mechanically_identifiable` rather than assigned
-a fabricated ranking.
+a fabricated ranking. (The technical baseline's OWN entries are checked
+against this same band using the real fill — §2 — but that is a
+statement about the baseline's own rule compliance, not about what
+Hermes' judgment would do under a different band.)
 
 ### 4.5 Time-stop × reward-threshold interaction — 🔴 Not mechanically identifiable
 
@@ -257,8 +353,8 @@ when one of its two axes is not itself measurable from stored evidence.
 
 | Parameter | Effect observed | Classification | Confidence |
 |---|---|---|---|
-| Concentration cap % | Large, dominant at tight caps (§4.1) | Fully replayable | 🟢 High (mechanical, n=16) |
-| Risk-per-trade % | Small, only matters when cap is loose | Fully replayable | 🟢 High (mechanical, n=16) |
+| Concentration cap % | Large, dominant at tight caps; can make a concurrent-entry day unaffordable at loose caps (§4.1) | Chronological, cash-constrained approximation | 🟡 Medium-high (cash/overlap/exit-timing modeled; intra-hold equity is a cost-basis proxy) |
+| Risk-per-trade % | Small, only matters when cap is loose | Chronological, cash-constrained approximation | 🟡 Medium-high (same caveat) |
 | Min reward:risk threshold | Large — a stricter threshold flips the sign of realized return | One-sided filter-only | 🟡 Medium (real trades only; no rejected-proposal upside estimated) |
 | Time-stop horizon | Plausibly large (56% of trades resolved by it) | Not mechanically identifiable | 🔴 Unknown (sign/size unrecoverable without real price paths) |
 | Stop-distance bounds | Unknown | Not mechanically identifiable | 🔴 Unknown (requires re-running Hermes' judgment) |
@@ -274,28 +370,39 @@ when one of its two axes is not itself measurable from stored evidence.
 - **No future-data leakage:** every benchmark's signal/entry decision uses
   only bars dated on or before the decision day; SMA(10) warmup uses a
   dedicated 15-real-trading-day lookback window strictly before
-  `PERIOD_START`; every entry executes at the *next* trading day's 09:45
-  bar, never the signal day itself.
+  `PERIOD_START`, with full coverage validated up front (§2); every entry
+  executes at the *next* trading day's 09:45 bar, never the signal day
+  itself.
 - **Identical starting capital:** `STARTING_EQUITY = $100,000.00`, one
-  shared constant, used directly (not inferred from any curve's first
-  point) in every `metrics()` calculation — regression-tested in
+  shared constant, used directly in every `metrics()` calculation,
+  including as the leading observation for drawdown/volatility (the
+  corrected behaviour) — regression-tested in
   `test_benchmark_sensitivity.py`.
 - **Reproducible formulas/results:** `risk_cap_grid` and
-  `min_rr_threshold_filter` are pure functions over a hardcoded, cited
-  ledger — re-running produces byte-identical output (tested).
+  `min_rr_threshold_filter` are pure, deterministic functions over a
+  hardcoded, cited ledger — re-running produces byte-identical output
+  (tested).
 - **Current Hermes metrics reconcile** with the compact evaluation extract
   (§3, end equity \$103,696.08 / +3.696%, matching exactly).
-- **No lookahead / no held-position value silently dropped:** verified by
-  `test_benchmark_sensitivity.py`'s `MissingDataError` tests; not
-  triggered in the actual run (full data coverage).
+- **No lookahead / no held-position value silently dropped / no
+  signal-history bar silently skipped:** verified by
+  `test_benchmark_sensitivity.py`'s `MissingDataError` tests.
+- **Cash never goes negative** in either the technical baseline's own
+  pooled-account walk or the risk/cap sensitivity grid — asserted
+  internally and independently re-verified by a test that replays the
+  public trade log without trusting that internal assertion.
+- **No single position ever exceeds 20% of current account equity, while
+  total pooled exposure genuinely can** — directly tested with a
+  three-ticker concurrent-signal scenario.
 
 ---
 
 ## 6. Unknowns
 
 - Whether Hermes' small real-return edge in return-per-unit-of-risk over
-  SPY (§3) reflects genuine skill or 50-day/16-trade noise — cannot be
-  settled with this sample size.
+  SPY (§3) reflects genuine skill or 50-day/16-trade noise (and the
+  disclosed one-day entry-timing head start SPY had) — cannot be settled
+  with this sample size.
 - The sign and magnitude of the time-stop horizon's effect (§4.3) —
   requires real per-ticker price paths this pass deliberately did not
   fetch, to keep the masked-alias mapping unreconstructed (an earlier
@@ -311,26 +418,28 @@ when one of its two axes is not itself measurable from stored evidence.
 - Whether a different simple technical baseline (different SMA length,
   RSI-based, MACD-based) would beat or lag the one chosen here — only one
   baseline was built, by design (the task calls for one).
+- The true intra-hold mark-to-market equity path for each of the 16
+  real ledger trades (§4.1) — approximated by cost basis instead, since
+  recovering it needs the same masked-alias resolution the time-stop
+  question (§4.3) also needs and this pass does not pursue.
 
 ---
 
 ## 7. Known simplifications (stated, not hidden)
 
-- The risk%/cap% grid (§4.1) compounds equity sequentially in **entry
-  order** using each trade's own realized \$ P&L — it does not model the
-  exact cash effect of same-day overlapping entries or intra-hold
-  unrealized equity swings the real harness tracks. The 2%/20% cell's
-  close match to the real recorded result (+3.55% vs. +3.70%) suggests
-  this approximation is good enough for a ranking, not that it is exact.
-  A prior, discarded draft of this benchmark also made a real sizing
-  error here — dividing capital into fixed \$10,000 per-ticker slices and
-  applying the 20% cap to each slice, which silently limited total
-  exposure to ~20% instead of matching `RULES.md`'s account-level cap.
-  That version was never used for any reported number and has been fully
-  replaced by the pooled-account model described in §2.
-- The technical baseline's stop is a fixed 5%-below-close rule, not
-  Hermes' own real support/resistance selection — a deliberate
+- §4.1's risk%×cap% grid now genuinely models chronological cash and
+  overlap (the correction), but still approximates intra-hold equity via
+  cost basis rather than a live mark — stated plainly in §4.1 itself, not
+  buried here.
+- The technical baseline's stop is a fixed 5%-below-signal-close rule,
+  not Hermes' own real support/resistance selection — a deliberate
   simplification stated in §2, not an attempt to mirror Hermes' judgment.
+- A prior, discarded draft of this benchmark (before either the initial
+  merge or this correction pass) made a real sizing error — dividing
+  capital into fixed \$10,000 per-ticker slices and applying the 20% cap
+  to each slice, which silently limited total exposure to ~20% instead of
+  matching `RULES.md`'s account-level cap. That version was never used
+  for any reported number.
 
 ---
 
@@ -363,6 +472,7 @@ optimization or a decision to run another unchanged tranche:
 **Next concrete experiment, if pursued:** instrument `run_backtest.py` (a
 separate, explicit decision, not made here) to persist each closed
 position's own daily mark-to-market path (not just entry/exit), which
-would make the time-stop sensitivity question in §4.3 mechanically
+would make both the time-stop sensitivity question (§4.3) and the
+risk/cap grid's remaining equity-proxy approximation (§4.1) mechanically
 answerable from future runs without needing real ticker identity at
 report-writing time at all.

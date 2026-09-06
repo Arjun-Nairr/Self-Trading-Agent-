@@ -20,6 +20,9 @@ Hermes-facing, so RULES.md §8's real symbols apply directly, same as
 elsewhere in this file's own imports. No masked-alias mapping is ever
 reconstructed here — see docs/evaluations/round2_benchmark_sensitivity.md's
 Unknowns section for what that would have unlocked and why it was skipped.
+The sensitivity ledger below carries masked "Day N" entry/exit indices
+(from the archived RAW report's own table) for chronological ordering
+only — never a real ticker identity.
 
 Run: python benchmark_sensitivity.py   (writes .benchmark_sensitivity_data.json)
 Test: python test_benchmark_sensitivity.py
@@ -58,6 +61,13 @@ SPY = "SPY"
 RISK_PCT = 0.02
 MAX_POS_PCT = 0.20
 BASE_MIN_RR = 1.5
+# RULES.md §6a's current (Phase 1 aggressive) stop band -- NOT
+# geometry_scan.py's own 5-10% constants, which mirror the OLDER Round 1
+# profile. Kept as separate constants here for the same "independently
+# checkable" reason geometry_scan.py gives for its own copy.
+STOP_MIN_PCT = 3.0
+STOP_MAX_PCT = 12.0
+STOP_TOLERANCE_PCT = 0.10
 # Technical baseline's OWN stop rule (see "technical baseline definition"
 # below) — deliberately a fixed 5% below the signal day's close (the
 # midpoint of RULES.md §6a's 3-12% band), not maverick's real support/
@@ -67,13 +77,24 @@ BASELINE_STOP_PCT = 0.05
 
 
 class MissingDataError(RuntimeError):
-    """Raised instead of silently marking a held/weighted position at $0
-    or skipping it — a missing bar for a ticker the curve is currently
-    exposed to invalidates that day's equity number outright."""
+    """Raised instead of silently marking a held/weighted position at $0,
+    silently skipping a signal-history bar, or skipping either — a
+    missing bar for a ticker the curve is currently exposed to, or a gap
+    in the SMA warmup/evaluation history, invalidates the result outright
+    rather than quietly compressing time or dropping value."""
 
 
 def watchlist_tickers() -> list[str]:
     return [t["symbol"] for t in json.loads((REPO / "watchlist" / "watchlist.json").read_text())["tickers"]]
+
+
+def stop_distance_pct(fill: float, stop: float) -> float:
+    return (fill - stop) / fill * 100 if fill else float("-inf")
+
+
+def stop_within_band(fill: float, stop: float) -> bool:
+    pct = stop_distance_pct(fill, stop)
+    return STOP_MIN_PCT - STOP_TOLERANCE_PCT <= pct <= STOP_MAX_PCT + STOP_TOLERANCE_PCT
 
 
 # ---------------------------------------------------------------------
@@ -158,7 +179,16 @@ def buy_hold_curve(label: str, tickers: list[str], weights: dict[str, float],
     tickers, then mark to each day's real daily close — cash-only, no
     rebalancing. Fails loudly (MissingDataError), never silently zeros a
     held ticker's contribution, if any day's bar for a weighted ticker is
-    absent."""
+    absent.
+
+    NOTE on entry timing vs. the technical baseline and Hermes: this
+    benchmark enters on trading_days[0] itself (the FIRST evaluation
+    day) — a real buy-and-hold investor's only decision is "how much,"
+    made before day 1 opens. Hermes and the technical baseline instead
+    require a prior signal/decision and execute on the NEXT trading day
+    — their earliest possible entry is trading_days[1], one day later.
+    This is a real, disclosed difference in entry timing, not a flaw to
+    reconcile away — see the report's benchmark-definitions section."""
     day1 = trading_days[0]
     shares: dict[str, int] = {}
     leftover_cash = 0.0
@@ -195,17 +225,36 @@ def buy_hold_curve(label: str, tickers: list[str], weights: dict[str, float],
 #   trailing 10-trading-day SMA of closes (yesterday close <= SMA10
 #   yesterday, today close > SMA10 today), using only closes up to and
 #   including "today" — no lookahead. A completely standard, un-tuned
-#   trend-following entry (not fit to this window).
+#   trend-following entry (not fit to this window). Every daily bar
+#   across the full warmup+evaluation window is required — a missing one
+#   raises MissingDataError rather than silently compressing the SMA
+#   window (see `_require_full_coverage`).
 #
 #   Entry: next trading day, 09:45, same _slipped_buy_price fill Hermes
-#   itself gets.
+#   itself gets. This is one full trading day LATER than the buy-and-hold
+#   benchmarks' day-1 entry — see buy_hold_curve's own note.
 #
 #   Stop: BASELINE_STOP_PCT (5%) below the SIGNAL day's close, fixed at
 #   signal time (same as a real stop being set before the fill is known).
-#   Target: entry + 1.5 x risk (RULES.md §6b base tier).
-#   Exit: RULES.md §6a stop / §6b target / §6c 5-trading-day time stop,
-#   walked day by day with the SAME mechanical primitives Hermes' own
-#   trades use (evaluate_opening_gap / evaluate_bar_stop_target).
+#   Target: the REAL fill + 1.5 x (fill - stop) — RULES.md §6b base tier,
+#   computed from the actual slippage-adjusted entry, not the signal
+#   day's close (an overnight/opening move between signal and fill would
+#   otherwise silently distort the realized reward:risk away from 1.5).
+#   Before accepting the entry, the resulting stop distance (relative to
+#   the REAL fill) is checked against RULES.md §6a's 3-12% band (+/-0.10
+#   tolerance) — a gap that pushes the fill far enough from the
+#   preselected stop invalidates that stop, and the entry is skipped and
+#   recorded as a rejection rather than silently traded outside the
+#   baseline's own declared rules.
+#
+#   Exit: RULES.md §6a stop / §6b target / §6c 5-trading-day time stop.
+#   The entry day itself is walked bar-by-bar from 09:45 onward
+#   immediately after the fill (same mechanical primitives Hermes' own
+#   trades use) — a position can close the same day it opens. Carried
+#   positions on later days are resolved in the REAL harness's own
+#   order: opening-gap stop/target, THEN a time-stop exit at the open if
+#   the horizon has expired, and ONLY if still open, the rest of that
+#   day's range for a stop/target touch.
 #
 #   Sizing: RULES.md §2's own formula — 2% of CURRENT account equity risk
 #   per trade, capped at 20% of CURRENT account equity per position,
@@ -227,25 +276,72 @@ def sma(values: list[float], n: int) -> float | None:
     return sum(values[-n:]) / n
 
 
+def _require_full_coverage(tickers: list[str], daily_bars: dict[str, dict[str, dict]],
+                            all_days: list[date]) -> None:
+    """Every ticker must have a real daily bar for every day in the
+    combined warmup+evaluation window -- a missing one would otherwise
+    be silently skipped while building the SMA close history, effectively
+    compressing the 10-day window and changing which days cross it.
+    Checked once, up front, before any signal is computed."""
+    for t in tickers:
+        for day in all_days:
+            if daily_bars[t].get(str(day)) is None:
+                raise MissingDataError(f"{t}: missing daily bar on {day} in the required "
+                                        f"SMA warmup/evaluation history — fails closed")
+
+
+def _resolve_entry_day_exit(t: str, entry_bars: list[dict], stop: float, target: float
+                             ) -> tuple[str, float] | None:
+    """Walk this ticker's OWN entry-day intraday bars from 09:45 onward
+    (inclusive of the fill bar itself, same as run_backtest.py's own
+    "its own entry bar counts, since entry happened at that bar's
+    start"), stop checked before target. Returns (kind, exit_price) or
+    None if the position survives the entry day."""
+    for bar in entry_bars:
+        if bar["time"] < "09:45":
+            continue
+        touch = evaluate_bar_stop_target(stop, target, bar)
+        if touch:
+            return touch
+    return None
+
+
+def _resolve_carried_day(daily_bar: dict, stop: float, target: float, held_days: int) -> tuple[str, float] | None:
+    """A carried (non-entry-day) position's real chronology, in RULES.md's
+    own order: (1) opening-gap stop/target: an overnight gap that already
+    cleared a resting level fills at/near the open, checked first because
+    it reflects the earliest possible price action that day; (2) a
+    time-stop exit AT THE OPEN if the holding horizon has expired --
+    decided on information already known before today (elapsed trading
+    days), so it takes priority over anything the REST of the day's range
+    does; (3) only if still open after both of those, the remainder of
+    the day's range for a stop/target touch. Evaluating the full day's
+    range before the time-stop check (the prior bug) could let a target
+    that was only reached AFTER the time-stop would have fired override a
+    trade that should have already closed at the open."""
+    touch = evaluate_opening_gap(stop, target, daily_bar["open"])
+    if touch:
+        return touch
+    if held_days >= TIME_STOP_TRADING_DAYS:
+        return "time_stop", daily_bar["open"]
+    return evaluate_bar_stop_target(stop, target, daily_bar)
+
+
 def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str, dict]],
                               lookback_days: list[date], trading_days: list[date]
-                              ) -> tuple[Curve, list[dict]]:
+                              ) -> tuple[Curve, list[dict], list[dict]]:
     all_days = lookback_days + trading_days
-    closes: dict[str, list[float]] = {t: [] for t in tickers}
-    signal_day_for_entry: dict[str, str] = {}  # entry_date_str -> ticker, filled as we scan
+    _require_full_coverage(tickers, daily_bars, all_days)
 
-    # Precompute closes at every all_days index and each ticker's set of
-    # signal->entry_day pairs, gated on data availability (a missing
-    # lookback/period bar just means no signal that day -- it does not
-    # invalidate any equity mark, unlike a bar missing for a HELD ticker
-    # below).
+    # entry_info[f"{ticker}|{entry_day}"] = (signal_date_str, signal_close) --
+    # both the REAL crossover date and the close that fixed the stop, kept
+    # distinct from the entry date itself (the prior bug conflated them).
+    entry_info: dict[str, tuple[str, float]] = {}
     entries_by_day: dict[str, list[str]] = {}
     for t in tickers:
         c: list[float] = []
         for day in all_days:
-            bar = daily_bars[t].get(str(day))
-            if bar is None:
-                continue
+            bar = daily_bars[t][str(day)]
             c.append(bar["close"])
             if day not in trading_days or day == trading_days[-1] or len(c) < 2:
                 continue
@@ -255,44 +351,27 @@ def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str,
             if c[-2] <= sma_yday and c[-1] > sma_today:
                 entry_day = trading_days[trading_days.index(day) + 1]
                 entries_by_day.setdefault(str(entry_day), []).append(t)
-                # signal_close travels with the entry via a side table below
-                signal_day_for_entry[f"{t}|{entry_day}"] = bar["close"]
+                entry_info[f"{t}|{entry_day}"] = (str(day), bar["close"])
 
     cash = STARTING_EQUITY
-    positions: dict[str, dict] = {}  # ticker -> {qty, entry_price, stop, target, entry_idx}
+    positions: dict[str, dict] = {}  # ticker -> {qty, entry_price, stop, target, entry_idx, ...}
     trades_log: list[dict] = []
+    rejected_entries: list[dict] = []
     equity_curve, exposure_curve = [], []
 
     for i, day in enumerate(trading_days):
         day_s = str(day)
 
-        # 1) resolve exits for currently open positions -----------------
+        # 1) resolve exits for positions CARRIED IN from a prior day ------
+        # (a position entered today is handled in step 2, immediately
+        # after its own fill -- it never reaches this loop mid-life.)
         for t in list(positions):
             pos = positions[t]
-            if pos["entry_idx"] == i:
-                entry_bars = fetch_intraday_bars([t], day)[t]
-                touch = None
-                for bar in entry_bars:
-                    if bar["time"] < "09:45":
-                        continue
-                    touch = evaluate_bar_stop_target(pos["stop"], pos["target"], bar)
-                    if touch:
-                        break
-            else:
-                bar = daily_bars[t].get(day_s)
-                if bar is None:
-                    raise MissingDataError(f"{t}: missing daily bar on {day} while held — fails closed")
-                touch = evaluate_opening_gap(pos["stop"], pos["target"], bar["open"])
-                if not touch:
-                    touch = evaluate_bar_stop_target(pos["stop"], pos["target"], bar)
-
+            bar = daily_bars[t].get(day_s)
+            if bar is None:
+                raise MissingDataError(f"{t}: missing daily bar on {day} while held — fails closed")
             held_days = i - pos["entry_idx"]
-            if not touch and held_days >= TIME_STOP_TRADING_DAYS:
-                open_price = (daily_bars[t].get(day_s) or {}).get("open")
-                if open_price is None:
-                    raise MissingDataError(f"{t}: missing daily bar on {day} for time-stop exit — fails closed")
-                touch = ("time_stop", open_price)
-
+            touch = _resolve_carried_day(bar, pos["stop"], pos["target"], held_days)
             if touch:
                 kind, exit_price = touch
                 cash += pos["qty"] * exit_price
@@ -313,26 +392,55 @@ def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str,
             if bar_945 is None:
                 continue  # no fill possible; not a held-position data gap
             fill = _slipped_buy_price(bar_945["open"], bar_945)
-            signal_close = signal_day_for_entry[f"{t}|{day}"]
+            signal_date, signal_close = entry_info[f"{t}|{day}"]
             stop_price = round(signal_close * (1 - BASELINE_STOP_PCT), 2)
-            if fill <= stop_price:
+
+            if not stop_within_band(fill, stop_price):
+                rejected_entries.append({
+                    "ticker": t, "signal_date": signal_date, "entry_date": day_s,
+                    "fill": fill, "stop_price": stop_price,
+                    "stop_distance_pct": round(stop_distance_pct(fill, stop_price), 3),
+                    "reason": f"stop distance outside {STOP_MIN_PCT}-{STOP_MAX_PCT}% band "
+                              f"(+/-{STOP_TOLERANCE_PCT}) once priced off the real fill",
+                })
                 continue
+
             risk_per_share = fill - stop_price
-            target_price = round(signal_close + BASE_MIN_RR * (signal_close - stop_price), 2)
+            target_price = round(fill + BASE_MIN_RR * risk_per_share, 2)
 
             open_value = sum(p["qty"] * p["entry_price"] for p in positions.values())
-            equity_now = cash + open_value  # conservative same-day proxy, same convention run_backtest.py uses
+            equity_now = cash + open_value  # cost-basis proxy, same convention run_backtest.py uses same-day
             qty = max(0, min(
                 int((equity_now * RISK_PCT) // risk_per_share),
                 int((equity_now * MAX_POS_PCT) // fill),
                 int(cash // fill),
             ))
             if qty == 0:
+                rejected_entries.append({
+                    "ticker": t, "signal_date": signal_date, "entry_date": day_s,
+                    "fill": fill, "stop_price": stop_price, "reason": "sizing rounded to zero shares",
+                })
                 continue
+
+            # Entry-day walk: the position can close THIS SAME DAY --
+            # never deferred to a future iteration (the prior bug).
+            exit_touch = _resolve_entry_day_exit(t, entry_bars, stop_price, target_price)
+            if exit_touch:
+                kind, exit_price = exit_touch
+                cash -= qty * fill
+                cash += qty * exit_price
+                trades_log.append({
+                    "ticker": t, "signal_date": signal_date, "entry_date": day_s,
+                    "entry_price": fill, "stop_price": stop_price, "target_price": target_price,
+                    "qty": qty, "outcome": kind, "exit_price": exit_price, "exit_date": day_s,
+                    "r_multiple": round((exit_price - fill) / risk_per_share, 3),
+                })
+                continue
+
             cash -= qty * fill
             positions[t] = {
                 "qty": qty, "entry_price": fill, "stop": stop_price, "target": target_price,
-                "entry_idx": i, "entry_date": day_s, "signal_date": str(day),
+                "entry_idx": i, "entry_date": day_s, "signal_date": signal_date,
             }
 
         # 3) end-of-day mark ---------------------------------------------
@@ -345,10 +453,11 @@ def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str,
         equity = cash + position_value
         equity_curve.append(equity)
         exposure_curve.append(position_value / equity if equity else 0.0)
+        assert cash >= -1e-6, f"cash went negative on {day}: {cash}"  # pooled cash invariant
 
     return (Curve("Technical baseline (SMA10 crossover, pooled account)",
                    [str(d) for d in trading_days], equity_curve, exposure_curve),
-            trades_log)
+            trades_log, rejected_entries)
 
 
 # ---------------------------------------------------------------------
@@ -358,13 +467,18 @@ def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str,
 def metrics(curve: Curve) -> dict:
     eq = curve.equity
     total_return = (eq[-1] - STARTING_EQUITY) / STARTING_EQUITY
-    peak = eq[0]
+    # Drawdown and volatility both start from the real $100,000 baseline,
+    # one observation BEFORE the first daily mark -- a first-day loss
+    # must show up in both, not just be invisible because eq[0] itself
+    # became the (wrong) initial peak.
+    eq_full = [STARTING_EQUITY] + list(eq)
+    peak = eq_full[0]
     max_dd = 0.0
-    for v in eq:
+    for v in eq_full:
         peak = max(peak, v)
         if peak:
             max_dd = min(max_dd, (v - peak) / peak)
-    rets = [(eq[i] - eq[i - 1]) / eq[i - 1] for i in range(1, len(eq)) if eq[i - 1]]
+    rets = [(eq_full[i] - eq_full[i - 1]) / eq_full[i - 1] for i in range(1, len(eq_full)) if eq_full[i - 1]]
     vol_annualized = pstdev(rets) * (252 ** 0.5) if len(rets) > 1 else 0.0
     avg_exposure = sum(curve.exposure) / len(curve.exposure) if curve.exposure else 0.0
     return {
@@ -383,63 +497,98 @@ def metrics(curve: Curve) -> dict:
 # ledger, hardcoded here from docs/history/evaluations/
 # round2_50cycle_evaluation_extract_RAW.md §3.1 (hash-verified archive;
 # every number below matches that table's Fill/Exit fill/Qty/Stop/
-# Target/Expected R:R/Exit-reason columns exactly). Aliased row order
-# preserved, chronological by entry, exactly as the archive presents it.
-# No real ticker identity is needed for this section at all.
+# Target/Expected R:R/Exit-reason/Entry-day/Exit-day columns exactly).
+# Aliased row order preserved, chronological by entry. `entry_day`/
+# `exit_day` are the archive's own MASKED "Day N" trading-day indices --
+# used only to order/overlap trades correctly, never a real ticker
+# identity or real calendar date.
 # ---------------------------------------------------------------------
 
 LEDGER = [
-    # fill, exit_fill, qty, stop, target, expected_rr, exit_reason
-    {"fill": 91.16, "exit": 82.89, "qty": 219, "stop": 86.57, "target": 100.24, "rr": 2.00, "reason": "mechanical_stop"},
-    {"fill": 29.23, "exit": 28.27, "qty": 671, "stop": 28.23, "target": 32.70, "rr": 1.98, "reason": "discretionary_invalidation"},
-    {"fill": 73.10, "exit": 78.13, "qty": 263, "stop": 70.24, "target": 81.35, "rr": 1.99, "reason": "mechanical_time_stop"},
-    {"fill": 23.52, "exit": 24.46, "qty": 826, "stop": 22.47, "target": 26.02, "rr": 2.01, "reason": "mechanical_time_stop"},
-    {"fill": 24.00, "exit": 23.22, "qty": 815, "stop": 23.22, "target": 26.89, "rr": 1.98, "reason": "mechanical_stop"},
-    {"fill": 55.31, "exit": 53.60, "qty": 353, "stop": 53.60, "target": 62.07, "rr": 1.99, "reason": "mechanical_stop"},
-    {"fill": 148.31, "exit": 142.59, "qty": 132, "stop": 142.59, "target": 165.10, "rr": 2.00, "reason": "mechanical_stop"},
-    {"fill": 59.44, "exit": 64.70, "qty": 324, "stop": 57.21, "target": 66.24, "rr": 2.00, "reason": "mechanical_time_stop"},
-    {"fill": 146.27, "exit": 141.55, "qty": 131, "stop": 141.55, "target": 163.90, "rr": 2.00, "reason": "mechanical_stop"},
-    {"fill": 148.57, "exit": 157.44, "qty": 130, "stop": 143.50, "target": 166.38, "rr": 1.95, "reason": "discretionary_time_stop"},
-    {"fill": 28.44, "exit": 29.39, "qty": 684, "stop": 27.30, "target": 31.75, "rr": 1.85, "reason": "discretionary_time_stop"},
-    {"fill": 32.83, "exit": 34.14, "qty": 597, "stop": 31.25, "target": 36.33, "rr": 1.85, "reason": "discretionary_time_stop"},
-    {"fill": 28.40, "exit": 28.30, "qty": 699, "stop": 27.10, "target": 31.85, "rr": 1.57, "reason": "discretionary_time_stop"},
-    {"fill": 37.43, "exit": 39.90, "qty": 529, "stop": 36.00, "target": 42.08, "rr": 1.70, "reason": "discretionary_time_stop"},
-    {"fill": 27.45, "exit": 29.11, "qty": 736, "stop": 26.00, "target": 30.28, "rr": 1.80, "reason": "discretionary_time_stop"},
-    {"fill": 159.36, "exit": 156.73, "qty": 127, "stop": 151.25, "target": 175.59, "rr": 1.90, "reason": "discretionary_time_stop"},
+    # fill, exit_fill, qty, stop, target, expected_rr, exit_reason, entry_day, exit_day
+    {"fill": 91.16, "exit": 82.89, "qty": 219, "stop": 86.57, "target": 100.24, "rr": 2.00, "reason": "mechanical_stop", "entry_day": 4, "exit_day": 8},
+    {"fill": 29.23, "exit": 28.27, "qty": 671, "stop": 28.23, "target": 32.70, "rr": 1.98, "reason": "discretionary_invalidation", "entry_day": 7, "exit_day": 8},
+    {"fill": 73.10, "exit": 78.13, "qty": 263, "stop": 70.24, "target": 81.35, "rr": 1.99, "reason": "mechanical_time_stop", "entry_day": 9, "exit_day": 16},
+    {"fill": 23.52, "exit": 24.46, "qty": 826, "stop": 22.47, "target": 26.02, "rr": 2.01, "reason": "mechanical_time_stop", "entry_day": 10, "exit_day": 17},
+    {"fill": 24.00, "exit": 23.22, "qty": 815, "stop": 23.22, "target": 26.89, "rr": 1.98, "reason": "mechanical_stop", "entry_day": 18, "exit_day": 18},
+    {"fill": 55.31, "exit": 53.60, "qty": 353, "stop": 53.60, "target": 62.07, "rr": 1.99, "reason": "mechanical_stop", "entry_day": 18, "exit_day": 21},
+    {"fill": 148.31, "exit": 142.59, "qty": 132, "stop": 142.59, "target": 165.10, "rr": 2.00, "reason": "mechanical_stop", "entry_day": 21, "exit_day": 25},
+    {"fill": 59.44, "exit": 64.70, "qty": 324, "stop": 57.21, "target": 66.24, "rr": 2.00, "reason": "mechanical_time_stop", "entry_day": 35, "exit_day": 42},
+    {"fill": 146.27, "exit": 141.55, "qty": 131, "stop": 141.55, "target": 163.90, "rr": 2.00, "reason": "mechanical_stop", "entry_day": 38, "exit_day": 39},
+    {"fill": 148.57, "exit": 157.44, "qty": 130, "stop": 143.50, "target": 166.38, "rr": 1.95, "reason": "discretionary_time_stop", "entry_day": 45, "exit_day": 51},
+    {"fill": 28.44, "exit": 29.39, "qty": 684, "stop": 27.30, "target": 31.75, "rr": 1.85, "reason": "discretionary_time_stop", "entry_day": 45, "exit_day": 51},
+    {"fill": 32.83, "exit": 34.14, "qty": 597, "stop": 31.25, "target": 36.33, "rr": 1.85, "reason": "discretionary_time_stop", "entry_day": 45, "exit_day": 51},
+    {"fill": 28.40, "exit": 28.30, "qty": 699, "stop": 27.10, "target": 31.85, "rr": 1.57, "reason": "discretionary_time_stop", "entry_day": 52, "exit_day": 58},
+    {"fill": 37.43, "exit": 39.90, "qty": 529, "stop": 36.00, "target": 42.08, "rr": 1.70, "reason": "discretionary_time_stop", "entry_day": 52, "exit_day": 58},
+    {"fill": 27.45, "exit": 29.11, "qty": 736, "stop": 26.00, "target": 30.28, "rr": 1.80, "reason": "discretionary_time_stop", "entry_day": 52, "exit_day": 58},
+    {"fill": 159.36, "exit": 156.73, "qty": 127, "stop": 151.25, "target": 175.59, "rr": 1.90, "reason": "discretionary_time_stop", "entry_day": 53, "exit_day": 59},
 ]
 
 
 def risk_cap_grid(risk_pcts: list[float], cap_pcts: list[float]) -> dict:
-    """Pure, deterministic. For each (risk%, cap%) cell: re-size every one
-    of the 16 REAL historical trades against a sequentially-compounding
-    equity curve (STARTING_EQUITY, updated in ENTRY order by each trade's
-    own realized $ P&L — an approximation stated in the report: it does
-    not model the exact overlap of concurrent same-day entries or
-    intra-hold unrealized swings, only realized-P&L compounding between
-    entries). Same entry/exit PRICES as actually happened (mechanical/
-    discretionary exits were price-triggered, not size-triggered) — only
-    quantity and therefore $ P&L differ. This is why the grid is labeled
-    "scales P&L, does not change trade outcomes" in the report: win/loss
-    and trade count never change here, only magnitude."""
+    """Chronological, cash-constrained replay over the REAL 16-trade
+    ledger's own masked entry/exit day indices: exits settle (freeing
+    cash) strictly before same-day entries are sized, and cash is never
+    allowed to go negative (a trade whose sizing would overspend is
+    skipped, not silently allowed). Same entry/exit PRICES as actually
+    happened (mechanical/discretionary exits were price- or
+    time-triggered, not size-triggered) — only quantity, and therefore $
+    P&L, differs from the real run.
+
+    ONE remaining, disclosed approximation: sizing uses `equity_now =
+    cash + cost basis of currently open positions`, not a live
+    mark-to-market value -- the real intra-hold daily price path for
+    each masked trade isn't available to this report (see the report's
+    Unknowns section), so an open position's contribution to "equity"
+    here is its entry cost, not its fluctuating market value. This is
+    why the classification below is "chronological_cash_constrained",
+    NOT "fully replayable" — cash, overlap and exit-timing ARE genuinely
+    modeled; live equity marking during a hold is not."""
     out = {}
     for risk_pct in risk_pcts:
         for cap_pct in cap_pcts:
-            equity = STARTING_EQUITY
-            total_pnl = 0.0
-            for tr in LEDGER:
+            events = []
+            for idx, tr in enumerate(LEDGER):
+                events.append((tr["entry_day"], 0, idx, "entry"))  # exits (tag 0) sort before entries (tag 1) same day
+                events.append((tr["exit_day"], 0, idx, "exit"))
+            events.sort(key=lambda e: (e[0], 0 if e[3] == "exit" else 1, e[2]))
+
+            cash = STARTING_EQUITY
+            open_positions: dict[int, dict] = {}
+            skipped: list[int] = []
+            for _day, _tag, idx, kind in events:
+                tr = LEDGER[idx]
+                if kind == "exit":
+                    if idx in open_positions:
+                        pos = open_positions.pop(idx)
+                        cash += pos["qty"] * tr["exit"]
+                    continue
                 risk_per_share = tr["fill"] - tr["stop"]
+                if risk_per_share <= 0:
+                    skipped.append(idx)
+                    continue
+                open_cost = sum(p["qty"] * p["entry_price"] for p in open_positions.values())
+                equity_now = cash + open_cost
                 qty = max(0, min(
-                    int((equity * risk_pct) // risk_per_share) if risk_per_share > 0 else 0,
-                    int((equity * cap_pct) // tr["fill"]),
+                    int((equity_now * risk_pct) // risk_per_share),
+                    int((equity_now * cap_pct) // tr["fill"]),
+                    int(cash // tr["fill"]),
                 ))
-                pnl = qty * (tr["exit"] - tr["fill"])
-                total_pnl += pnl
-                equity += pnl
+                if qty == 0:
+                    skipped.append(idx)
+                    continue
+                cash -= qty * tr["fill"]
+                open_positions[idx] = {"qty": qty, "entry_price": tr["fill"]}
+                assert cash >= -1e-6, f"cash went negative sizing trade {idx}: {cash}"
+
+            end_equity = cash + sum(p["qty"] * LEDGER[i]["exit"] for i, p in open_positions.items())
+            total_pnl = end_equity - STARTING_EQUITY
             out[f"risk={risk_pct:.0%}_cap={cap_pct:.0%}"] = {
                 "risk_pct": risk_pct, "cap_pct": cap_pct,
                 "total_pnl": round(total_pnl, 2),
                 "total_return_pct": round(total_pnl / STARTING_EQUITY * 100, 3),
-                "end_equity": round(STARTING_EQUITY + total_pnl, 2),
+                "end_equity": round(end_equity, 2),
+                "trades_skipped_insufficient_sizing": len(skipped),
             }
     return out
 
@@ -477,9 +626,14 @@ def sensitivity_analysis() -> dict:
                          "note": "16 closed trades -- RULES.md §6b's own 30-60 six-month target is not yet "
                                  "reached; every ranking below carries that small-n uncertainty."},
         "risk_pct_x_concentration_cap": {
-            "classification": "fully_replayable",
+            "classification": "chronological_cash_constrained_approximation",
             "reasoning": "Deterministic sizing formula (RULES.md §2) applied to REAL recorded entry/stop/exit "
-                         "prices -- scales $ P&L only, never changes which trade wins or loses.",
+                         "prices and the archive's own masked entry/exit day ordering -- cash availability, "
+                         "position overlap and exit settlement are all genuinely modeled and enforced (cash "
+                         "never goes negative; a trade's exit frees cash before same-day entries are sized). "
+                         "NOT labeled fully replayable: sizing uses cash + cost-basis of open positions as an "
+                         "equity proxy, not a live mark-to-market value, since the real intra-hold daily price "
+                         "path for each masked trade is not available to this report.",
             "grid": risk_cap_grid([0.01, 0.02, 0.03], [0.10, 0.20, 0.30]),
         },
         "min_reward_risk_threshold": {
@@ -546,7 +700,7 @@ def main() -> None:
     cash_c = cash_curve(trading_days)
 
     print("simulating SMA10-crossover technical baseline (pooled account)...", file=sys.stderr)
-    tech_curve, tech_trades = technical_baseline_curve(watchlist, daily_bars, lookback_days, trading_days)
+    tech_curve, tech_trades, tech_rejected = technical_baseline_curve(watchlist, daily_bars, lookback_days, trading_days)
 
     print("fetching Hermes' own equity curve from Neon (read-only)...", file=sys.stderr)
     hermes_rows = fetch_hermes_equity_curve()
@@ -566,6 +720,7 @@ def main() -> None:
         "period": {"start": str(PERIOD_START), "end": str(PERIOD_END), "trading_days": len(trading_days)},
         "metrics": [metrics(cash_c), metrics(spy_curve), metrics(ew_curve), metrics(tech_curve), metrics(hermes_curve)],
         "technical_baseline_trades": tech_trades,
+        "technical_baseline_rejected_entries": tech_rejected,
         "hermes_snapshots": hermes_rows,
         "sensitivity": sensitivity,
         "curves": {c.label: {"dates": c.dates, "equity": c.equity, "exposure": c.exposure}
@@ -575,7 +730,7 @@ def main() -> None:
     print(f"\nwrote {args.out}")
     for m in out["metrics"]:
         print(m)
-    print(f"technical baseline: {len(tech_trades)} trades")
+    print(f"technical baseline: {len(tech_trades)} trades, {len(tech_rejected)} rejected entries")
     print(json.dumps(sensitivity, indent=2)[:2000])
 
 
