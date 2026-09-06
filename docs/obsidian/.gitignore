@@ -1,0 +1,9 @@
+# Personal Obsidian state -- never shared, machine-specific. Canvas files
+# and this vault's own documentation stay tracked; everything below is
+# per-user workspace/plugin/cache state Obsidian writes on open.
+.obsidian/
+.trash/
+.obsidian.vimrc
+*.tmp
+workspace.json
+workspace-mobile.json

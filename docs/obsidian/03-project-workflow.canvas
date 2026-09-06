@@ -1,0 +1,407 @@
+{
+  "nodes": [
+    {
+      "id": "legend3",
+      "type": "text",
+      "x": 40,
+      "y": 10,
+      "width": 1400,
+      "height": 70,
+      "text": "**Status** \u2014 \ud83d\udfe2 Implemented \u00b7 \ud83d\udd35 Approved \u00b7 \ud83d\udfe0 Discussing (incl. backlog \"idea\") \u00b7 \u26aa Deferred \u00b7 \ud83d\udd34 Rejected. NEXT/LATER cards are discussion items from `docs/PROJECT_BACKLOG.md` \u2014 order is NOT approved.",
+      "color": "#868e96"
+    },
+    {
+      "id": "grp_now",
+      "type": "group",
+      "x": 20,
+      "y": 100,
+      "width": 1560,
+      "height": 280,
+      "label": "NOW \u2014 agreed implementation order"
+    },
+    {
+      "id": "now1",
+      "type": "text",
+      "x": 40,
+      "y": 140,
+      "width": 350,
+      "height": 220,
+      "text": "**1. Obsidian visual architecture**\n\nThis vault \u2014 engineering ground truth + a presentation canvas.",
+      "color": "#2f9e44"
+    },
+    {
+      "id": "now2",
+      "type": "text",
+      "x": 420,
+      "y": 140,
+      "width": 350,
+      "height": 220,
+      "text": "**2. Dashboard V2: IA + visual rebuild**\n\nOverview / Trades / Decisions / Runs & Evaluation. Training and live-paper share ONE interface \u2014 mode is a badge/filter, not a separate app. Preserves existing Neon queries/connections/calculations; replaces only architecture + appearance.",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "now3",
+      "type": "text",
+      "x": 800,
+      "y": 140,
+      "width": 350,
+      "height": 220,
+      "text": "**3. Individual-trade experience**\n\nInside Dashboard V2: one trade's entry/current/exit state, P&L, stop, target, reasoning, invalidation condition, and activity timeline in one place.",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "now4",
+      "type": "text",
+      "x": 1180,
+      "y": 140,
+      "width": 350,
+      "height": 220,
+      "text": "**4. Experiment & optimization framework**\n\nComes after Dashboard V2 and its trade view exist.",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "grp_next",
+      "type": "group",
+      "x": 20,
+      "y": 440,
+      "width": 1560,
+      "height": 960,
+      "label": "NEXT \u2014 awaiting discussion (from docs/PROJECT_BACKLOG.md; no order implied)"
+    },
+    {
+      "id": "next_fund_hdr",
+      "type": "text",
+      "x": 40,
+      "y": 480,
+      "width": 350,
+      "height": 40,
+      "text": "**Fundamentals**",
+      "color": "#868e96"
+    },
+    {
+      "id": "nf1",
+      "type": "text",
+      "x": 40,
+      "y": 530,
+      "width": 340,
+      "height": 200,
+      "text": "**SEC EDGAR fundamentals ingestion**\n\nFilings-derived statements/liabilities/debt. Tool direction approved; point-in-time dates, normalization, rate limits still need design approval.",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "nf2",
+      "type": "text",
+      "x": 410,
+      "y": 530,
+      "width": 340,
+      "height": 200,
+      "text": "**Cache-first fundamentals router**\n\nCheck stored data first, fetch only when missing/stale. Needs a freshness policy + identity mapping + durable storage design.",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "nf3",
+      "type": "text",
+      "x": 780,
+      "y": 530,
+      "width": 340,
+      "height": 200,
+      "text": "**Fundamental observation period before entry**\n\nCould let the agent follow a company across several days when urgency is low. Must not become a blanket waiting rule.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "next_screen_hdr",
+      "type": "text",
+      "x": 40,
+      "y": 790,
+      "width": 350,
+      "height": 40,
+      "text": "**Screening & news**",
+      "color": "#868e96"
+    },
+    {
+      "id": "ns1",
+      "type": "text",
+      "x": 40,
+      "y": 840,
+      "width": 350,
+      "height": 200,
+      "text": "**Reuse Maverick for dynamic screening**\n\nAvoid a new data provider \u2014 confirm Maverick's real screener fields + point-in-time behavior first.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "ns2",
+      "type": "text",
+      "x": 420,
+      "y": 840,
+      "width": 350,
+      "height": 200,
+      "text": "**News prefetching & caching**\n\nEnsure material news is already available at cycle time. News stays veto/exit-only, never a buy justification.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "ns3",
+      "type": "text",
+      "x": 800,
+      "y": 840,
+      "width": 350,
+      "height": 200,
+      "text": "**Broader dynamic opportunity screening**\n\nEvaluate more companies. Must avoid hard-coded \"safe\" names, survivorship bias, and uncontrolled universe churn.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "ns4",
+      "type": "text",
+      "x": 1180,
+      "y": 840,
+      "width": 350,
+      "height": 200,
+      "text": "**Verify a finite outer timeout (Maverick/yfinance)**\n\nPrevent one provider hang from stalling a cycle indefinitely. No architectural approval needed; implementation still reviewed.",
+      "color": "#868e96"
+    },
+    {
+      "id": "next_meas_hdr",
+      "type": "text",
+      "x": 40,
+      "y": 1100,
+      "width": 350,
+      "height": 40,
+      "text": "**Measurement**",
+      "color": "#868e96"
+    },
+    {
+      "id": "nm1",
+      "type": "text",
+      "x": 40,
+      "y": 1150,
+      "width": 340,
+      "height": 200,
+      "text": "**Review aggressive Phase 1 numbers**\n\nUse filled/closed trades to decide what needs tightening. Never change RULES.md from a tiny sample or P&L alone.",
+      "color": "#868e96"
+    },
+    {
+      "id": "nm2",
+      "type": "text",
+      "x": 410,
+      "y": 1150,
+      "width": 340,
+      "height": 200,
+      "text": "**Benchmark comparison**\n\nBacklog lists this as deferred \u2014 repository evidence shows it is now IMPLEMENTED: docs/evaluations/round2_benchmark_sensitivity.md.",
+      "color": "#2f9e44"
+    },
+    {
+      "id": "nm3",
+      "type": "text",
+      "x": 780,
+      "y": 1150,
+      "width": 340,
+      "height": 200,
+      "text": "**Survivorship-bias mitigation**\n\nPoint-in-time universe construction, for more credible future evaluations than a watchlist screened with in-window knowledge.",
+      "color": "#868e96"
+    },
+    {
+      "id": "grp_later",
+      "type": "group",
+      "x": 20,
+      "y": 1430,
+      "width": 1560,
+      "height": 1280,
+      "label": "LATER \u2014 awaiting discussion (genuinely later candidates; not approved work)"
+    },
+    {
+      "id": "later_cont_hdr",
+      "type": "text",
+      "x": 40,
+      "y": 1470,
+      "width": 350,
+      "height": 40,
+      "text": "**Continuous paper trading & deployment**",
+      "color": "#868e96"
+    },
+    {
+      "id": "lc1",
+      "type": "text",
+      "x": 40,
+      "y": 1520,
+      "width": 340,
+      "height": 200,
+      "text": "**Continuous live paper-trading scheduler**\n\nRuns the agent automatically at a defined cadence after training. Live mode has never run \u2014 cadence, recovery, market-calendar behavior all need design.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "lc2",
+      "type": "text",
+      "x": 410,
+      "y": 1520,
+      "width": 340,
+      "height": 200,
+      "text": "**Host the stack on an always-on machine**\n\nFree Render is unsuitable for the full engine. Hosting, secrets, persistence and monitoring need a deployment plan.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "lc3",
+      "type": "text",
+      "x": 780,
+      "y": 1520,
+      "width": 340,
+      "height": 200,
+      "text": "**Host the dashboard separately**\n\nMonitoring away from the host machine. Needs authentication before exposing journal data publicly.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "later_eval_hdr",
+      "type": "text",
+      "x": 40,
+      "y": 1780,
+      "width": 350,
+      "height": 40,
+      "text": "**Evaluator agent**",
+      "color": "#868e96"
+    },
+    {
+      "id": "le1",
+      "type": "text",
+      "x": 40,
+      "y": 1830,
+      "width": 340,
+      "height": 200,
+      "text": "**Separate evaluation agent**\n\nReviews completed cycles, proposes judgment/rule/UX/system improvements. Must use run-isolated, point-in-time evidence and report sample size.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "le2",
+      "type": "text",
+      "x": 410,
+      "y": 1830,
+      "width": 340,
+      "height": 200,
+      "text": "**Human approval boundary for evaluator suggestions**\n\nPrevents an evaluator from autonomously rewriting RULES.md/SOUL.md/the trading system. Recommendations stay advisory.",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "later_rel_hdr",
+      "type": "text",
+      "x": 40,
+      "y": 2090,
+      "width": 350,
+      "height": 40,
+      "text": "**Reliability & technical debt**",
+      "color": "#868e96"
+    },
+    {
+      "id": "lr1",
+      "type": "text",
+      "x": 40,
+      "y": 2140,
+      "width": 350,
+      "height": 200,
+      "text": "**Live bracket/OCO orders**\n\nProtective exits at the broker instead of relying only on later cycles. Current Alpaca tool submits a single order.",
+      "color": "#868e96"
+    },
+    {
+      "id": "lr2",
+      "type": "text",
+      "x": 420,
+      "y": 2140,
+      "width": 350,
+      "height": 200,
+      "text": "**Ambiguous-write reconciliation & retry**\n\nAfter a timeout/5xx, check broker state before retrying so an executed order is never duplicated. Needed before serious continuous live-paper use.",
+      "color": "#868e96"
+    },
+    {
+      "id": "lr3",
+      "type": "text",
+      "x": 800,
+      "y": 2140,
+      "width": 350,
+      "height": 200,
+      "text": "**Broker partial-fill handling**\n\nKeep journal/position/exit logic correct when only part of an order fills. Not modeled in the current one-lot flow.",
+      "color": "#868e96"
+    },
+    {
+      "id": "lr4",
+      "type": "text",
+      "x": 1180,
+      "y": 2140,
+      "width": 350,
+      "height": 200,
+      "text": "**Preserve failure tracebacks**\n\nImproves diagnosis when a training cycle fails. Observability-only.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "later_dash_hdr",
+      "type": "text",
+      "x": 40,
+      "y": 2400,
+      "width": 350,
+      "height": 40,
+      "text": "**Dashboard extras (beyond V2's initial build)**",
+      "color": "#868e96"
+    },
+    {
+      "id": "ld1",
+      "type": "text",
+      "x": 40,
+      "y": 2450,
+      "width": 350,
+      "height": 200,
+      "text": "**Per-trade progress/price chart**\n\nMovement toward stop/target easier to read. Full intraday history would need additional data beyond daily snapshots.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "ld2",
+      "type": "text",
+      "x": 420,
+      "y": 2450,
+      "width": 350,
+      "height": 200,
+      "text": "**Historical training-run selector**\n\nInspect older runs, not only the latest. Must preserve strict run_id isolation \u2014 never combine runs.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "ld3",
+      "type": "text",
+      "x": 800,
+      "y": 2450,
+      "width": 350,
+      "height": 200,
+      "text": "**Mobile-compatible dashboard**\n\nUsable monitoring from a phone. Needs deliberate responsive UX work.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "ld4",
+      "type": "text",
+      "x": 1180,
+      "y": 2450,
+      "width": 350,
+      "height": 200,
+      "text": "**Dashboard authentication**\n\nRequired before any public hosting \u2014 the current browser-readable Neon role is anonymous and SELECT-only, not private.",
+      "color": "#868e96"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_now_0",
+      "fromNode": "now1",
+      "toNode": "now2",
+      "fromSide": "right",
+      "toSide": "left",
+      "color": "#868e96"
+    },
+    {
+      "id": "e_now_1",
+      "fromNode": "now2",
+      "toNode": "now3",
+      "fromSide": "right",
+      "toSide": "left",
+      "color": "#868e96"
+    },
+    {
+      "id": "e_now_2",
+      "fromNode": "now3",
+      "toNode": "now4",
+      "fromSide": "right",
+      "toSide": "left",
+      "color": "#868e96"
+    }
+  ]
+}

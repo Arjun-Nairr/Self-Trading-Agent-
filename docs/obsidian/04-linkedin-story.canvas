@@ -1,0 +1,131 @@
+{
+  "nodes": [
+    {
+      "id": "frame1",
+      "type": "group",
+      "x": 0,
+      "y": 0,
+      "width": 1500,
+      "height": 950,
+      "label": "1 \u2014 What the project is"
+    },
+    {
+      "id": "f1_title",
+      "type": "text",
+      "x": 60,
+      "y": 60,
+      "width": 1380,
+      "height": 100,
+      "text": "# A paper-trading agent, built to find out if LLM judgment is any good",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "f1_body",
+      "type": "text",
+      "x": 60,
+      "y": 200,
+      "width": 1380,
+      "height": 620,
+      "text": "An unnamed trading agent runs on top of Hermes, an existing agentic harness \u2014 long-only US equities, swing-trading horizon (days to weeks).\n\nTwo modes: **backtest** (point-in-time historical simulation, identities masked so the model can't recall what really happened) and **live** (real paper-trading account, not yet run).\n\nIt's a **permanent paper-money sandbox** \u2014 no real capital, ever. The goal is honest evidence about whether the agent's trading judgment is any good, not protecting a balance or preparing for real capital.",
+      "color": "#868e96"
+    },
+    {
+      "id": "frame2",
+      "type": "group",
+      "x": 1600,
+      "y": 0,
+      "width": 1500,
+      "height": 950,
+      "label": "2 \u2014 How one trading cycle works"
+    },
+    {
+      "id": "f2_title",
+      "type": "text",
+      "x": 1660,
+      "y": 60,
+      "width": 1380,
+      "height": 90,
+      "text": "# Six phases, every single cycle",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "f2_body",
+      "type": "text",
+      "x": 1660,
+      "y": 190,
+      "width": 1380,
+      "height": 700,
+      "text": "**1. Reconcile** \u2014 trust the real broker state, never a stale journal.\n\n**2. Establish state** \u2014 real equity, cash, positions, drawdown.\n\n**3. Manage exits first** \u2014 protecting capital always outranks deploying it.\n\n**4. Screen & evaluate** \u2014 every eligible name, technicals only, agent's own judgment.\n\n**5. Propose & validate** \u2014 the agent proposes a stop/target/size; a separate deterministic layer re-checks it independently before anything executes.\n\n**6. Execute, journal, reflect** \u2014 real fill, full record, and a periodic honest review of what actually happened.",
+      "color": "#868e96"
+    },
+    {
+      "id": "frame3",
+      "type": "group",
+      "x": 0,
+      "y": 1050,
+      "width": 1500,
+      "height": 950,
+      "label": "3 \u2014 Judgment vs. deterministic enforcement"
+    },
+    {
+      "id": "f3_title",
+      "type": "text",
+      "x": 60,
+      "y": 1110,
+      "width": 1380,
+      "height": 90,
+      "text": "# The model proposes. It never has the final say.",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "f3_judgment",
+      "type": "text",
+      "x": 60,
+      "y": 1240,
+      "width": 660,
+      "height": 660,
+      "text": "**Agent judgment**\n\nReads technicals, decides whether a setup is worth acting on, proposes a stop, a target, a position size, and a plain-language reason it could be wrong. No formula tells it what to trade.",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "f3_enforce",
+      "type": "text",
+      "x": 780,
+      "y": 1240,
+      "width": 660,
+      "height": 660,
+      "text": "**Deterministic enforcement**\n\nA separate rules engine re-checks every position size, stop distance, and reward:risk ratio in code \u2014 independent of the model's own reasoning, fail-closed on anything malformed. News can only ever VETO a trade the agent already proposed on technicals \u2014 it can never trigger one, which closes the obvious prompt-injection hole in a headline feed.",
+      "color": "#e03131"
+    },
+    {
+      "id": "frame4",
+      "type": "group",
+      "x": 1600,
+      "y": 1050,
+      "width": 1500,
+      "height": 950,
+      "label": "4 \u2014 What building and evaluating it taught us"
+    },
+    {
+      "id": "f4_title",
+      "type": "text",
+      "x": 1660,
+      "y": 1110,
+      "width": 1380,
+      "height": 90,
+      "text": "# Early results \u2014 real, small, and honestly reported",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "f4_body",
+      "type": "text",
+      "x": 1660,
+      "y": 1240,
+      "width": 1380,
+      "height": 700,
+      "text": "Over one completed 50-cycle backtest tranche, the agent's own trading (+3.70% return, ~20% average market exposure, well under half the volatility of a full-index hold) beat both a passive hold of its own watchlist and a simple trend-following baseline over the identical dates \u2014 though a full market-index benchmark edged it out on raw return alone.\n\n**The honest caveat:** 16 closed trades is a real result, not a proof. The project's own next step is deciding whether to gather more evidence before drawing any stronger conclusion \u2014 not declaring victory on a small sample.",
+      "color": "#868e96"
+    }
+  ],
+  "edges": []
+}

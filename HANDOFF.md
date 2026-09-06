@@ -336,22 +336,26 @@ number needs to go through the user explicitly.
 
 ## 10. Exact next step
 
-**Both the read-only evaluation and the benchmark/sensitivity pass on the
-complete 50-cycle run are done.** See §7 above for both reports.
+**Two independent tracks are both mid-flight — do not conflate them.**
 
-**The actual next step is a human decision among the benchmark/
-sensitivity report's own three options:** (a) existing evidence is
-sufficient to begin Bayesian optimization, (b) run another unchanged
-tranche first, or (c) improve measurement before either. **That report's
-own recommendation is (c)** — two of the five ranked parameters
-(time-stop horizon, stop-distance bounds) are not mechanically
-identifiable, and n=16 closed trades is still short of `RULES.md` §6b's
-own 30–60-trade target. A recommendation to weigh, not a decision made.
+**Evaluation track:** the read-only evaluation and benchmark/sensitivity
+pass on the complete 50-cycle run are done (§7). Next: a human decision
+among that report's own three options — (a) existing evidence suffices
+for Bayesian optimization, (b) run another unchanged tranche first, or
+(c) improve measurement first. **Its own recommendation is (c)**, a
+recommendation to weigh, not a decision made. Until that review happens:
+no start/reset/resume training; no `RULES.md`/`AGENTS.md`/`SOUL.md`/
+model/provider change; no Bayesian optimization; no fundamental-data work.
 
-**Do not, until that review happens:** start/reset/resume training;
-change `RULES.md`/`AGENTS.md`/`SOUL.md`/model/provider/reasoning-effort;
-implement Bayesian optimization; do fundamental-data work; redesign the
-dashboard; or begin any live deployment work.
+**Implementation track (agreed NOW order — see `docs/obsidian/
+03-project-workflow.canvas`):** step 1, the Obsidian vault itself
+(`docs/obsidian/`), is **done**. Next: **Dashboard V2** — full IA + visual
+rebuild (Overview/Trades/Decisions/Runs & Evaluation; training and
+live-paper share one interface, mode as a badge/filter; preserves
+existing Neon queries/connections/calculations). Not started — needs its
+own scoping pass first. Then the individual-trade view, then the
+experiment/optimization framework. NEXT/LATER canvas items stay
+discussion-only until the user explicitly approves moving one.
 
 ---
 
@@ -362,20 +366,16 @@ dashboard; or begin any live deployment work.
 | `RULES.md` | Authoritative, locked rules — position sizing, caps, circuit breaker, prohibitions. Aggressive Phase 1 profile. |
 | `AGENTS.md` | The trading agent's operating procedure, step by step. |
 | `SOUL.md` | The trading agent's identity/temperament (Phase 2, active). |
-| `backtest-harness/run_backtest.py` | The backtest harness/orchestrator — masking, checkpointing, escalation mechanism, evidence capture. |
-| `backtest-harness/backtest_state.json` | Local, gitignored — current in-progress backtest portfolio + profile state. |
-| `backtest-harness/anonymize.py` | Point-in-time masking. |
+| `backtest-harness/run_backtest.py`, `anonymize.py`, `backtest_state.json` | Harness/orchestrator (masking, checkpointing, escalation, evidence capture); local gitignored in-progress portfolio state. |
 | `risk-checker/risk_checker.py` | Deterministic rule enforcement, shared live/backtest. |
 | `trade-journal-mcp/server.py`, `schema.sql` | Neon reads/writes, idempotency, action-aware `expected_reward_risk` validation, `backtest_cycle_evidence`. |
 | `alpaca-mcp/`, `maverick-mcp/`, `google-news-rss-mcp/`, `execution-sim-mcp/` | The other four tool containers. |
-| `dashboard/index.html` | Local-only dashboard frontend. |
+| `dashboard/index.html` | Local-only dashboard frontend (V1 — see §10 for V2). |
 | `docker-compose.yml` | Full stack topology, pinned image digests. |
 | `watchlist/watchlist.json` | The fixed 10-ticker eligible universe. |
 | `docs/PHASE1_AGGRESSIVE_DESIGN.md` | The aggressive profile — numbers, escalation mechanism, what stays mandatory. |
-| `docs/evaluations/run1_evaluation_extract.md` | Round 1's full extract (125 cycles, zero fills). |
-| `docs/evaluations/round2_50cycle_evaluation_extract.md`, `round2_benchmark_sensitivity.md` | **Active** — compact evaluation brief + benchmark/sensitivity report (all 50 cycles) — see §7. |
-| `backtest-harness/benchmark_sensitivity.py` | Human-only offline diagnostic behind the sensitivity report — never imported by the live path. |
-| `docs/history/evaluations/` | Archived raw Round 2 evaluation reports — consult only for row-level detail. |
+| `docs/evaluations/round2_50cycle_evaluation_extract.md`, `round2_benchmark_sensitivity.md` | **Active** — compact evaluation brief + benchmark/sensitivity report — see §7. |
+| `docs/obsidian/` | **Active** — architecture/cycle/roadmap/presentation canvases, native Obsidian Canvas — see its own `README.md`. |
 | `docs/history/` | Archived/superseded material — see §9. Consult only when a task needs that specific detail. |
 
 ---
