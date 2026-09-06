@@ -1,44 +1,364 @@
 {
-	"nodes":[
-		{"id":"legend","type":"text","x":40,"y":40,"width":1040,"height":120,"text":"**Legend** — 🟣 Agent judgment · 🔴 Deterministic enforcement · 🔵 External data/API · 🟠 Persistent state · 🟢 User-facing interface\n\nHub-and-spoke: no tool container can reach another container. Only `gateway` (live mode) or the host-side backtest harness (backtest mode) can reach a tool.","color":"#868e96"},
-		{"id":"grp_external","type":"group","x":1100,"y":40,"width":1100,"height":220,"label":"External world (outside Docker)"},
-		{"id":"ext_alpaca_api","type":"text","x":1140,"y":100,"width":300,"height":120,"text":"**Alpaca Paper Trading API**\nReal broker: orders, positions,\nintraday/historical bars, news","color":"#1c7ed6"},
-		{"id":"ext_yfinance","type":"text","x":1470,"y":100,"width":300,"height":120,"text":"**Yahoo Finance (yfinance)**\nUpstream price/technical data\nfor maverick-mcp","color":"#1c7ed6"},
-		{"id":"ext_googlenews","type":"text","x":1800,"y":100,"width":350,"height":120,"text":"**Google News RSS**\nnews.google.com/rss/search\nHeadlines only, live mode","color":"#1c7ed6"},
-		{"id":"grp_docker","type":"group","x":1100,"y":340,"width":1350,"height":260,"label":"Docker stack — isolated bridge network per tool, digest-pinned images"},
-		{"id":"svc_maverick","type":"text","x":1140,"y":400,"width":300,"height":150,"text":"**maverick-mcp**\nTechnicals: RSI/MACD/\nsupport-resistance/trend +\nprice history. Point-in-time gated.","color":"#1c7ed6"},
-		{"id":"svc_alpaca","type":"text","x":1470,"y":400,"width":300,"height":150,"text":"**alpaca-mcp**\nLive: orders/account/positions\n(paper broker role).\nBacktest: historical news +\nintraday bars (market-data role).","color":"#1c7ed6"},
-		{"id":"svc_news","type":"text","x":1800,"y":400,"width":350,"height":150,"text":"**google-news-rss-mcp**\nfetch_headlines only.\nLive-mode headlines only —\nnot used in backtest.","color":"#1c7ed6"},
-		{"id":"svc_execsim","type":"text","x":2170,"y":400,"width":260,"height":150,"text":"**execution-sim-mcp**\nBacktest-only fill simulator.\n5bps slippage, real historical\nranges. Never live execution.","color":"#e03131"},
-		{"id":"risk_checker","type":"text","x":1470,"y":620,"width":300,"height":140,"text":"**risk_checker.py**\nPure, deterministic, fail-closed.\nEnforces every RULES.md numeric\nrule. A Python module -- not a\nrunning service, nothing listens\non a port for it. Mounted read-only\ninto alpaca-mcp (live) and imported\ndirectly by the harness (backtest).","color":"#e03131"},
-		{"id":"grp_gateway","type":"group","x":60,"y":340,"width":620,"height":320,"label":"gateway container — Hermes harness / model boundary"},
-		{"id":"trading_agent","type":"text","x":120,"y":420,"width":500,"height":160,"text":"**The trading agent** (unnamed)\nruns as an LLM call inside Hermes.\nJudgment only: reads RULES.md-gated\nevidence, proposes stop/target/qty,\nnever calls tools itself in backtest.\nLive mode: calls MCP tools directly.","color":"#9c6ade"},
-		{"id":"backtest_harness","type":"text","x":700,"y":720,"width":340,"height":180,"text":"**backtest-harness/run_backtest.py**\n(host-side, outside Docker)\nFetches everything, masks identities,\nhands the agent one prompt/cycle.\nNext-day queued execution — no\nsame-day lookahead.","color":"#e03131"},
-		{"id":"trade_journal","type":"text","x":1470,"y":800,"width":300,"height":150,"text":"**trade-journal-mcp**\nAll Neon reads/writes: decisions,\nexecutions, activity, insights,\nsnapshots, cycle evidence.\nFull-credential write path.","color":"#f08c00"},
-		{"id":"dashboard","type":"text","x":1870,"y":800,"width":300,"height":150,"text":"**dashboard**\nStatic frontend, local-only\n(127.0.0.1:8842). Reads Neon's\nData API directly — never through\ntrade-journal-mcp.","color":"#2f9e44"},
-		{"id":"neon","type":"text","x":1470,"y":1010,"width":300,"height":130,"text":"**Neon Postgres**\nSingle source of truth for\ndecisions/executions/activity/\ninsights/snapshots/evidence.\n`mode`+`run_id` separate backtest/live.","color":"#f08c00"},
-		{"id":"backtest_state","type":"text","x":700,"y":960,"width":340,"height":160,"text":"**backtest_state.json /\ncycle_checkpoint.json**\nLocal, gitignored. Authoritative\nfor IN-PROGRESS backtest cash/\nholdings/pending orders — NOT in Neon.","color":"#f08c00"},
-		{"id":"note_backtest_auth","type":"text","x":60,"y":960,"width":580,"height":130,"text":"**Authoritative portfolio state — backtest:**\n`backtest_state.json` tracks live cash/holdings;\nNeon durably records the decision/event history\nbut is not read back as the live portfolio tracker.","color":"#868e96"},
-		{"id":"note_live_auth","type":"text","x":1140,"y":640,"width":300,"height":130,"text":"**Authoritative portfolio state — live:**\nAlpaca itself is authoritative for real\npositions/orders — not the journal, which\ncan drift if a cycle broke mid-flight.","color":"#868e96"}
-	],
-	"edges":[
-		{"id":"e_agent_maverick_live","fromNode":"trading_agent","toNode":"svc_maverick","fromSide":"right","toSide":"left","label":"live only: direct tool call","color":"#9c6ade"},
-		{"id":"e_agent_alpaca_live","fromNode":"trading_agent","toNode":"svc_alpaca","fromSide":"right","toSide":"bottom","label":"live only: direct tool call","color":"#9c6ade"},
-		{"id":"e_agent_news_live","fromNode":"trading_agent","toNode":"svc_news","fromSide":"top","toSide":"left","label":"live only: direct tool call","color":"#9c6ade"},
-		{"id":"e_agent_journal_live","fromNode":"trading_agent","toNode":"trade_journal","fromSide":"bottom","toSide":"left","label":"live only: direct tool call","color":"#9c6ade"},
-		{"id":"e_harness_maverick","fromNode":"backtest_harness","toNode":"svc_maverick","fromSide":"top","toSide":"bottom","label":"backtest: fetch technicals","color":"#e03131"},
-		{"id":"e_harness_alpaca","fromNode":"backtest_harness","toNode":"svc_alpaca","fromSide":"right","toSide":"left","label":"backtest: historical news + bars","color":"#e03131"},
-		{"id":"e_harness_execsim","fromNode":"backtest_harness","toNode":"svc_execsim","fromSide":"right","toSide":"bottom","label":"backtest: simulate fills","color":"#e03131"},
-		{"id":"e_harness_journal","fromNode":"backtest_harness","toNode":"trade_journal","fromSide":"right","toSide":"left","label":"backtest: journal decisions/results","color":"#e03131"},
-		{"id":"e_harness_state","fromNode":"backtest_harness","toNode":"backtest_state","fromSide":"bottom","toSide":"top","label":"read/write local portfolio state","color":"#f08c00"},
-		{"id":"e_harness_riskchecker","fromNode":"backtest_harness","toNode":"risk_checker","fromSide":"right","toSide":"left","label":"import directly (shared module)","color":"#e03131"},
-		{"id":"e_maverick_yf","fromNode":"svc_maverick","toNode":"ext_yfinance","fromSide":"top","toSide":"bottom","color":"#1c7ed6"},
-		{"id":"e_alpaca_api","fromNode":"svc_alpaca","toNode":"ext_alpaca_api","fromSide":"top","toSide":"bottom","color":"#1c7ed6"},
-		{"id":"e_news_google","fromNode":"svc_news","toNode":"ext_googlenews","fromSide":"top","toSide":"bottom","color":"#1c7ed6"},
-		{"id":"e_journal_neon","fromNode":"trade_journal","toNode":"neon","fromSide":"bottom","toSide":"top","label":"read/write, full credentials","color":"#f08c00"},
-		{"id":"e_dashboard_neon","fromNode":"dashboard","toNode":"neon","fromSide":"left","toSide":"right","label":"read-only, anonymous role (Data API)","color":"#2f9e44"},
-		{"id":"e_harness_to_agent_prompt","fromNode":"backtest_harness","toNode":"trading_agent","fromSide":"left","toSide":"bottom","label":"backtest: constructed prompt (point-in-time, masked)","color":"#e03131"},
-		{"id":"e_agent_to_harness_decision","fromNode":"trading_agent","toNode":"backtest_harness","fromSide":"bottom","toSide":"left","label":"backtest: JSON decision back (stop/target/qty or no-trade; agent calls no tools)","color":"#9c6ade"},
-		{"id":"e_riskchecker_alpaca","fromNode":"risk_checker","toNode":"svc_alpaca","fromSide":"top","toSide":"bottom","fromEnd":"none","toEnd":"none","label":"read-only volume MOUNT at container start -- filesystem dependency, NOT a network call","color":"#868e96"}
-	]
+  "nodes": [
+    {
+      "id": "legend",
+      "type": "text",
+      "x": 40,
+      "y": 40,
+      "width": 1040,
+      "height": 120,
+      "text": "**Legend** \u2014 \ud83d\udfe3 Agent judgment \u00b7 \ud83d\udd34 Deterministic enforcement \u00b7 \ud83d\udd35 External data/API \u00b7 \ud83d\udfe0 Persistent state \u00b7 \ud83d\udfe2 User-facing interface\n\nHub-and-spoke: no tool container can reach another container. Only `gateway` (live mode) or the host-side backtest harness (backtest mode) can reach a tool.",
+      "color": "#868e96"
+    },
+    {
+      "id": "grp_external",
+      "type": "group",
+      "x": 1100,
+      "y": 40,
+      "width": 1100,
+      "height": 220,
+      "label": "External world (outside Docker)"
+    },
+    {
+      "id": "ext_alpaca_api",
+      "type": "text",
+      "x": 1140,
+      "y": 100,
+      "width": 300,
+      "height": 120,
+      "text": "**Alpaca Paper Trading API**\nReal broker: orders, positions,\nintraday/historical bars, news",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "ext_yfinance",
+      "type": "text",
+      "x": 1470,
+      "y": 100,
+      "width": 300,
+      "height": 120,
+      "text": "**Yahoo Finance (yfinance)**\nUpstream price/technical data\nfor maverick-mcp",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "ext_googlenews",
+      "type": "text",
+      "x": 1800,
+      "y": 100,
+      "width": 350,
+      "height": 120,
+      "text": "**Google News RSS**\nnews.google.com/rss/search\nHeadlines only, live mode",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "grp_docker",
+      "type": "group",
+      "x": 1100,
+      "y": 340,
+      "width": 1350,
+      "height": 260,
+      "label": "Docker stack \u2014 isolated bridge network per tool, digest-pinned images"
+    },
+    {
+      "id": "svc_maverick",
+      "type": "text",
+      "x": 1140,
+      "y": 400,
+      "width": 300,
+      "height": 150,
+      "text": "**maverick-mcp**\nTechnicals: RSI/MACD/\nsupport-resistance/trend +\nprice history. Point-in-time gated.",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "svc_alpaca",
+      "type": "text",
+      "x": 1470,
+      "y": 400,
+      "width": 300,
+      "height": 150,
+      "text": "**alpaca-mcp**\nLive: orders/account/positions\n(paper broker role).\nBacktest: historical news +\nintraday bars (market-data role).",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "svc_news",
+      "type": "text",
+      "x": 1800,
+      "y": 400,
+      "width": 350,
+      "height": 150,
+      "text": "**google-news-rss-mcp**\nfetch_headlines only.\nLive-mode headlines only \u2014\nnot used in backtest.",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "svc_execsim",
+      "type": "text",
+      "x": 2170,
+      "y": 400,
+      "width": 260,
+      "height": 150,
+      "text": "**execution-sim-mcp**\nBacktest-only fill simulator.\n5bps slippage, real historical\nranges. Never live execution.",
+      "color": "#e03131"
+    },
+    {
+      "id": "risk_checker",
+      "type": "text",
+      "x": 1470,
+      "y": 620,
+      "width": 300,
+      "height": 140,
+      "text": "**risk_checker.py**\nPure, deterministic, fail-closed.\nEnforces every RULES.md numeric\nrule. A Python module -- not a\nrunning service, nothing listens\non a port for it. Mounted read-only\ninto alpaca-mcp (live) and imported\ndirectly by the harness (backtest).",
+      "color": "#e03131"
+    },
+    {
+      "id": "grp_gateway",
+      "type": "group",
+      "x": 60,
+      "y": 340,
+      "width": 620,
+      "height": 320,
+      "label": "gateway container \u2014 Hermes harness / model boundary"
+    },
+    {
+      "id": "trading_agent",
+      "type": "text",
+      "x": 120,
+      "y": 420,
+      "width": 500,
+      "height": 160,
+      "text": "**The trading agent** (unnamed)\nruns as an LLM call inside Hermes.\nJudgment only: reads RULES.md-gated\nevidence, proposes stop/target/qty,\nnever calls tools itself in backtest.\nLive mode: calls MCP tools directly.",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "backtest_harness",
+      "type": "text",
+      "x": 700,
+      "y": 720,
+      "width": 340,
+      "height": 180,
+      "text": "**backtest-harness/run_backtest.py**\n(host-side, outside Docker)\nFetches everything, masks identities,\nhands the agent one prompt/cycle.\nNext-day queued execution \u2014 no\nsame-day lookahead.",
+      "color": "#e03131"
+    },
+    {
+      "id": "trade_journal",
+      "type": "text",
+      "x": 1470,
+      "y": 800,
+      "width": 300,
+      "height": 150,
+      "text": "**trade-journal-mcp**\nAll Neon reads/writes: decisions,\nexecutions, activity, insights,\nsnapshots, cycle evidence.\nFull-credential write path.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "dashboard",
+      "type": "text",
+      "x": 1870,
+      "y": 800,
+      "width": 300,
+      "height": 150,
+      "text": "**dashboard**\nStatic frontend, local-only\n(127.0.0.1:8842). Reads Neon's\nData API directly \u2014 never through\ntrade-journal-mcp.",
+      "color": "#2f9e44"
+    },
+    {
+      "id": "neon",
+      "type": "text",
+      "x": 1470,
+      "y": 1010,
+      "width": 300,
+      "height": 130,
+      "text": "**Neon Postgres**\nSingle source of truth for\ndecisions/executions/activity/\ninsights/snapshots/evidence.\n`mode`+`run_id` separate backtest/live.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "backtest_state",
+      "type": "text",
+      "x": 700,
+      "y": 960,
+      "width": 340,
+      "height": 160,
+      "text": "**backtest_state.json /\ncycle_checkpoint.json**\nLocal, gitignored. Authoritative\nfor IN-PROGRESS backtest cash/\nholdings/pending orders \u2014 NOT in Neon.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "note_backtest_auth",
+      "type": "text",
+      "x": 60,
+      "y": 960,
+      "width": 580,
+      "height": 130,
+      "text": "**Authoritative portfolio state \u2014 backtest:**\n`backtest_state.json` tracks live cash/holdings;\nNeon durably records the decision/event history\nbut is not read back as the live portfolio tracker.",
+      "color": "#868e96"
+    },
+    {
+      "id": "note_live_auth",
+      "type": "text",
+      "x": 1140,
+      "y": 640,
+      "width": 300,
+      "height": 130,
+      "text": "**Authoritative portfolio state \u2014 live:**\nAlpaca itself is authoritative for real\npositions/orders \u2014 not the journal, which\ncan drift if a cycle broke mid-flight.",
+      "color": "#868e96"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_agent_maverick_live",
+      "fromNode": "trading_agent",
+      "toNode": "svc_maverick",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "live only: direct tool call",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "e_agent_alpaca_live",
+      "fromNode": "trading_agent",
+      "toNode": "svc_alpaca",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "label": "live only: direct tool call",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "e_agent_news_live",
+      "fromNode": "trading_agent",
+      "toNode": "svc_news",
+      "fromSide": "top",
+      "toSide": "left",
+      "label": "live only: direct tool call",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "e_agent_journal_live",
+      "fromNode": "trading_agent",
+      "toNode": "trade_journal",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "label": "live only: direct tool call",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "e_harness_maverick",
+      "fromNode": "backtest_harness",
+      "toNode": "svc_maverick",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "label": "backtest: fetch technicals",
+      "color": "#e03131"
+    },
+    {
+      "id": "e_harness_alpaca",
+      "fromNode": "backtest_harness",
+      "toNode": "svc_alpaca",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "backtest: historical news + bars",
+      "color": "#e03131"
+    },
+    {
+      "id": "e_harness_execsim",
+      "fromNode": "backtest_harness",
+      "toNode": "svc_execsim",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "label": "backtest: simulate fills",
+      "color": "#e03131"
+    },
+    {
+      "id": "e_harness_journal",
+      "fromNode": "backtest_harness",
+      "toNode": "trade_journal",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "backtest: journal decisions/results",
+      "color": "#e03131"
+    },
+    {
+      "id": "e_harness_state",
+      "fromNode": "backtest_harness",
+      "toNode": "backtest_state",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "label": "read/write local portfolio state",
+      "color": "#f08c00"
+    },
+    {
+      "id": "e_harness_riskchecker",
+      "fromNode": "backtest_harness",
+      "toNode": "risk_checker",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "import directly (shared module)",
+      "color": "#e03131"
+    },
+    {
+      "id": "e_maverick_yf",
+      "fromNode": "svc_maverick",
+      "toNode": "ext_yfinance",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "e_alpaca_api",
+      "fromNode": "svc_alpaca",
+      "toNode": "ext_alpaca_api",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "e_news_google",
+      "fromNode": "svc_news",
+      "toNode": "ext_googlenews",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "e_journal_neon",
+      "fromNode": "trade_journal",
+      "toNode": "neon",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "label": "read/write, full credentials",
+      "color": "#f08c00"
+    },
+    {
+      "id": "e_dashboard_neon",
+      "fromNode": "dashboard",
+      "toNode": "neon",
+      "fromSide": "left",
+      "toSide": "right",
+      "label": "read-only, anonymous role (Data API)",
+      "color": "#2f9e44"
+    },
+    {
+      "id": "e_harness_to_agent_prompt",
+      "fromNode": "backtest_harness",
+      "toNode": "trading_agent",
+      "fromSide": "left",
+      "toSide": "bottom",
+      "label": "backtest: constructed prompt (point-in-time, masked)",
+      "color": "#e03131"
+    },
+    {
+      "id": "e_agent_to_harness_decision",
+      "fromNode": "trading_agent",
+      "toNode": "backtest_harness",
+      "fromSide": "bottom",
+      "toSide": "left",
+      "label": "backtest: JSON decision back (stop/target/qty or no-trade; agent calls no tools)",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "e_riskchecker_alpaca",
+      "fromNode": "risk_checker",
+      "toNode": "svc_alpaca",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "fromEnd": "none",
+      "toEnd": "none",
+      "label": "read-only volume MOUNT at container start -- filesystem dependency, NOT a network call",
+      "color": "#868e96"
+    }
+  ]
 }

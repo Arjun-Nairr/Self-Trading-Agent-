@@ -12,17 +12,24 @@ has no personal notes in it; `.gitignore` keeps local Obsidian state
 
 | Canvas | Represents | Nature |
 |---|---|---|
-| `01-system-architecture.canvas` | Every service, data store and external API in the stack, and who can talk to whom. | 🟢 **Engineering ground truth** |
-| `02-trading-cycle.canvas` | The trading agent's real decision procedure, step by step, plus the backtest-specific execution branch. | 🟢 **Engineering ground truth** |
-| `03-project-workflow.canvas` | NOW (agreed implementation order) / NEXT / LATER (discussion items from `docs/PROJECT_BACKLOG.md`, not approved work). | 🟢 **Engineering ground truth** — a roadmap snapshot, not a plan Claude may execute unprompted |
+| `01-system-architecture.canvas` | Every service, data store and external API in the stack, and who can talk to whom. | 🔵 **Derived engineering view** |
+| `02-trading-cycle.canvas` | The trading agent's real decision procedure, step by step, plus the backtest-specific execution branch. | 🔵 **Derived engineering view** |
+| `03-project-workflow.canvas` | NOW (agreed implementation order) / NEXT / LATER (discussion items from `docs/PROJECT_BACKLOG.md`, not approved work). | 🔵 **Derived engineering view** — a roadmap snapshot, not a plan Claude may execute unprompted |
 | `04-linkedin-story.canvas` | Four screenshot-ready frames explaining the project for an outside, non-technical audience. | 🟡 **Presentation-oriented** — simplified for readability; scrubbed of any run ID, credential, URL or internal path |
 
-**Canvases 1–3 are maintained visual views derived from the repository —
-useful for orientation, not the authoritative source themselves.** When a
-canvas and the repo disagree, the repo wins. The actual authorities:
-`RULES.md` for numeric trading rules, `AGENTS.md` for cycle procedure,
-`docker-compose.yml` and the current code for implemented topology and
-behaviour, and `HANDOFF.md` for current project status and next actions.
+**Canvases 1–3 are derived engineering views — maintained visual
+representations drawn from the repository, not the authoritative source
+themselves.** When a canvas and the repo disagree, the repo wins. The
+actual authority hierarchy:
+
+- `RULES.md` — authoritative numeric trading rules.
+- `AGENTS.md` — authoritative cycle procedure.
+- `docker-compose.yml` and the current code — implemented topology and
+  behaviour.
+- `HANDOFF.md` — current project status and next actions.
+- The canvases — maintained visual representations derived from those
+  sources, kept in sync but never a replacement for reading them.
+
 Canvas 4 goes further still — it trades precision for clarity on top of
 that — and is not a substitute for any of the above.
 
