@@ -16,6 +16,7 @@ has no personal notes in it; `.gitignore` keeps local Obsidian state
 | `02-trading-cycle.canvas` | The trading agent's real decision procedure, step by step, plus the backtest-specific execution branch. | 🔵 **Derived engineering view** |
 | `03-project-workflow.canvas` | NOW (agreed implementation order) / NEXT / LATER (discussion items from `docs/PROJECT_BACKLOG.md`, not approved work). | 🔵 **Derived engineering view** — a roadmap snapshot, not a plan Claude may execute unprompted |
 | `04-linkedin-story.canvas` | Four screenshot-ready frames explaining the project for an outside, non-technical audience. | 🟡 **Presentation-oriented** — simplified for readability; scrubbed of any run ID, credential, URL or internal path |
+| `05-linkedin-architecture.canvas` | One screenshot-ready frame — the mid-level architecture, from market evidence through agent judgment, deterministic enforcement, execution and evaluation. | 🟡 **Presentation-oriented** — public-safe: no run ID, credential, URL, port or internal path |
 
 **Canvases 1–3 are derived engineering views — maintained visual
 representations drawn from the repository, not the authoritative source

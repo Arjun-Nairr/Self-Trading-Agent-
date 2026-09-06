@@ -1,0 +1,182 @@
+{
+  "nodes": [
+    {
+      "id": "title",
+      "type": "text",
+      "x": 20,
+      "y": 20,
+      "width": 1640,
+      "height": 60,
+      "text": "# An LLM proposes the trade. Deterministic systems decide whether it is allowed.",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "subtitle",
+      "type": "text",
+      "x": 20,
+      "y": 90,
+      "width": 1640,
+      "height": 50,
+      "text": "Point-in-time market evidence \u2192 agent judgment \u2192 rule enforcement \u2192 simulated execution \u2192 measurable outcomes",
+      "color": "#868e96"
+    },
+    {
+      "id": "s1_market",
+      "type": "text",
+      "x": 20,
+      "y": 170,
+      "width": 280,
+      "height": 300,
+      "text": "**1 \u2014 Market evidence**\n\nPrice history, RSI/MACD/trend, support & resistance, recent headlines. Technical evidence can support an entry \u2014 news can veto, but can never by itself justify a BUY.",
+      "color": "#1c7ed6"
+    },
+    {
+      "id": "grp_agent",
+      "type": "group",
+      "x": 330,
+      "y": 170,
+      "width": 280,
+      "height": 400,
+      "label": "Hermes \u2014 the agentic harness (runtime)"
+    },
+    {
+      "id": "s2_agent",
+      "type": "text",
+      "x": 350,
+      "y": 280,
+      "width": 240,
+      "height": 250,
+      "text": "**2 \u2014 The trading agent** (unnamed)\n\nRuns inside Hermes \u2014 the harness, not the agent itself. Evaluates each candidate and proposes entry, stop, target and quantity, with reasoning and a stated invalidation condition.",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "s3_risk",
+      "type": "text",
+      "x": 640,
+      "y": 170,
+      "width": 300,
+      "height": 460,
+      "text": "**3 \u2014 Deterministic risk enforcement**\n\nValidates stop distance, reward:risk, risk-based position size, concentration limit, available cash, and circuit breakers.\n\n**The model cannot override these checks.**",
+      "color": "#e03131"
+    },
+    {
+      "id": "grp_exec",
+      "type": "group",
+      "x": 970,
+      "y": 170,
+      "width": 380,
+      "height": 520,
+      "label": "4 \u2014 Execution and evidence"
+    },
+    {
+      "id": "s4_backtest",
+      "type": "text",
+      "x": 990,
+      "y": 250,
+      "width": 160,
+      "height": 220,
+      "text": "**Backtest**\n\nIdentity-masked, point-in-time prompt. Decision is queued for the next trading day. Historical intraday bars simulate the result.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "s4_live",
+      "type": "text",
+      "x": 1170,
+      "y": 250,
+      "width": 160,
+      "height": 220,
+      "text": "**Live paper**\n\nOrders sent to an Alpaca paper account. No real money. Live mode has not yet been run.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "s4_evidence",
+      "type": "text",
+      "x": 990,
+      "y": 500,
+      "width": 340,
+      "height": 140,
+      "text": "Both feed the same record: decisions, executions, activity, evidence, reflections.",
+      "color": "#f08c00"
+    },
+    {
+      "id": "s5_eval",
+      "type": "text",
+      "x": 1380,
+      "y": 170,
+      "width": 280,
+      "height": 460,
+      "text": "**5 \u2014 Evaluation and dashboard**\n\nNeon stores durable, run-isolated evidence. The dashboard shows account performance, trades, decisions and evaluations \u2014 judged by returns, exposure, volatility, baselines, and sample size.",
+      "color": "#2f9e44"
+    },
+    {
+      "id": "footer",
+      "type": "text",
+      "x": 20,
+      "y": 740,
+      "width": 1640,
+      "height": 70,
+      "text": "Permanent paper-money research sandbox \u2014 designed to measure judgment, not claim guaranteed returns.",
+      "color": "#868e96"
+    }
+  ],
+  "edges": [
+    {
+      "id": "e1_market_agent",
+      "fromNode": "s1_market",
+      "toNode": "s2_agent",
+      "fromSide": "right",
+      "toSide": "left",
+      "color": "#9c6ade"
+    },
+    {
+      "id": "e2_agent_risk",
+      "fromNode": "s2_agent",
+      "toNode": "s3_risk",
+      "fromSide": "right",
+      "toSide": "left",
+      "color": "#e03131"
+    },
+    {
+      "id": "e3_risk_backtest",
+      "fromNode": "s3_risk",
+      "toNode": "s4_backtest",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "backtest",
+      "color": "#f08c00"
+    },
+    {
+      "id": "e4_risk_live",
+      "fromNode": "s3_risk",
+      "toNode": "s4_live",
+      "fromSide": "right",
+      "toSide": "left",
+      "label": "live paper",
+      "color": "#f08c00"
+    },
+    {
+      "id": "e5_backtest_evidence",
+      "fromNode": "s4_backtest",
+      "toNode": "s4_evidence",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "color": "#f08c00"
+    },
+    {
+      "id": "e6_live_evidence",
+      "fromNode": "s4_live",
+      "toNode": "s4_evidence",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "color": "#f08c00"
+    },
+    {
+      "id": "e7_evidence_eval",
+      "fromNode": "s4_evidence",
+      "toNode": "s5_eval",
+      "fromSide": "right",
+      "toSide": "left",
+      "color": "#2f9e44"
+    }
+  ]
+}
