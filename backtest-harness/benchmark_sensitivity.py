@@ -363,8 +363,9 @@ def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str,
         day_s = str(day)
 
         # 1) resolve exits for positions CARRIED IN from a prior day ------
-        # (a position entered today is handled in step 2, immediately
-        # after its own fill -- it never reaches this loop mid-life.)
+        # (a position entered today is handled entirely in step 2 below --
+        # it never reaches this loop mid-life.) Uses daily bars only;
+        # unaffected by anything happening at today's 09:45 entries.
         for t in list(positions):
             pos = positions[t]
             bar = daily_bars[t].get(day_s)
@@ -383,65 +384,111 @@ def technical_baseline_curve(tickers: list[str], daily_bars: dict[str, dict[str,
                 })
                 del positions[t]
 
-        # 2) new entries today, deterministic alphabetical tie-break ----
-        for t in sorted(entries_by_day.get(day_s, [])):
-            if t in positions:
-                continue  # RULES.md §9.1: one open lot per ticker
-            entry_bars = fetch_intraday_bars([t], day)[t]
-            bar_945 = next((b for b in entry_bars if b["time"] == "09:45"), None)
-            if bar_945 is None:
-                continue  # no fill possible; not a held-position data gap
-            fill = _slipped_buy_price(bar_945["open"], bar_945)
-            signal_date, signal_close = entry_info[f"{t}|{day}"]
-            stop_price = round(signal_close * (1 - BASELINE_STOP_PCT), 2)
+        # 2) new entries today, in two phases -- deterministic alphabetical
+        #    tie-break within each phase:
+        #
+        #    2a) SIZE AND FILL every valid 09:45 entry first, before any of
+        #        them is checked for an entry-day exit. Sizing values each
+        #        SURVIVING carried position at its real 09:45 mark (the
+        #        prior day's close carried through the 09:30 bar -- the
+        #        last fully-elapsed mark by 09:45, same convention
+        #        run_backtest.py's own `marks` dict uses for its risk
+        #        check), never at cost basis and never at today's close or
+        #        a later bar. A ticker that already filled earlier in this
+        #        same phase is valued at its own real fill price.
+        #    2b) ONLY AFTER every simultaneous entry has been sized does
+        #        each new fill's own entry-day bars get walked for a
+        #        stop/target touch. This ordering is what stops a
+        #        profitable 10:00+ exit from one ticker retroactively
+        #        funding another ticker's earlier, otherwise-unaffordable
+        #        09:45 entry -- the two could never see each other's cash
+        #        effect if entries and exits are simply interleaved by
+        #        clock time.
+        candidates = [t for t in sorted(entries_by_day.get(day_s, [])) if t not in positions]
+        if candidates:
+            needed = sorted(set(positions.keys()) | set(candidates))
+            intraday_today = fetch_intraday_bars(needed, day)
 
-            if not stop_within_band(fill, stop_price):
-                rejected_entries.append({
-                    "ticker": t, "signal_date": signal_date, "entry_date": day_s,
-                    "fill": fill, "stop_price": stop_price,
-                    "stop_distance_pct": round(stop_distance_pct(fill, stop_price), 3),
-                    "reason": f"stop distance outside {STOP_MIN_PCT}-{STOP_MAX_PCT}% band "
-                              f"(+/-{STOP_TOLERANCE_PCT}) once priced off the real fill",
-                })
-                continue
+            # Real 09:45-instant mark for every SURVIVING carried position --
+            # the 09:30 bar's close, per run_backtest.py's own convention.
+            carried_marks: dict[str, float] = {}
+            for t in positions:
+                bars = intraday_today.get(t)
+                bar_930 = next((b for b in bars if b["time"] == "09:30"), None) if bars else None
+                if bar_930 is None:
+                    raise MissingDataError(f"{t}: missing required 09:30 mark on {day} needed to "
+                                            f"value it at the 09:45 sizing instant — fails closed")
+                carried_marks[t] = bar_930["close"]
 
-            risk_per_share = fill - stop_price
-            target_price = round(fill + BASE_MIN_RR * risk_per_share, 2)
+            filled_today: dict[str, dict] = {}
+            for t in candidates:
+                entry_bars = intraday_today.get(t)
+                bar_945 = next((b for b in entry_bars if b["time"] == "09:45"), None) if entry_bars else None
+                if bar_945 is None:
+                    raise MissingDataError(f"{t}: signaled entry missing its required 09:45 bar "
+                                            f"on {day} — fails closed")
+                fill = _slipped_buy_price(bar_945["open"], bar_945)
+                signal_date, signal_close = entry_info[f"{t}|{day}"]
+                stop_price = round(signal_close * (1 - BASELINE_STOP_PCT), 2)
 
-            open_value = sum(p["qty"] * p["entry_price"] for p in positions.values())
-            equity_now = cash + open_value  # cost-basis proxy, same convention run_backtest.py uses same-day
-            qty = max(0, min(
-                int((equity_now * RISK_PCT) // risk_per_share),
-                int((equity_now * MAX_POS_PCT) // fill),
-                int(cash // fill),
-            ))
-            if qty == 0:
-                rejected_entries.append({
-                    "ticker": t, "signal_date": signal_date, "entry_date": day_s,
-                    "fill": fill, "stop_price": stop_price, "reason": "sizing rounded to zero shares",
-                })
-                continue
+                if not stop_within_band(fill, stop_price):
+                    rejected_entries.append({
+                        "ticker": t, "signal_date": signal_date, "entry_date": day_s,
+                        "fill": fill, "stop_price": stop_price,
+                        "stop_distance_pct": round(stop_distance_pct(fill, stop_price), 3),
+                        "reason": f"stop distance outside {STOP_MIN_PCT}-{STOP_MAX_PCT}% band "
+                                  f"(+/-{STOP_TOLERANCE_PCT}) once priced off the real fill",
+                    })
+                    continue
 
-            # Entry-day walk: the position can close THIS SAME DAY --
-            # never deferred to a future iteration (the prior bug).
-            exit_touch = _resolve_entry_day_exit(t, entry_bars, stop_price, target_price)
-            if exit_touch:
-                kind, exit_price = exit_touch
+                risk_per_share = fill - stop_price
+                target_price = round(fill + BASE_MIN_RR * risk_per_share, 2)
+
+                # Real 09:45 account equity: cash + surviving carried
+                # positions at their 09:45-instant mark (NOT cost basis,
+                # NOT today's close) + today's already-filled entries at
+                # their own real fill price.
+                carried_value = sum(positions[ct]["qty"] * carried_marks[ct] for ct in positions)
+                filled_value = sum(f["qty"] * f["entry_price"] for f in filled_today.values())
+                equity_now = cash + carried_value + filled_value
+                qty = max(0, min(
+                    int((equity_now * RISK_PCT) // risk_per_share),
+                    int((equity_now * MAX_POS_PCT) // fill),
+                    int(cash // fill),
+                ))
+                if qty == 0:
+                    rejected_entries.append({
+                        "ticker": t, "signal_date": signal_date, "entry_date": day_s,
+                        "fill": fill, "stop_price": stop_price, "reason": "sizing rounded to zero shares",
+                    })
+                    continue
+
                 cash -= qty * fill
-                cash += qty * exit_price
-                trades_log.append({
-                    "ticker": t, "signal_date": signal_date, "entry_date": day_s,
-                    "entry_price": fill, "stop_price": stop_price, "target_price": target_price,
-                    "qty": qty, "outcome": kind, "exit_price": exit_price, "exit_date": day_s,
-                    "r_multiple": round((exit_price - fill) / risk_per_share, 3),
-                })
-                continue
+                filled_today[t] = {
+                    "qty": qty, "entry_price": fill, "stop": stop_price, "target": target_price,
+                    "entry_bars": entry_bars, "signal_date": signal_date,
+                }
 
-            cash -= qty * fill
-            positions[t] = {
-                "qty": qty, "entry_price": fill, "stop": stop_price, "target": target_price,
-                "entry_idx": i, "entry_date": day_s, "signal_date": signal_date,
-            }
+            # 2b) NOW walk each of today's new fills' own entry-day bars --
+            # every simultaneous entry has already been sized above, so no
+            # entry-day exit proceeds can feed back into this same day's
+            # sizing (the prior bug).
+            for t, f in filled_today.items():
+                exit_touch = _resolve_entry_day_exit(t, f["entry_bars"], f["stop"], f["target"])
+                if exit_touch:
+                    kind, exit_price = exit_touch
+                    cash += f["qty"] * exit_price
+                    trades_log.append({
+                        "ticker": t, "signal_date": f["signal_date"], "entry_date": day_s,
+                        "entry_price": f["entry_price"], "stop_price": f["stop"], "target_price": f["target"],
+                        "qty": f["qty"], "outcome": kind, "exit_price": exit_price, "exit_date": day_s,
+                        "r_multiple": round((exit_price - f["entry_price"]) / (f["entry_price"] - f["stop"]), 3),
+                    })
+                else:
+                    positions[t] = {
+                        "qty": f["qty"], "entry_price": f["entry_price"], "stop": f["stop"], "target": f["target"],
+                        "entry_idx": i, "entry_date": day_s, "signal_date": f["signal_date"],
+                    }
 
         # 3) end-of-day mark ---------------------------------------------
         position_value = 0.0
@@ -527,13 +574,23 @@ LEDGER = [
 
 def risk_cap_grid(risk_pcts: list[float], cap_pcts: list[float]) -> dict:
     """Chronological, cash-constrained replay over the REAL 16-trade
-    ledger's own masked entry/exit day indices: exits settle (freeing
-    cash) strictly before same-day entries are sized, and cash is never
-    allowed to go negative (a trade whose sizing would overspend is
-    skipped, not silently allowed). Same entry/exit PRICES as actually
-    happened (mechanical/discretionary exits were price- or
-    time-triggered, not size-triggered) — only quantity, and therefore $
-    P&L, differs from the real run.
+    ledger's own masked entry/exit day indices, walked one masked day at
+    a time in the real harness's own order:
+
+      1. Close positions CARRIED INTO the day (entered on an earlier day,
+         exiting today) -- their exit cash is available for step 2,
+         preserving this evaluator's documented "exit frees cash before
+         same-day entries are sized" approximation.
+      2. Size and open every new entry scheduled for today.
+      3. Close positions that BOTH entered and exit today (the Day-18
+         ledger row is exactly this case) -- settled only after step 2,
+         so a same-day round-trip trade is never treated as exiting
+         before it exists, and never falsely stays open past its own
+         recorded exit day.
+
+    Same entry/exit PRICES as actually happened (mechanical/discretionary
+    exits were price- or time-triggered, not size-triggered) — only
+    quantity, and therefore $ P&L, differs from the real run.
 
     ONE remaining, disclosed approximation: sizing uses `equity_now =
     cash + cost basis of currently open positions`, not a live
@@ -541,54 +598,71 @@ def risk_cap_grid(risk_pcts: list[float], cap_pcts: list[float]) -> dict:
     each masked trade isn't available to this report (see the report's
     Unknowns section), so an open position's contribution to "equity"
     here is its entry cost, not its fluctuating market value. This is
-    why the classification below is "chronological_cash_constrained",
-    NOT "fully replayable" — cash, overlap and exit-timing ARE genuinely
+    why the classification below is
+    "chronological_cash_constrained_approximation", NOT "fully
+    replayable" — cash, overlap and exit-timing ARE genuinely
     modeled; live equity marking during a hold is not."""
     out = {}
+    min_day = min(tr["entry_day"] for tr in LEDGER)
+    max_day = max(tr["exit_day"] for tr in LEDGER)
     for risk_pct in risk_pcts:
         for cap_pct in cap_pcts:
-            events = []
-            for idx, tr in enumerate(LEDGER):
-                events.append((tr["entry_day"], 0, idx, "entry"))  # exits (tag 0) sort before entries (tag 1) same day
-                events.append((tr["exit_day"], 0, idx, "exit"))
-            events.sort(key=lambda e: (e[0], 0 if e[3] == "exit" else 1, e[2]))
-
             cash = STARTING_EQUITY
             open_positions: dict[int, dict] = {}
-            skipped: list[int] = []
-            for _day, _tag, idx, kind in events:
-                tr = LEDGER[idx]
-                if kind == "exit":
-                    if idx in open_positions:
+            # "pending" until this trade completes or is explicitly skipped
+            # -- every row must leave this state by the end of the walk.
+            outcomes = ["pending"] * len(LEDGER)
+
+            for day in range(min_day, max_day + 1):
+                # 1) carried-in exits: entered before today, exiting today.
+                for idx, tr in enumerate(LEDGER):
+                    if tr["exit_day"] == day and tr["entry_day"] != day and idx in open_positions:
                         pos = open_positions.pop(idx)
                         cash += pos["qty"] * tr["exit"]
-                    continue
-                risk_per_share = tr["fill"] - tr["stop"]
-                if risk_per_share <= 0:
-                    skipped.append(idx)
-                    continue
-                open_cost = sum(p["qty"] * p["entry_price"] for p in open_positions.values())
-                equity_now = cash + open_cost
-                qty = max(0, min(
-                    int((equity_now * risk_pct) // risk_per_share),
-                    int((equity_now * cap_pct) // tr["fill"]),
-                    int(cash // tr["fill"]),
-                ))
-                if qty == 0:
-                    skipped.append(idx)
-                    continue
-                cash -= qty * tr["fill"]
-                open_positions[idx] = {"qty": qty, "entry_price": tr["fill"]}
-                assert cash >= -1e-6, f"cash went negative sizing trade {idx}: {cash}"
+                        outcomes[idx] = "completed"
+
+                # 2) new entries scheduled for today.
+                for idx, tr in enumerate(LEDGER):
+                    if tr["entry_day"] != day:
+                        continue
+                    risk_per_share = tr["fill"] - tr["stop"]
+                    if risk_per_share <= 0:
+                        outcomes[idx] = "skipped_invalid_risk"
+                        continue
+                    open_cost = sum(p["qty"] * p["entry_price"] for p in open_positions.values())
+                    equity_now = cash + open_cost
+                    qty = max(0, min(
+                        int((equity_now * risk_pct) // risk_per_share),
+                        int((equity_now * cap_pct) // tr["fill"]),
+                        int(cash // tr["fill"]),
+                    ))
+                    if qty == 0:
+                        outcomes[idx] = "skipped_insufficient_sizing"
+                        continue
+                    cash -= qty * tr["fill"]
+                    open_positions[idx] = {"qty": qty, "entry_price": tr["fill"]}
+                    assert cash >= -1e-6, f"cash went negative sizing trade {idx}: {cash}"
+
+                # 3) same-day round-trips: entered AND exit today -- a
+                # trade must never exit before step 2 has given it a
+                # chance to exist.
+                for idx, tr in enumerate(LEDGER):
+                    if tr["exit_day"] == day and tr["entry_day"] == day and idx in open_positions:
+                        pos = open_positions.pop(idx)
+                        cash += pos["qty"] * tr["exit"]
+                        outcomes[idx] = "completed"
 
             end_equity = cash + sum(p["qty"] * LEDGER[i]["exit"] for i, p in open_positions.items())
             total_pnl = end_equity - STARTING_EQUITY
+            skipped_count = sum(1 for o in outcomes if o.startswith("skipped"))
             out[f"risk={risk_pct:.0%}_cap={cap_pct:.0%}"] = {
                 "risk_pct": risk_pct, "cap_pct": cap_pct,
                 "total_pnl": round(total_pnl, 2),
                 "total_return_pct": round(total_pnl / STARTING_EQUITY * 100, 3),
                 "end_equity": round(end_equity, 2),
-                "trades_skipped_insufficient_sizing": len(skipped),
+                "trades_skipped_insufficient_sizing": skipped_count,
+                "trade_outcomes": outcomes,
+                "still_open_at_end": sorted(open_positions.keys()),
             }
     return out
 

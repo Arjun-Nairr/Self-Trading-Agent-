@@ -1,9 +1,9 @@
 # Handoff briefing — Hermes trading agent
 
-*Compacted 2026-09-01. Full pre-compaction history preserved at
-`docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md` — read it only if
-you need the exact chronological repair/verification narrative behind a
-claim below; do not treat it as more current than this file.*
+*Compacted 2026-09-01. Full pre-compaction history:
+`docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md` — read only for
+the exact chronological repair narrative behind a claim below; not more
+current than this file.*
 
 ---
 
@@ -250,25 +250,27 @@ verbatim, exact SQL) consult the archived raw reports it links to:
 (cycles 1–25, narrower). Do not open the archives unless the task
 genuinely needs that row-level detail.
 
-**Benchmark and sensitivity pass (2026-09-05, corrected 2026-09-06):**
-`docs/evaluations/round2_benchmark_sensitivity.md` — Hermes vs. cash/SPY/
-equal-weight-watchlist buy-and-hold/a defined SMA(10) technical baseline
-over the identical 50 dates, plus mechanical sensitivity to `RULES.md`'s
-risk%/cap%/reward-threshold parameters. A 2026-09-06 pass fixed six
-calculation defects (entry-day exits never checked, target priced off
-the wrong day, wrong time-stop ordering, and more — see the report's own
-correction notice) and downgraded the risk/cap grid from an overclaimed
-"fully replayable" to a disclosed cash-constrained approximation.
-Corrected headline: Hermes (+3.70%, −2.46% drawdown, 20.0% exposure)
-clearly beat the watchlist (−2.66%) and technical baseline (−6.27%) and
-had the best return-per-volatility ratio of any strategy, though SPY's
-raw return (+4.20%) edged it out at far higher exposure — SPY/
-equal-weight also enter one day earlier than Hermes/the baseline
-structurally can. The concentration cap remains the more consequential
-lever; time-stop horizon and stop-distance bounds stay **not mechanically
-identifiable**. **Verdict unchanged: improve measurement before
-optimizing or running another tranche** — not sufficient for Bayesian
-optimization, still unimplemented and unapproved.
+**Benchmark and sensitivity pass (2026-09-05, corrected twice on
+2026-09-06):** `docs/evaluations/round2_benchmark_sensitivity.md` —
+Hermes vs. cash/SPY/equal-weight-watchlist buy-and-hold/a defined
+SMA(10) technical baseline over the identical 50 dates, plus mechanical
+sensitivity to `RULES.md`'s risk%/cap%/reward-threshold parameters. Two
+2026-09-06 passes fixed ten calculation defects total (entry-day exits
+never checked, wrong target/time-stop/same-day-trade ordering, carried
+positions valued at cost basis instead of their real 09:45 mark, and
+more — see the report's own correction history) and settled the risk/cap
+grid on a disclosed, tested `chronological_cash_constrained_approximation`
+label — never "fully replayable." Corrected headline: Hermes (+3.70%,
+−2.46% drawdown, 20.0% exposure) clearly beat the watchlist (−2.66%) and
+technical baseline (−6.34%) and had the best return-per-volatility ratio
+of any strategy, though SPY's raw return (+4.20%) edged it out at far
+higher exposure — SPY/equal-weight also enter one day earlier than
+Hermes/the baseline structurally can. The concentration cap remains the
+more consequential lever; time-stop horizon and stop-distance bounds
+stay **not mechanically identifiable**. **Verdict unchanged: improve
+measurement before optimizing or running another tranche** — not
+sufficient for Bayesian optimization, still unimplemented and
+unapproved.
 
 ---
 
@@ -342,15 +344,13 @@ sufficient to begin Bayesian optimization, (b) run another unchanged
 tranche first, or (c) improve measurement before either. **That report's
 own recommendation is (c)** — two of the five ranked parameters
 (time-stop horizon, stop-distance bounds) are not mechanically
-identifiable from what this run stored, and n=16 closed trades is still
-short of `RULES.md` §6b's own 30–60-trade target. This is a
-recommendation for the user to weigh, not a decision already made.
+identifiable, and n=16 closed trades is still short of `RULES.md` §6b's
+own 30–60-trade target. A recommendation to weigh, not a decision made.
 
-**Do not, until that review happens:** start, reset, or resume training;
-change `RULES.md`/`AGENTS.md`/`SOUL.md`; change the model/provider/
-reasoning-effort configuration; implement Bayesian optimization; do
-fundamental-data work; redesign the dashboard; or begin any live
-deployment work.
+**Do not, until that review happens:** start/reset/resume training;
+change `RULES.md`/`AGENTS.md`/`SOUL.md`/model/provider/reasoning-effort;
+implement Bayesian optimization; do fundamental-data work; redesign the
+dashboard; or begin any live deployment work.
 
 ---
 
