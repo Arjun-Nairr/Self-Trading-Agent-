@@ -280,6 +280,72 @@ check_true("BBB's rejection is recorded as a sizing failure, not silently droppe
            bbb_rejection is not None and bbb_rejection["reason"] == "sizing rounded to zero shares")
 
 
+# -- Problem 1 (this pass): a CARRIED position's post-09:45 proceeds -----
+#    must never fund another ticker's earlier 09:45 entry
+#
+# AAA enters early and is carried, unresolved, all the way to BBB's own
+# entry day -- surviving AAA's pre-09:45 chronology (no gap, no expired
+# time stop, no touch in the 09:30-09:45 bar). BBB's entry is sized using
+# ONLY cash + AAA's 09:30-close mark; AAA's target is only touched by a
+# LATER (10:00) bar, resolved strictly AFTER BBB's sizing. RISK_PCT/
+# MAX_POS_PCT relaxed to 100% so cash is the sole real constraint.
+trading_days, lookback_days, daily_bars = build_multi_scenario({
+    "AAA": {"flat": 90.0, "jump": 100.0, "jump_day_index": 1},
+    "BBB": {"flat": 4500.0, "jump": 5000.0, "jump_day_index": 5},
+})
+aaa_entry_day = str(trading_days[2])
+bbb_entry_day = str(trading_days[6])
+overrides = {
+    ("AAA", aaa_entry_day): full_intraday(100.0),  # AAA fills at 100, stop=95, no entry-day touch
+    ("AAA", bbb_entry_day): full_intraday(100.0, [ibar("10:00", 100.0, 110.0, 100.0, 105.0)]),  # target only AFTER 09:45
+    ("BBB", bbb_entry_day): full_intraday(5000.0),
+}
+orig_risk_pct, orig_max_pos_pct = bs.RISK_PCT, bs.MAX_POS_PCT
+orig_starting_equity = bs.STARTING_EQUITY
+bs.RISK_PCT, bs.MAX_POS_PCT = 1.0, 1.0
+bs.STARTING_EQUITY = 10_000.0
+try:
+    bs.fetch_intraday_bars = per_ticker_day_intraday(overrides, daily_bars)
+    curve, trades, rejected = technical_baseline_curve(["AAA", "BBB"], daily_bars, lookback_days, trading_days)
+finally:
+    bs.RISK_PCT, bs.MAX_POS_PCT = orig_risk_pct, orig_max_pos_pct
+    bs.STARTING_EQUITY = orig_starting_equity
+
+aaa_trade = next((t for t in trades if t["ticker"] == "AAA"), None)
+check_true("AAA's exit is recorded as a target hit", aaa_trade is not None and aaa_trade["outcome"] == "target")
+check_true("AAA was genuinely CARRIED -- entered on an earlier day than it exited",
+           aaa_trade["entry_date"] == aaa_entry_day and aaa_trade["exit_date"] == bbb_entry_day
+           and aaa_trade["entry_date"] != aaa_trade["exit_date"])
+bbb_trade = next((t for t in trades if t["ticker"] == "BBB"), None)
+bbb_rejection = next((r for r in rejected if r["ticker"] == "BBB"), None)
+check("BBB is rejected -- AAA's carried position was worth 100% of equity marked, "
+      "but AAA's post-09:45 exit proceeds (not yet realized at 09:45) cannot fund BBB",
+      bbb_trade, None)
+check_true("BBB's rejection is a sizing failure (zero cash at 09:45), not silently dropped",
+           bbb_rejection is not None and bbb_rejection["reason"] == "sizing rounded to zero shares")
+
+
+# -- missing carried-position 09:30 data fails loudly even with NO new ----
+#    entry candidate that day (Problem 1: the fix must not be conditional
+#    on another ticker also signaling)
+trading_days, lookback_days, daily_bars = build_scenario()
+entry_day = "2026-01-07"
+missing_930_only = {("AAA", entry_day): full_intraday(11.0)}  # AAA enters fine...
+# ...but its VERY NEXT held day has no intraday data at all.
+next_day = str(trading_days[3])
+missing_930_only[("AAA", next_day)] = None
+bs.fetch_intraday_bars = per_ticker_day_intraday(missing_930_only, daily_bars)
+try:
+    technical_baseline_curve(["AAA"], daily_bars, lookback_days, trading_days)
+    raised, msg = False, ""
+except MissingDataError as exc:
+    raised, msg = True, str(exc)
+check_true("a carried position with NO intraday data on a held day (no new entry that "
+           "day either) still raises MissingDataError", raised)
+check_true("the error names the ticker", "AAA" in msg)
+check_true("the error names the date", next_day in msg)
+
+
 # -- issue #3: sizing must value a carried position at its real 09:45 -----
 #    mark, not its entry cost basis (this pass)
 #
@@ -458,20 +524,67 @@ check("the Day-18 same-day trade completed (entered before it exited)",
 check_true("no position is falsely left open after its own recorded exit day",
            len(cell["still_open_at_end"]) == 0)
 
-# Independent, non-tautological cash-never-negative check: replay the
-# SAME ledger, in ENTRY-DAY order for spends and EXIT-DAY order for
-# receipts, using the grid's own qty derived from trade_outcomes'
-# completion -- since the grid doesn't expose per-trade qty directly,
-# this instead re-derives it structurally: total spend across all
-# "completed"/"skipped_insufficient_sizing" entries can never exceed
-# STARTING_EQUITY at any prefix, which is exactly what "cash never goes
-# negative" means for a chronological walk. Re-run at a much tighter cap
-# to stress concurrent-entry cash contention (Day 45's three-way tie).
+def independently_replay_cash(cell: dict, starting: float) -> float:
+    """A GENUINE independent check: recompute cash from scratch using
+    only each cash_events entry's own (kind, qty, price) -- never reading
+    `cash_after` as ground truth. Asserts every chronological prefix
+    stays nonnegative (its OWN running total, not the grid's), and
+    returns the replay's own final balance for the caller to reconcile
+    against `end_equity` separately."""
+    replayed = starting
+    for ev in cell["cash_events"]:
+        replayed += -ev["qty"] * ev["price"] if ev["kind"] == "entry" else ev["qty"] * ev["price"]
+        assert replayed >= -1e-6, f"independent replay went negative at event {ev}: {replayed}"
+        # Cross-check against the grid's own recorded cash_after too --
+        # a genuine consistency check, not just trusting either side.
+        assert abs(replayed - ev["cash_after"]) < 1e-6, \
+            f"independent replay ({replayed}) disagrees with recorded cash_after ({ev['cash_after']}) at {ev}"
+    return replayed
+
+
 tight_cell = risk_cap_grid([0.02], [0.05])["risk=2%_cap=5%"]
-check_true("cash-never-negative holds even under tight-cap concurrent-entry stress",
-           "pending" not in tight_cell["trade_outcomes"])
-check_true("tight cap still leaves no position falsely open",
-           len(tight_cell["still_open_at_end"]) == 0)
+replayed_final = independently_replay_cash(tight_cell, STARTING_EQUITY)
+still_open_value = sum(LEDGER[i]["exit"] * next(e["qty"] for e in tight_cell["cash_events"] if e["idx"] == i)
+                        for i in tight_cell["still_open_at_end"]) if tight_cell["still_open_at_end"] else 0.0
+check_true("independent cash replay's final balance reconciles with end_equity "
+           "(accounting for any still-open position's own last recorded qty)",
+           abs((replayed_final + still_open_value) - tight_cell["end_equity"]) < 1e-6)
+
+# -- Problem 2 (this pass): a genuine cash-pressure regression -- three
+# same-day entries whose combined naive cost exceeds STARTING_EQUITY.
+# Without the affordability check (int(cash // fill) in the min(...)),
+# the 2nd and 3rd would each independently claim floor(equity*cap/fill)
+# shares and together overspend; WITH it, only the first (idx order) is
+# affordable and the other two are cleanly skipped, never overspending.
+PRESSURE_LEDGER = [
+    {"fill": 100.0, "exit": 110.0, "qty": 0, "stop": 90.0, "target": 120.0, "rr": 1.0,
+     "reason": "test", "entry_day": 1, "exit_day": 2},
+    {"fill": 100.0, "exit": 90.0, "qty": 0, "stop": 90.0, "target": 120.0, "rr": 1.0,
+     "reason": "test", "entry_day": 1, "exit_day": 2},
+    {"fill": 100.0, "exit": 105.0, "qty": 0, "stop": 90.0, "target": 120.0, "rr": 1.0,
+     "reason": "test", "entry_day": 1, "exit_day": 2},
+]
+orig_ledger = bs.LEDGER
+bs.LEDGER, orig_starting_equity2 = PRESSURE_LEDGER, bs.STARTING_EQUITY
+bs.STARTING_EQUITY = 1_000.0
+try:
+    # risk_pct/cap_pct here are risk_cap_grid's own PARAMETERS (100% each)
+    # -- deliberately permissive so cash is the only real constraint;
+    # risk_cap_grid never reads the module-level RISK_PCT/MAX_POS_PCT
+    # constants (those belong to technical_baseline_curve only).
+    pressure_cell = risk_cap_grid([1.0], [1.0])["risk=100%_cap=100%"]
+finally:
+    bs.LEDGER = orig_ledger
+    bs.STARTING_EQUITY = orig_starting_equity2
+
+check("exact accepted trade: only idx 0 (first in order) is affordable",
+      pressure_cell["trade_outcomes"], ["completed", "skipped_insufficient_sizing", "skipped_insufficient_sizing"])
+entry_events = [e for e in pressure_cell["cash_events"] if e["kind"] == "entry"]
+check("exactly one entry event occurred", len(entry_events), 1)
+check("its exact quantity is the full $1,000 // $100 fill -- 10 shares", entry_events[0]["qty"], 10)
+independently_replay_cash(pressure_cell, 1_000.0)  # re-asserts every prefix >= 0 for this scenario too
+check("final balance reconciles: 10 shares bought at 100, sold at 110 -> $1,100",
+      pressure_cell["end_equity"], 1_100.0)
 
 grid = risk_cap_grid([0.01, 0.02, 0.03], [0.20])
 trade_counts = {len(v["trade_outcomes"]) for v in grid.values()}

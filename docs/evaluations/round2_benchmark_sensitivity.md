@@ -35,10 +35,36 @@ machine-readable output, not committed). Tests:
 >   moved; (4) a missing 09:45 entry bar, or a missing 09:30 mark needed
 >   to value a carried position at the 09:45 sizing instant, was silently
 >   treated as "no trade" instead of failing loudly. All four are fixed
->   and covered by direct regression tests (see
->   `test_benchmark_sensitivity.py`); every number below is regenerated
->   from the corrected implementation — nothing is preserved from an
->   earlier version on the strength of having been committed first.
+>   and covered by direct regression tests.
+> - **2026-09-06 (this pass):** fixed two further defects. (1) A carried
+>   position's exit was still resolved using the WHOLE day's OHLC range
+>   before 09:45 entries were sized — an afternoon stop/target touch could
+>   leak into the 09:45 equity mark and its proceeds could fund a same-day
+>   entry that only had cash because of a move that hadn't happened yet by
+>   09:45. Carried-position resolution is now split at 09:45 exactly like
+>   new entries already were: opening-gap → time-stop-at-open → the
+>   09:30-09:45 bar's OWN range (never the whole day) resolve BEFORE
+>   entries are sized; only AFTER sizing does every still-open position
+>   (carried survivors and new fills alike) walk from 09:45 through the
+>   close. **This changed the technical baseline's numbers materially —
+>   see §3.** (2) The test claiming to independently prove the sensitivity
+>   grid's cash never goes negative only checked that no trade was left
+>   `"pending"` — it never inspected a single cash value. `risk_cap_grid`
+>   now exposes a minimal `cash_events` trace (day/kind/qty/price per
+>   cash-affecting event) and the test independently replays cash from
+>   `STARTING_EQUITY` using only those raw fields, asserting every
+>   chronological prefix stays nonnegative and reconciles with the
+>   reported `end_equity` — plus a dedicated cash-pressure regression
+>   (three same-day entries whose naive combined cost would overspend)
+>   proving the affordability check is what prevents it. Also corrected
+>   §3's own reconciliation, which had paired Hermes' full-portfolio
+>   return (+3.70%, includes the still-open position's unrealized P&L)
+>   with the closed-ledger-only realized dollar figure (+\$3,443.73) as if
+>   they were the same number. All fixes covered by direct regression
+>   tests (see `test_benchmark_sensitivity.py`); every number below is
+>   regenerated from the corrected implementation — nothing is preserved
+>   from an earlier version on the strength of having been committed
+>   first.
 
 ---
 
@@ -170,7 +196,7 @@ coverage across it.
 | Cash | \$100,000.00 | 0.00% | 0.00% | 0.00% | — | 0% |
 | SPY buy-and-hold | \$104,202.06 | **+4.20%** | −8.53% | 15.17% | 0.28 | 99.4% |
 | Equal-weight watchlist buy-and-hold | \$97,337.07 | **−2.66%** | −8.09% | 16.58% | −0.16 | 99.7% |
-| Technical baseline (SMA10, pooled) | \$93,656.09 | **−6.34%** | −7.55% | 15.43% | −0.41 | 34.4% |
+| Technical baseline (SMA10, pooled) | \$100,388.80 | **+0.39%** | −5.58% | 16.80% | 0.02 | 35.0% |
 | **Hermes (actual)** | **\$103,696.08** | **+3.70%** | **−2.46%** | **8.95%** | **0.41** | **20.0%** |
 
 "Return/volatility" is a crude return-per-unit-of-risk ratio (no
@@ -179,10 +205,30 @@ risk-free-rate subtraction — not a formal Sharpe ratio; flagged as an
 
 **Trade count / turnover:** Hermes — 16 closed + 1 open (verified,
 `docs/evaluations/round2_50cycle_evaluation_extract.md` §2). Technical
-baseline — **28** closed-or-resolved trades, plus **3 rejected entries**
+baseline — **26** closed-or-resolved trades, plus **3 rejected entries**
 (2 for an out-of-band stop distance once priced off the real fill, 1 for
-sizing rounding to zero shares); win rate 10/28 = 35.7%. Buy-and-hold
+sizing rounding to zero shares); win rate 12/26 = 46.2%. Buy-and-hold
 benchmarks and cash have no turnover by construction.
+
+### 3a. Reconciliation — four different numbers, none interchangeable
+
+Four separate \$ figures appear across this report and the compact
+evaluation extract. Pairing any two of them requires knowing they measure
+the **same scope**; a prior version of this report paired two that don't
+(see the correction notice above) and is corrected here:
+
+| Figure | Scope | Return % | \$ P&L | Source |
+|---|---|---|---|---|
+| Hermes actual portfolio | Full account: 16 closed trades **+ the 1 still-open position's unrealized P&L** | **+3.70%** | **+\$3,696.08** | `portfolio_snapshots`, re-queried live |
+| Hermes realized-only (closed ledger) | The 16 closed trades **only** — excludes the open position entirely | **+3.44%** | **+\$3,443.73** | `docs/evaluations/round2_50cycle_evaluation_extract.md` §2 (harness-authoritative) |
+| Same 16 trades, recomputed from `LEDGER`'s own fill/exit fields | Identical scope to the row above | +3.445% | +\$3,445.04 | `min_rr_threshold_filter([1.5])` in this report — the \$1.31 gap vs. the row above is the same **pre-existing, already-documented** 2-decimal `fill_price`-precision artifact the compact evaluation extract itself flags (§2.2 there), not a new error |
+| Technical baseline (this report's own strategy) | Its own 26 trades, unrelated universe of decisions | +0.39% | +\$388.80 | §3 above |
+
+**The risk%×cap% grid (§4.1) replays only the 16 closed trades — it has
+no open position at all.** Its own baseline comparison is therefore the
+**realized-only** row (+3.44%/+\$3,443.73), never the full-portfolio
++3.70%/+\$3,696.08 figure. §4.1 below has been corrected to compare
+against the right row.
 
 **Reconciliation check:** Hermes' end equity here (\$103,696.08, +3.696%)
 matches the compact evaluation brief's own figure exactly — same source
@@ -209,12 +255,22 @@ pass (none touched the Hermes-curve fetch).
   watchlist would have **lost** 2.66% held passively over the identical
   dates; Hermes' selectivity and exits produced a positive return over
   the same universe.
-- **vs. the technical baseline:** yes, clearly — the corrected SMA10
-  baseline lost 6.34% with worse volatility and a worse drawdown than
-  Hermes, despite similar-order exposure discipline (both well under
-  100%). This is the most directly comparable same-universe, same-
-  execution-timing, same-day-one-disadvantage benchmark available, and
-  Hermes outperforms it by just over 10 points of return.
+- **vs. the technical baseline:** yes — the corrected SMA10 baseline
+  (+0.39%) essentially broke even, well behind Hermes' +3.70%, with
+  double Hermes' volatility (16.80% vs. 8.95%) and a worse drawdown
+  (−5.58% vs. −2.46%). This is the most directly comparable same-
+  universe, same-execution-timing, same-day-one-disadvantage benchmark
+  available. **This margin is much narrower than an earlier, defective
+  version of this report claimed (−6.34%, a ~10-point gap).** That
+  version resolved carried positions using the whole day's OHLC range
+  before 09:45 entries were sized, letting an afternoon stop/target
+  touch (and, in concurrent-signal cases, its cash) leak into decisions
+  that should only have seen data available by 09:45 — both mis-sizing
+  entries and mis-timing exits. The corrected, lookahead-free baseline's
+  real gap to Hermes is about 3.3 points, not ~10; this report does not
+  claim to know in general which direction that class of defect biases a
+  result, only that this specific run's number changed materially once
+  it was fixed.
 
 ### Limitations on this comparison
 
@@ -281,9 +337,11 @@ earlier draft of this correction surfaced at cap=30% was itself an
 artifact of that draft's own same-day ordering defect, not a real result;
 it does not survive this pass's fix and is not repeated here.
 
-(2%/20% ≈ +3.50% vs. the real recorded +3.70%/+\$3,443.73 — the small gap
-is the cost-basis-equity-proxy approximation described above, not a data
-error.)
+(2%/20% ≈ +3.50%/+\$3,502.44 vs. the real recorded **closed-ledger-only**
+result of +3.44%/+\$3,443.73 — see §3a for why the realized-only figure,
+not Hermes' +3.70% full-portfolio return, is this grid's correct
+comparison point. The ~\$59 gap between them is the cost-basis-equity-
+proxy approximation described above, not a data error.)
 
 **Strongest justified conclusion:** **the concentration cap remains the
 more consequential lever than the risk-per-trade percentage at every cap
@@ -362,8 +420,11 @@ Inherits §4.3's limitation directly.
   dedicated 15-real-trading-day lookback window strictly before
   `PERIOD_START`, with full coverage validated up front; every entry
   executes at the *next* trading day's 09:45 bar, never the signal day
-  itself; 09:45 sizing marks a carried position at its 09:30 close, never
-  today's close or a later bar.
+  itself; every carried position is resolved pre-09:45 using ONLY its
+  opening-gap price and its own 09:30-09:45 bar (never the whole day's
+  range), and 09:45 sizing marks it at that same 09:30 close — never
+  today's close, never any bar after 09:45, and never another ticker's
+  same-day exit proceeds (all directly tested).
 - **Identical starting capital:** `STARTING_EQUITY = $100,000.00`, one
   shared constant, used directly in every `metrics()` calculation,
   including as the leading observation for drawdown/volatility.
@@ -377,16 +438,27 @@ Inherits §4.3's limitation directly.
   silently treated as "no trade":** all verified by
   `test_benchmark_sensitivity.py`'s `MissingDataError` tests (five
   distinct scenarios).
-- **Cash never goes negative**, and **every ledger row in the sensitivity
-  grid resolves to `"completed"` or an explicit `"skipped_..."` label,
-  never left `"pending"`** — including the real masked Day-18 same-day
-  round trip, directly tested (not inferred from trade count).
+- **Cash never goes negative in the sensitivity grid — independently
+  verified, not inferred from completeness.** `risk_cap_grid` exposes a
+  minimal `cash_events` trace (day/kind/qty/price per cash-affecting
+  event); the test replays cash from `STARTING_EQUITY` using only those
+  raw fields (never trusting the function's own recorded running total),
+  asserts every chronological prefix is nonnegative, and reconciles the
+  replay's final balance against `end_equity`. A dedicated cash-pressure
+  scenario (three same-day entries whose naive combined cost would
+  overspend a $1,000 account) proves the affordability check is what
+  prevents it, asserting the exact accepted/skipped trades and exact
+  quantity.
+- **Every ledger row in the sensitivity grid resolves to `"completed"`
+  or an explicit `"skipped_..."` label, never left `"pending"`** —
+  including the real masked Day-18 same-day round trip, directly tested.
 - **No single position ever exceeds 20% of current account equity, while
   total pooled exposure genuinely can** — directly tested with a
   three-ticker concurrent-signal scenario.
-- **A same-day exit's proceeds cannot fund another ticker's earlier
-  09:45 entry**, and **a carried position's sizing contribution uses its
-  real 09:45 mark, not its cost basis** — both directly tested with
+- **Neither a same-day exit's proceeds NOR a carried position's later
+  (post-09:45) exit proceeds can fund another ticker's earlier 09:45
+  entry**, and **a carried position's sizing contribution uses its real
+  09:30-close mark, not its cost basis** — all directly tested with
   scenarios whose expected quantities are hand-derived, independent
   arithmetic, not values recomputed the way the code itself computes
   them.
@@ -430,12 +502,14 @@ Inherits §4.3's limitation directly.
 - The technical baseline's stop is a fixed 5%-below-signal-close rule,
   not Hermes' own real support/resistance selection — a deliberate
   simplification stated in §2.
-- Two discarded earlier drafts of this benchmark are documented here only
-  to be clear neither ever produced a reported number: one divided
-  capital into fixed \$10,000 per-ticker slices with the 20% cap applied
-  per slice (silently limiting total exposure to ~20%); the other's
-  risk%×cap% grid sorted a same-day trade's exit before its own entry.
-  Both are fully superseded by the implementation this report describes.
+- Three discarded earlier drafts of this benchmark are documented here
+  only to be clear none ever produced a currently-reported number: one
+  divided capital into fixed \$10,000 per-ticker slices with the 20% cap
+  applied per slice; one's risk%×cap% grid sorted a same-day trade's exit
+  before its own entry; one resolved carried positions using the whole
+  day's OHLC range before 09:45 entries were sized, letting an afternoon
+  touch (and its cash) leak into a 09:45-only decision. All three are
+  fully superseded by the implementation this report describes.
 
 ---
 
