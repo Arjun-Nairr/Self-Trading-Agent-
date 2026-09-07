@@ -30,3 +30,7 @@ skills-lock.json
 # Old diagram source, already published separately as a Claude Artifact --
 # scratch work, not project source
 scratchpad/
+
+# Local Obsidian vault state, created when the repository root is opened
+# as a vault -- machine-specific, not project source
+/.obsidian/
