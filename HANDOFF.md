@@ -347,13 +347,13 @@ recommendation to weigh, not a decision made. Until that review happens:
 no start/reset/resume training; no `RULES.md`/`AGENTS.md`/`SOUL.md`/
 model/provider change; no Bayesian optimization; no fundamental-data work.
 
-**Implementation track (agreed NOW order — see `docs/obsidian/
-03-project-workflow.canvas`):** step 1, the Obsidian vault itself
-(`docs/obsidian/`), is **done**. Next: **Dashboard V2** — full IA + visual
-rebuild (Overview/Trades/Decisions/Runs & Evaluation; training and
-live-paper share one interface, mode as a badge/filter; preserves
-existing Neon queries/connections/calculations). Not started — needs its
-own scoping pass first. Then the individual-trade view, then the
+**Implementation track (agreed NOW order — see `docs/obsidian/03-project-workflow.canvas`):**
+step 1, the Obsidian vault, is **done**. Step 2, **Dashboard V2**
+(`dashboard-v2/`, full IA + visual rebuild) **exists as an unactivated
+candidate, not yet cut over** — a pass correcting unsupported UI claims
+(naming, open-position price/days-held source, the Decisions funnel) is
+done; awaiting visual review and an explicit cutover decision. V1 stays
+active until then. Then the individual-trade view, then the
 experiment/optimization framework. NEXT/LATER canvas items stay
 discussion-only until the user explicitly approves moving one.
 

@@ -32,7 +32,8 @@ node test/calc.test.mjs
 
 Plain Node `assert`, no test framework installed. Covers trade pairing,
 realized P&L, win rate, max drawdown, total return, the risk-checker
-rejection rule, run isolation, and null/empty inputs.
+rejection rule, the best-effort activity matcher, the open-position detail
+lookup, run isolation, and null/empty inputs.
 
 ## Structure
 
@@ -81,6 +82,21 @@ drawdown/return formulas unchanged).
 
 ## Known limitations (stated, not hidden)
 
+- **No pre-journal proposal funnel.** Decision-time rejections that never
+  reach the `trades` table are absent from this anonymous dashboard's data
+  entirely — there is no "evaluated → proposed → accepted" count to show.
+  The Decisions page shows only exact `trades`-row statuses (total
+  journaled / filled / rejected / pending) under "Journaled order
+  outcomes," with a note that the full funnel needs cycle evidence this
+  dashboard does not query.
+- **Open-position current price and unrealized P&L come only from the
+  latest scoped snapshot's `open_positions_detail`.** If a ticker has no
+  matching detail row, the Overview and Trades pages show `—` — they never
+  substitute the entry fill price and label it "Current." Simulated days
+  held likewise comes only from a stored `days_held` value when present;
+  in backtest mode, with no stored value, it shows `—` rather than being
+  computed from the real current date (which is meaningless for a
+  simulated trading day).
 - **No live benchmark comparison.** SPY / watchlist / SMA(10) figures live
   only in `docs/evaluations/round2_benchmark_sensitivity.md` — HANDOFF.md
   §8 already documents that no benchmark series is wired into the

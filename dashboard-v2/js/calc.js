@@ -105,6 +105,34 @@ export function rejectionDistribution(blockedActivity) {
   return Object.entries(rules).sort((a, b) => b[1] - a[1]);
 }
 
+/* ------------------------------------------------------- activity match */
+
+// Best-effort correlation only — trades rows carry no foreign key into
+// agent_activity, so this matches by ticker symbol appearing in the
+// description text within a time window of the row's own created_at.
+// Never a real join; callers must present it as best-effort. Shared by
+// the Trades and Decisions pages so both use the identical rule.
+export function relatedActivity(row, activity, windowMs = 48 * 3600_000) {
+  if (!row) return [];
+  const rowCreated = new Date(row.created_at).getTime();
+  return (activity || []).filter(a => {
+    if (!a.description || !a.description.includes(row.ticker)) return false;
+    return Math.abs(new Date(a.created_at).getTime() - rowCreated) < windowMs;
+  });
+}
+
+/* --------------------------------------------------- open position detail */
+
+// The one real, current-mark source for an open position: the latest
+// scoped snapshot's own open_positions_detail row for that ticker. Never
+// fall back to the entry fill price and call it "current" — that silently
+// mislabels a stale number as live. Returns null if no matching detail
+// exists (e.g. the position opened after the latest snapshot, or the
+// snapshot carries no detail for it).
+export function openPositionDetail(ticker, snapshot) {
+  return (snapshot?.open_positions_detail || []).find(p => p.ticker === ticker) ?? null;
+}
+
 /* --------------------------------------------------------- run isolation */
 
 // Throws if any row carries a run_id other than the expected one. Used

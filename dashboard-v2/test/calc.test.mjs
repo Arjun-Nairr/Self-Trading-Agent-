@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   pairTrades, realizedPnl, winRate, maxDrawdown, totalReturn,
   assertRunIsolated, isBlockedRow, rejectionDistribution, STARTING_EQUITY,
+  relatedActivity, openPositionDetail,
 } from "../js/calc.js";
 
 let n = 0;
@@ -110,6 +111,37 @@ test("rejectionDistribution: counts §-references, sorted descending", () => {
   const dist = rejectionDistribution(rows);
   assert.deepEqual(dist[0], ["§2b", 2]);
   assert.deepEqual(dist[1], ["§6a", 1]);
+});
+
+/* ------------------------------------------------------- activity match */
+
+test("relatedActivity: matches by ticker within the time window, both directions", () => {
+  const row = { ticker: "ALPHA", created_at: "2026-01-05T12:00:00Z" };
+  const activity = [
+    { description: "ALPHA rejected: §2b cap", created_at: "2026-01-05T13:00:00Z" }, // within window, after
+    { description: "ALPHA reflected on earlier", created_at: "2026-01-04T00:00:00Z" }, // within window, before (36h)
+    { description: "ALPHA far away", created_at: "2026-02-01T00:00:00Z" }, // outside window
+    { description: "BRAVO rejected: §2b cap", created_at: "2026-01-05T12:30:00Z" }, // wrong ticker
+    { description: null, created_at: "2026-01-05T12:10:00Z" }, // no description
+  ];
+  const related = relatedActivity(row, activity);
+  assert.equal(related.length, 2);
+});
+
+test("relatedActivity: empty for no row, no activity, or no match", () => {
+  assert.deepEqual(relatedActivity(null, [{ description: "x", created_at: "2026-01-01T00:00:00Z" }]), []);
+  assert.deepEqual(relatedActivity({ ticker: "AAA", created_at: "2026-01-01T00:00:00Z" }, []), []);
+  assert.deepEqual(relatedActivity({ ticker: "AAA", created_at: "2026-01-01T00:00:00Z" }, null), []);
+});
+
+/* --------------------------------------------------- open position detail */
+
+test("openPositionDetail: finds by ticker, null when no match or no snapshot", () => {
+  const snap = { open_positions_detail: [{ ticker: "ALPHA", current_price: 44.9 }, { ticker: "BRAVO", current_price: 20 }] };
+  assert.equal(openPositionDetail("ALPHA", snap).current_price, 44.9);
+  assert.equal(openPositionDetail("CHARLIE", snap), null); // no matching detail — never falls back to fill price
+  assert.equal(openPositionDetail("ALPHA", null), null); // no snapshot at all
+  assert.equal(openPositionDetail("ALPHA", { open_positions_detail: [] }), null);
 });
 
 /* --------------------------------------------------------- run isolation */

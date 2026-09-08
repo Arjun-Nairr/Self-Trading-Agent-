@@ -1,6 +1,6 @@
 import {
   pairTrades, realizedPnl, unrealizedPnl, winRate, maxDrawdown, totalReturn,
-  money, pctSigned, pctPlain, time, esc, STARTING_EQUITY,
+  money, pctSigned, pctPlain, time, esc, STARTING_EQUITY, openPositionDetail,
 } from "../calc.js";
 
 const STALE_MS = 24 * 3600_000; // live mode only — see render() below
@@ -76,12 +76,13 @@ export function render(el, data, ctx) {
 
 function renderPositions(open, snap) {
   if (!open.length) return `<div class="card empty" style="padding:20px">No open positions.</div>`;
-  const detailByTicker = {};
-  for (const p of (snap?.open_positions_detail || [])) detailByTicker[p.ticker] = p;
 
   const rows = open.map(t => {
-    const d = detailByTicker[t.ticker];
-    const current = d ? Number(d.current_price) : Number(t.fill_price);
+    // Current price and unrealized P&L come ONLY from the latest scoped
+    // snapshot's own open_positions_detail — never the entry fill price
+    // relabeled as "current".
+    const d = openPositionDetail(t.ticker, snap);
+    const current = d ? Number(d.current_price) : null;
     const upl = d ? Number(d.unrealized_pl) : null;
     const uplPct = d ? Number(d.unrealized_pl_pct) : null;
     return `<tr class="responsive-row">
