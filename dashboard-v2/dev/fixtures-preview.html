@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard V2 — fixture preview (dev only, not shipped)</title>
+<link rel="stylesheet" href="../css/app.css">
+<style>.dev-bar { background: #12151a; color: #fff; padding: 10px 20px; font-size: 12px; display: flex; gap: 12px; align-items: center; }
+.dev-bar select, .dev-bar button { font-size: 12px; padding: 4px 8px; }</style>
+</head>
+<body>
+<div class="dev-bar">
+  <strong>DEV FIXTURE PREVIEW</strong> — not part of the shipped app, not linked from index.html
+  <label>Fixture: <select id="fx"><option value="FIXTURE_BACKTEST">Populated backtest run</option><option value="FIXTURE_LIVE_EMPTY">Empty live-paper account</option><option value="FIXTURE_STALE">Stale data</option></select></label>
+  <label>Page: <select id="pg"><option value="overview">Overview</option><option value="trades">Trades</option><option value="decisions">Decisions</option><option value="runs">Runs &amp; Evaluation</option></select></label>
+</div>
+<div class="shell">
+  <main id="page-root"></main>
+</div>
+<script type="module">
+import * as fixtures from "../js/fixtures.js";
+import { render as renderOverview } from "../js/pages/overview.js";
+import { render as renderTrades } from "../js/pages/trades.js";
+import { render as renderDecisions } from "../js/pages/decisions.js";
+import { render as renderRuns } from "../js/pages/runs.js";
+
+const PAGES = { overview: renderOverview, trades: renderTrades, decisions: renderDecisions, runs: renderRuns };
+const fxSel = document.getElementById("fx"), pgSel = document.getElementById("pg"), root = document.getElementById("page-root");
+
+function draw() {
+  const data = fixtures[fxSel.value];
+  const mode = fxSel.value === "FIXTURE_BACKTEST" ? "backtest" : "live";
+  root.innerHTML = "";
+  PAGES[pgSel.value](root, { ...data, mode, run_id: data.run_id }, { runs: [] });
+}
+fxSel.addEventListener("change", draw);
+pgSel.addEventListener("change", draw);
+draw();
+</script>
+</body>
+</html>
