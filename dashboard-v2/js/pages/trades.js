@@ -97,7 +97,7 @@ function renderDetail(el, r, activity) {
         ${step("Decision", true)}
         ${step("Risk validation", t.status !== "rejected")}
         ${step("Fill", t.status === "filled")}
-        ${step("Observations", related.length > 0)}
+        ${step("Logged activity (best-effort)", related.length > 0)}
         ${step("Exit", r.kind === "closed")}
       </div>
       <div class="kv-list">
