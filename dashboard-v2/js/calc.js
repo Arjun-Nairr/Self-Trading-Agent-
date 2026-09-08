@@ -133,6 +133,75 @@ export function openPositionDetail(ticker, snapshot) {
   return (snapshot?.open_positions_detail || []).find(p => p.ticker === ticker) ?? null;
 }
 
+/* -------------------------------------------------------------- health */
+
+// Healthy when the latest successful snapshot is newer than the most
+// recent failure (or there is no recorded failure at all). null when
+// there is no snapshot yet — nothing to assess. A tie (identical
+// timestamps) reads as "needs attention", never silently healthy.
+export function computeHealth(snapshots, lastFailed) {
+  if (!snapshots || !snapshots.length) return null;
+  const latestOk = new Date(snapshots[0].created_at).getTime();
+  if (!lastFailed) return { healthy: true, label: "Healthy" };
+  const latestFail = new Date(lastFailed.created_at).getTime();
+  const healthy = latestOk > latestFail;
+  return { healthy, label: healthy ? "Healthy" : "Needs attention" };
+}
+
+/* ---------------------------------------------------------- equity curve */
+
+// Ascending {label, equity} series from stored snapshots only — no market
+// data, no per-trade path. day_label falls back to a formatted timestamp
+// when absent (e.g. live mode, which has no simulated day concept).
+export function equityCurveSeries(snapshots) {
+  return [...(snapshots || [])]
+    .slice()
+    .reverse()
+    .map(s => ({ label: s.day_label || time(s.created_at), equity: Number(s.equity) }))
+    .filter(p => Number.isFinite(p.equity));
+}
+
+/* --------------------------------------------------------- rule labels */
+
+// Plain-English labels for the RULES.md §-references rejectionDistribution
+// surfaces. Internal rules/logs/validators/tests keep their real §
+// references unchanged — this is a display-only translation for one page.
+const RULE_LABELS = {
+  "§2": "Position sizing (Rule 2)",
+  "§2b": "Maximum position size (Rule 2b)",
+  "§3": "Available cash check (Rule 3)",
+  "§6a": "Stop placement (Rule 6a)",
+  "§6b": "Minimum reward:risk (Rule 6b)",
+};
+
+// Unknown references degrade safely to "Rule <reference without §>" rather
+// than disappearing from the UI.
+export function ruleLabel(ref) {
+  return RULE_LABELS[ref] || `Rule ${(ref || "").replace(/^§/, "")}`;
+}
+
+/* ------------------------------------------------------------ positions */
+
+// Open + closed positions combined, newest-first by entry date — the same
+// pairing pairTrades() already does, just packaged as one sorted list so
+// pages don't each re-implement the merge/sort.
+export function positionsFromTrades(trades) {
+  const { closed, open } = pairTrades(trades);
+  return [
+    ...open.map(t => ({ kind: "open", entry: t, exit: null, pnl: null, pnlPct: null })),
+    ...closed.map(c => ({ kind: "closed", entry: c.entry, exit: c.exit, pnl: c.pnl, pnlPct: c.pnlPct })),
+  ].sort((a, b) => new Date(b.entry.created_at) - new Date(a.entry.created_at));
+}
+
+// The newest `limit` reconstructed positions for display, plus the true
+// total so a page can label itself "Latest N positions" only when it's
+// actually truncating. Never truncates the underlying trade rows
+// themselves — callers still hold the full `trades` array for metrics.
+export function latestPositions(trades, limit = 20) {
+  const all = positionsFromTrades(trades);
+  return { positions: all.slice(0, limit), total: all.length };
+}
+
 /* --------------------------------------------------------- run isolation */
 
 // Throws if any row carries a run_id other than the expected one. Used

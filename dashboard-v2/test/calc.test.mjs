@@ -1,11 +1,16 @@
 // Fixture-based checks for js/calc.js. No test framework — plain Node
 // assert, run with: node dashboard-v2/test/calc.test.mjs
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, join } from "node:path";
 import {
   pairTrades, realizedPnl, winRate, maxDrawdown, totalReturn,
   assertRunIsolated, isBlockedRow, rejectionDistribution, STARTING_EQUITY,
-  relatedActivity, openPositionDetail,
+  relatedActivity, openPositionDetail, computeHealth, equityCurveSeries,
+  ruleLabel, positionsFromTrades, latestPositions,
 } from "../js/calc.js";
+import { STRATEGY_PROFILE, CIRCUIT_BREAKER_NOTE } from "../js/strategy-profile.js";
 
 let n = 0;
 function test(name, fn) { fn(); n++; console.log(`ok - ${name}`); }
@@ -142,6 +147,125 @@ test("openPositionDetail: finds by ticker, null when no match or no snapshot", (
   assert.equal(openPositionDetail("CHARLIE", snap), null); // no matching detail — never falls back to fill price
   assert.equal(openPositionDetail("ALPHA", null), null); // no snapshot at all
   assert.equal(openPositionDetail("ALPHA", { open_positions_detail: [] }), null);
+});
+
+/* -------------------------------------------------------------- health */
+
+test("computeHealth: healthy when latest snapshot is newer than the last failure", () => {
+  const snaps = [{ created_at: "2026-01-05T00:00:00Z" }];
+  assert.deepEqual(computeHealth(snaps, { created_at: "2026-01-04T00:00:00Z" }), { healthy: true, label: "Healthy" });
+  assert.deepEqual(computeHealth(snaps, { created_at: "2026-01-06T00:00:00Z" }), { healthy: false, label: "Needs attention" });
+  assert.deepEqual(computeHealth(snaps, null), { healthy: true, label: "Healthy" });
+  // a tie reads as "needs attention", never silently healthy
+  assert.deepEqual(computeHealth(snaps, { created_at: "2026-01-05T00:00:00Z" }), { healthy: false, label: "Needs attention" });
+  assert.equal(computeHealth([], null), null);
+  assert.equal(computeHealth(null, null), null);
+});
+
+/* ---------------------------------------------------------- equity curve */
+
+test("equityCurveSeries: ascending order, empty/single/multiple snapshots", () => {
+  assert.deepEqual(equityCurveSeries([]), []);
+  assert.deepEqual(equityCurveSeries(null), []);
+
+  const one = equityCurveSeries([{ day_label: "Day 5", equity: 101000, created_at: "2026-01-05T00:00:00Z" }]);
+  assert.equal(one.length, 1);
+  assert.equal(one[0].equity, 101000);
+
+  // stored newest-first (matching data.js's own query order) -> series
+  // must come back ascending (oldest first) for a left-to-right chart.
+  const multi = equityCurveSeries([
+    { day_label: "Day 3", equity: 102000, created_at: "2026-01-03T00:00:00Z" },
+    { day_label: "Day 2", equity: 99000, created_at: "2026-01-02T00:00:00Z" },
+    { day_label: "Day 1", equity: 100000, created_at: "2026-01-01T00:00:00Z" },
+  ]);
+  assert.deepEqual(multi.map(p => p.label), ["Day 1", "Day 2", "Day 3"]);
+  assert.deepEqual(multi.map(p => p.equity), [100000, 99000, 102000]);
+});
+
+test("equityCurveSeries: falls back to a formatted timestamp when day_label is absent", () => {
+  const series = equityCurveSeries([{ equity: 100000, created_at: "2026-01-01T00:00:00Z" }]);
+  assert.equal(series.length, 1);
+  assert.ok(series[0].label && series[0].label !== "—");
+});
+
+/* ------------------------------------------------------------ rule labels */
+
+test("ruleLabel: maps known §-references, degrades unknown ones safely", () => {
+  assert.equal(ruleLabel("§2"), "Position sizing (Rule 2)");
+  assert.equal(ruleLabel("§2b"), "Maximum position size (Rule 2b)");
+  assert.equal(ruleLabel("§3"), "Available cash check (Rule 3)");
+  assert.equal(ruleLabel("§6a"), "Stop placement (Rule 6a)");
+  assert.equal(ruleLabel("§6b"), "Minimum reward:risk (Rule 6b)");
+  // unknown reference degrades to "Rule <ref without §>", never disappears
+  assert.equal(ruleLabel("§9a"), "Rule 9a");
+  assert.equal(ruleLabel("§99"), "Rule 99");
+});
+
+/* -------------------------------------------------------------- positions */
+
+test("positionsFromTrades: combines open+closed, newest entry first", () => {
+  const trades = [
+    { ticker: "OPEN1", action: "BUY", status: "filled", fill_price: 10, fill_quantity: 10, created_at: "2026-01-03T00:00:00Z" },
+    { ticker: "CLOSED1", action: "SELL", status: "filled", fill_price: 12, fill_quantity: 5, created_at: "2026-01-02T12:00:00Z" },
+    { ticker: "CLOSED1", action: "BUY", status: "filled", fill_price: 10, fill_quantity: 5, created_at: "2026-01-01T00:00:00Z" },
+  ];
+  const positions = positionsFromTrades(trades);
+  assert.equal(positions.length, 2);
+  assert.equal(positions[0].entry.ticker, "OPEN1"); // newest entry first
+  assert.equal(positions[0].kind, "open");
+  assert.equal(positions[1].kind, "closed");
+});
+
+test("latestPositions: slices to the newest N after pairing, reports the true total", () => {
+  const trades = [];
+  for (let i = 0; i < 25; i++) {
+    trades.push({
+      ticker: `T${i}`, action: "BUY", status: "filled", fill_price: 10, fill_quantity: 1,
+      created_at: new Date(2026, 0, 1 + i).toISOString(),
+    });
+  }
+  const { positions, total } = latestPositions(trades, 20);
+  assert.equal(total, 25);
+  assert.equal(positions.length, 20);
+  // newest 20 of 25 -> T24 (latest) down through T5, T0-T4 excluded
+  assert.equal(positions[0].entry.ticker, "T24");
+  assert.equal(positions[19].entry.ticker, "T5");
+
+  const { positions: fewPositions, total: fewTotal } = latestPositions(trades.slice(0, 10), 20);
+  assert.equal(fewTotal, 10);
+  assert.equal(fewPositions.length, 10); // under the limit -> nothing sliced away
+});
+
+/* --------------------------------------------------------- strategy sync */
+
+test("STRATEGY_PROFILE / CIRCUIT_BREAKER_NOTE: values stay synchronized with RULES.md's real text", () => {
+  const testDir = dirname(fileURLToPath(import.meta.url));
+  const rulesText = readFileSync(join(testDir, "..", "..", "RULES.md"), "utf8");
+
+  const byLabel = Object.fromEntries(STRATEGY_PROFILE.map(p => [p.label, p.value]));
+
+  assert.equal(byLabel["Risk per trade"], "2% of equity");
+  assert.match(rulesText, /Risk budget:\s*2\.0% of equity per trade/);
+
+  assert.equal(byLabel["Maximum position"], "20% of equity");
+  assert.match(rulesText, /No single position may exceed 20% of equity/);
+
+  assert.equal(byLabel["Portfolio exposure"], "cash only · no margin");
+  assert.match(rulesText, /Limited only by available cash\. No margin, ever/);
+
+  assert.equal(byLabel["Stop distance"], "3%–12% below entry");
+  assert.match(rulesText, /stop must fall between 3% and 12% below entry/);
+
+  assert.equal(byLabel["Reward:risk floor"], "1.5:1 base · 1.25:1 if escalated");
+  assert.match(rulesText, /Base tier: 1\.5:1\./);
+  assert.match(rulesText, /Escalated tier: 1\.25:1/);
+
+  assert.equal(byLabel["Time stop"], "5 trading days");
+  assert.match(rulesText, /Time stop.*5 trading days/);
+
+  assert.ok(CIRCUIT_BREAKER_NOTE.includes("30%"));
+  assert.match(rulesText, /30% from peak equity/);
 });
 
 /* --------------------------------------------------------- run isolation */

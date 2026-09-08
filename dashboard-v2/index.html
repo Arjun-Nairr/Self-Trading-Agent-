@@ -3,6 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="color-scheme" content="light dark">
 <title>Trading Agent Dashboard</title>
 <link rel="stylesheet" href="css/app.css">
 </head>
@@ -20,8 +21,11 @@
         <button type="button" data-mode="backtest" aria-pressed="true">Backtest</button>
         <button type="button" data-mode="live" aria-pressed="false">Live paper</button>
       </div>
+      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode" aria-pressed="false">🌙 Dark</button>
     </div>
   </header>
+
+  <div class="health-bar" id="health-bar" hidden></div>
 
   <nav class="pages" id="page-nav" aria-label="Dashboard pages"></nav>
 

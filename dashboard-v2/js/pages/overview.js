@@ -1,6 +1,6 @@
 import {
   pairTrades, realizedPnl, unrealizedPnl, winRate, maxDrawdown, totalReturn,
-  money, pctSigned, pctPlain, time, esc, STARTING_EQUITY, openPositionDetail,
+  money, pctSigned, pctPlain, esc, STARTING_EQUITY, openPositionDetail, equityCurveSeries,
 } from "../calc.js";
 
 const STALE_MS = 24 * 3600_000; // live mode only — see render() below
@@ -10,7 +10,7 @@ function stat(label, value, cls = "", sub = "") {
 }
 
 export function render(el, data, ctx) {
-  const { trades, snapshots, failedCount, lastFailed, mode } = data;
+  const { trades, snapshots, mode } = data;
   const { closed, open } = pairTrades(trades);
   const snap = snapshots[0];
 
@@ -62,14 +62,8 @@ export function render(el, data, ctx) {
     </section>
 
     <section>
-      <div class="section-title">Run status</div>
-      <div class="card kv-list">
-        <div class="kv"><span class="k">Last successful cycle</span><span class="v">${snap ? time(snap.created_at) : "none recorded"}</span></div>
-        <div class="kv"><span class="k">Pending orders</span><span class="v">${trades.filter(t => t.status === "pending").length}</span></div>
-        <div class="kv"><span class="k">Failed attempts</span><span class="v">${failedCount ?? 0}</span></div>
-        <div class="kv"><span class="k">Last failed attempt</span><span class="v">${lastFailed ? time(lastFailed.created_at) : "none recorded"}</span></div>
-      </div>
-      ${lastFailed ? `<div class="warning-box" style="margin-top:10px">⚠ ${esc(lastFailed.description || "A cycle failed.")}</div>` : ""}
+      <div class="section-title">Equity over time</div>
+      ${renderChart(snapshots)}
     </section>
   `;
 }
@@ -100,4 +94,47 @@ function renderPositions(open, snap) {
     <thead><tr><th>Ticker</th><th>Qty</th><th>Entry</th><th>Current</th><th>P&L</th><th>Stop</th><th>Target</th></tr></thead>
     <tbody>${rows}</tbody>
   </table></div>`;
+}
+
+// Vanilla SVG line chart, built only from stored portfolio_snapshots (no
+// market data, no per-trade path). Colors reference CSS custom properties
+// so the chart stays readable in both themes without a redraw.
+function renderChart(snapshots) {
+  const series = equityCurveSeries(snapshots);
+
+  if (series.length < 2) {
+    const msg = series.length === 0
+      ? "No snapshots yet for this run."
+      : "One snapshot so far — the chart needs at least two to draw a line.";
+    return `<div class="card empty" style="padding:24px">${msg}</div>`;
+  }
+
+  const vals = series.map(s => s.equity);
+  const lo = Math.min(...vals, STARTING_EQUITY), hi = Math.max(...vals, STARTING_EQUITY);
+  const pad = (hi - lo) * 0.15 || 500;
+  const min = lo - pad, max = hi + pad, range = max - min || 1;
+
+  const W = 600, H = 200, PAD = 6;
+  const x = i => PAD + (i / (series.length - 1)) * (W - PAD * 2);
+  const y = v => PAD + (1 - (v - min) / range) * (H - PAD * 2);
+  const baseY = y(STARTING_EQUITY);
+
+  const points = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const last = vals[vals.length - 1];
+  const color = last >= STARTING_EQUITY ? "var(--green)" : "var(--red)";
+  const first = series[0], lastPt = series[series.length - 1];
+  const summary = `Equity curve from ${first.label} (${money(vals[0])}) to ${lastPt.label} (${money(last)}), ${series.length} snapshots`;
+
+  return `
+    <div class="card chart-card">
+      <svg viewBox="0 0 ${W} ${H}" class="equity-chart" role="img" aria-label="${esc(summary)}">
+        <line x1="${PAD}" y1="${baseY.toFixed(1)}" x2="${W - PAD}" y2="${baseY.toFixed(1)}"
+              stroke="var(--text-faint)" stroke-width="1" stroke-dasharray="4 4"/>
+        <polyline points="${points}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>
+      </svg>
+      <div class="chart-labels">
+        <span>${esc(first.label)} · ${money(vals[0])}</span>
+        <span>${esc(lastPt.label)} · ${money(last)}</span>
+      </div>
+    </div>`;
 }

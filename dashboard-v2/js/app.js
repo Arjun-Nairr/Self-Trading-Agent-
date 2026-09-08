@@ -1,9 +1,10 @@
 import { currentRun, listBacktestRuns, loadRunData, REFRESH_MS } from "./data.js";
-import { esc } from "./calc.js";
+import { esc, time, computeHealth } from "./calc.js";
 import { render as renderOverview } from "./pages/overview.js";
 import { render as renderTrades } from "./pages/trades.js";
 import { render as renderDecisions } from "./pages/decisions.js";
 import { render as renderRuns } from "./pages/runs.js";
+import { initTheme } from "./theme.js";
 
 const PAGES = {
   overview: { label: "Overview", render: renderOverview },
@@ -59,6 +60,22 @@ function renderPage(data) {
   PAGES[state.page].render(container, { ...data, mode: state.mode, run_id: state.runId }, { runs: state.runs });
 }
 
+function renderHealthBar(data) {
+  const bar = el("health-bar");
+  const snap = data.snapshots?.[0];
+  if (!snap) { bar.innerHTML = ""; bar.hidden = true; return; }
+  bar.hidden = false;
+  const health = computeHealth(data.snapshots, data.lastFailed);
+  const pending = data.trades.filter(t => t.status === "pending").length;
+  bar.innerHTML = `
+    <span class="dot ${health && !health.healthy ? "err" : ""}"></span>
+    <strong>${esc(health ? health.label : "Unknown")}</strong>
+    <span class="sep">·</span>${esc(snap.day_label || "—")}
+    <span class="sep">·</span>${esc(time(snap.created_at))}
+    <span class="sep">·</span>${pending} pending order${pending === 1 ? "" : "s"}
+  `;
+}
+
 async function refresh(withSkeleton) {
   if (withSkeleton) showSkeleton();
   setStatus(`${state.mode.toUpperCase()} · loading…`, "busy");
@@ -70,6 +87,7 @@ async function refresh(withSkeleton) {
       if (!state.runId) {
         state.lastData = { trades: [], activity: [], snapshots: [], blockedActivity: [], insights: [], failedCount: 0, lastFailed: null };
         renderPage(state.lastData);
+        renderHealthBar(state.lastData);
         setStatus("BACKTEST · no run scoped yet");
         return;
       }
@@ -81,10 +99,12 @@ async function refresh(withSkeleton) {
     const data = await loadRunData(state.mode, state.runId);
     state.lastData = data;
     renderPage(data);
+    renderHealthBar(data);
     setStatus(`${state.mode.toUpperCase()} · updated ${new Date().toLocaleTimeString()}`);
   } catch (e) {
     setStatus(`${state.mode.toUpperCase()} · fetch failed`, "err");
     el("page-root").innerHTML = `<div class="error-box">Failed to load: ${esc(e.message)}. Old data is not shown as current — retrying on the next refresh.</div>`;
+    el("health-bar").hidden = true;
     state.lastData = null;
   }
 }
@@ -98,6 +118,7 @@ function setMode(mode) {
 }
 
 function boot() {
+  initTheme();
   renderNav();
   document.querySelectorAll(".segmented button").forEach(b => {
     b.addEventListener("click", () => setMode(b.dataset.mode));

@@ -1,23 +1,21 @@
-import { pairTrades, money, pctSigned, time, esc, openPositionDetail, relatedActivity } from "../calc.js";
+import { money, pctSigned, time, esc, openPositionDetail, relatedActivity, latestPositions } from "../calc.js";
 
 let selectedKey = null; // ticker+created_at of the entry row, or null
+const LEDGER_LIMIT = 20;
 
 export function render(el, data) {
-  const { closed, open } = pairTrades(data.trades);
   const snap = data.snapshots?.[0] ?? null;
-  const all = [
-    ...open.map(t => ({ kind: "open", entry: t, exit: null })),
-    ...closed.map(c => ({ kind: "closed", entry: c.entry, exit: c.exit, pnl: c.pnl, pnlPct: c.pnlPct })),
-  ].sort((a, b) => new Date(b.entry.created_at) - new Date(a.entry.created_at));
+  const { positions, total } = latestPositions(data.trades, LEDGER_LIMIT);
 
-  if (!all.length) {
+  if (!positions.length) {
     el.innerHTML = `<div class="empty">No trades recorded yet for this ${data.mode === "backtest" ? "run" : "account"}.</div>`;
     return;
   }
 
-  const selected = all.find(r => key(r.entry) === selectedKey) || null;
+  const selected = positions.find(r => key(r.entry) === selectedKey) || null;
+  const title = total > LEDGER_LIMIT ? `Latest ${LEDGER_LIMIT} positions` : "Trade ledger";
 
-  const rows = all.map(r => {
+  const rows = positions.map(r => {
     const t = r.entry;
     let current, pnl, pnlPct, daysHeld, exitReason;
 
@@ -61,7 +59,7 @@ export function render(el, data) {
   }).join("");
 
   el.innerHTML = `
-    <div class="section-title">Trade ledger</div>
+    <div class="section-title">${esc(title)}</div>
     <div class="panel"><table class="responsive">
       <thead><tr><th>Ticker</th><th>Status</th><th>Entry</th><th>Exit/Current</th><th>Qty</th><th>P&L</th><th>Stop</th><th>Target</th><th>Days held</th><th>Exit reason</th></tr></thead>
       <tbody>${rows}</tbody>

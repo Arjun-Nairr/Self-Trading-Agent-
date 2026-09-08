@@ -1,4 +1,4 @@
-import { rejectionDistribution, relatedActivity, time, esc } from "../calc.js";
+import { rejectionDistribution, relatedActivity, ruleLabel, time, esc } from "../calc.js";
 
 let selectedKey = null;
 
@@ -45,9 +45,9 @@ export function render(el, data) {
     </div>
     <p style="font-size:11px;color:var(--text-faint);margin:8px 0 0">This counts journaled trade records only. The full proposal funnel (evaluated → proposed → accepted) requires cycle evidence and is intentionally unavailable to this dashboard.</p>
 
-    <div class="section-title">Rejection reasons (by RULES.md section)</div>
+    <div class="section-title">Rejection reasons</div>
     ${dist.length
-      ? `<div class="card kv-list">${dist.map(([k, v]) => `<div class="kv"><span class="k">${esc(k)}</span><span class="v">${v}</span></div>`).join("")}</div>`
+      ? `<div class="card kv-list">${dist.map(([k, v]) => `<div class="kv"><span class="k">${esc(ruleLabel(k))}</span><span class="v">${v}</span></div>`).join("")}</div>`
       : `<div class="card empty" style="padding:16px">No blocked decisions recorded.</div>`}
     <p style="font-size:11px;color:var(--text-faint);margin:8px 0 0">News is never a positive BUY trigger in this system — it can only veto an otherwise technically-justified entry (RULES.md §5a).</p>
 
