@@ -8,9 +8,10 @@ import {
   pairTrades, realizedPnl, winRate, maxDrawdown, totalReturn,
   assertRunIsolated, isBlockedRow, rejectionDistribution, STARTING_EQUITY,
   relatedActivity, openPositionDetail, computeHealth, equityCurveSeries,
-  ruleLabel, positionsFromTrades, latestPositions,
+  ruleLabel, positionsFromTrades, latestPositions, trainingRunsFromRows,
 } from "../js/calc.js";
 import { STRATEGY_PROFILE, CIRCUIT_BREAKER_NOTE } from "../js/strategy-profile.js";
+import { REFLECTION_LIMIT } from "../js/data.js";
 
 let n = 0;
 function test(name, fn) { fn(); n++; console.log(`ok - ${name}`); }
@@ -266,6 +267,49 @@ test("STRATEGY_PROFILE / CIRCUIT_BREAKER_NOTE: values stay synchronized with RUL
 
   assert.ok(CIRCUIT_BREAKER_NOTE.includes("30%"));
   assert.match(rulesText, /30% from peak equity/);
+});
+
+/* ------------------------------------------------------ run classification */
+
+test("trainingRunsFromRows: excludes smoke/archived, keeps training runs with snapshots", () => {
+  const registryRows = [
+    { run_id: "train-1", run_kind: "training" },
+    { run_id: "smoke-1", run_kind: "smoke" },
+    { run_id: "archived-1", run_kind: "archived" },
+  ];
+  const snapshotRows = [
+    { run_id: "smoke-1", created_at: "2026-01-05T00:00:00Z", day_label: "Day 3" },
+    { run_id: "train-1", created_at: "2026-01-04T00:00:00Z", day_label: "Day 41" },
+    { run_id: "archived-1", created_at: "2026-01-03T00:00:00Z", day_label: "Day 179" },
+    { run_id: "train-1", created_at: "2026-01-02T00:00:00Z", day_label: "Day 40" }, // dup run_id, older
+  ];
+  const runs = trainingRunsFromRows(registryRows, snapshotRows);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].run_id, "train-1");
+  assert.equal(runs[0].latest_day_label, "Day 41"); // first (newest) occurrence kept, not the dup
+});
+
+test("trainingRunsFromRows: a training run with no snapshots never appears", () => {
+  const registryRows = [{ run_id: "train-empty", run_kind: "training" }];
+  const runs = trainingRunsFromRows(registryRows, []);
+  assert.deepEqual(runs, []);
+});
+
+test("trainingRunsFromRows: a run_id with snapshots but no registry row is excluded", () => {
+  const registryRows = [];
+  const snapshotRows = [{ run_id: "unregistered", created_at: "2026-01-01T00:00:00Z", day_label: "Day 1" }];
+  assert.deepEqual(trainingRunsFromRows(registryRows, snapshotRows), []);
+});
+
+test("trainingRunsFromRows: empty/null inputs return an empty list, never throw", () => {
+  assert.deepEqual(trainingRunsFromRows([], []), []);
+  assert.deepEqual(trainingRunsFromRows(null, null), []);
+});
+
+/* --------------------------------------------------------- reflections */
+
+test("REFLECTION_LIMIT: reflection retrieval is capped at exactly five", () => {
+  assert.equal(REFLECTION_LIMIT, 5);
 });
 
 /* --------------------------------------------------------- run isolation */

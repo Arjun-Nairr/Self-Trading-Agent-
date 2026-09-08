@@ -1,4 +1,4 @@
-import { currentRun, listBacktestRuns, loadRunData, REFRESH_MS } from "./data.js";
+import { listTrainingRuns, loadRunData, REFRESH_MS } from "./data.js";
 import { esc, time, computeHealth } from "./calc.js";
 import { render as renderOverview } from "./pages/overview.js";
 import { render as renderTrades } from "./pages/trades.js";
@@ -81,14 +81,17 @@ async function refresh(withSkeleton) {
   setStatus(`${state.mode.toUpperCase()} · loading…`, "busy");
   try {
     if (state.mode === "backtest") {
-      state.runs = await listBacktestRuns();
-      if (!state.runId) state.runId = state.runs[0]?.run_id ?? await currentRun("backtest");
+      state.runs = await listTrainingRuns();
+      if (!state.runId) state.runId = state.runs[0]?.run_id ?? null;
       renderRunSelector();
       if (!state.runId) {
+        // No registry-backed training run with snapshots exists — an
+        // honest empty state, never a fallback to an arbitrary (possibly
+        // smoke or archived) snapshot run.
         state.lastData = { trades: [], activity: [], snapshots: [], blockedActivity: [], insights: [], failedCount: 0, lastFailed: null };
         renderPage(state.lastData);
         renderHealthBar(state.lastData);
-        setStatus("BACKTEST · no run scoped yet");
+        setStatus("BACKTEST · no training run available");
         return;
       }
     } else {

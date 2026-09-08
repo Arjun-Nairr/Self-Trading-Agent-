@@ -1,4 +1,4 @@
-import { assertRunIsolated } from "./calc.js";
+import { assertRunIsolated, trainingRunsFromRows } from "./calc.js";
 
 // The ONLY module that talks to Neon. UI/page code must never construct a
 // database request itself — it calls the functions below and gets back
@@ -14,6 +14,11 @@ const DATA_API_URL = "https://ep-falling-thunder-b1mr6i56.apirest.c-5.eu-central
 
 // One Neon database throughout; mode is a column value, not a separate
 // connection — identical mapping to V1.
+// Runs & Evaluation shows only the latest 5 reflections — fetched at
+// exactly this limit so there is no client-side overfetch/slice to keep
+// in sync with the UI's own cap.
+export const REFLECTION_LIMIT = 5;
+
 export const MODES = {
   backtest: { trades: "backtest", activity: "backtest", snapshots: "backtest" },
   live: { trades: "alpaca", activity: "live", snapshots: "live" },
@@ -69,30 +74,21 @@ async function qAll(table, params, pageSize = 1000) {
 // (HANDOFF.md §8, this task's own security requirements).
 
 /**
- * The run currently "current" for a mode: the latest snapshot's run_id.
- * Live rows never carry one (mode has no run concept) — null in that case.
+ * Registry-backed run discovery for the selector/default view: only
+ * 'training' runs (backtest_run_registry.run_kind) that actually have at
+ * least one snapshot, most recent first. 'smoke' and 'archived' runs are
+ * never returned here, regardless of how much snapshot data they have —
+ * see trainingRunsFromRows() for the (independently tested) filter logic.
+ * There is deliberately no "latest snapshot, whatever run it belongs to"
+ * fallback — an empty result means an honest empty state, never an
+ * arbitrary non-training run.
  */
-export async function currentRun(mode) {
-  const m = MODES[mode];
-  const latest = await q("portfolio_snapshots", `?mode=eq.${m.snapshots}&order=created_at.desc&limit=1`);
-  return latest[0]?.run_id ?? null;
-}
-
-/**
- * Distinct backtest run_ids, most recent first, derived client-side from
- * snapshot rows (PostgREST's anonymous role has no DISTINCT/aggregate
- * endpoint) — same "no data invented, only reduced" discipline V1 uses for
- * trade pairing.
- */
-export async function listBacktestRuns() {
-  const rows = await qAll("portfolio_snapshots", `?mode=eq.backtest&select=run_id,created_at,day_label&order=created_at.desc`);
-  const seen = new Set(), runs = [];
-  for (const r of rows) {
-    if (!r.run_id || seen.has(r.run_id)) continue;
-    seen.add(r.run_id);
-    runs.push({ run_id: r.run_id, latest_created_at: r.created_at, latest_day_label: r.day_label });
-  }
-  return runs;
+export async function listTrainingRuns() {
+  const [registryRows, snapshotRows] = await Promise.all([
+    qAll("backtest_run_registry", `?select=run_id,run_kind`),
+    qAll("portfolio_snapshots", `?mode=eq.backtest&select=run_id,created_at,day_label&order=created_at.desc`),
+  ]);
+  return trainingRunsFromRows(registryRows, snapshotRows);
 }
 
 /**
@@ -108,7 +104,7 @@ export async function loadRunData(mode, run_id) {
     q("agent_activity", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=200`),
     qAll("portfolio_snapshots", `?mode=eq.${m.snapshots}${runFilter}&order=created_at.desc`),
     qAll("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=in.(risk_check,order_rejected)&order=created_at.desc`),
-    q("insight_log", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=20`),
+    q("insight_log", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=${REFLECTION_LIMIT}`),
     qCount("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed`),
     q("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed&order=created_at.desc&limit=1`),
   ]);

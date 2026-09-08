@@ -389,10 +389,10 @@ continue training this run.**
 python run_backtest.py --start 2026-02-17 --end 2026-08-14 --days <N>
 ```
 
-Run from `backtest-harness/`. `backtest_state.json`'s stored `run_id`
-(`e68525f9-ce89-4588-a57e-866f28cd99fd`) and cursor (`2026-04-29`) reuse
-automatically as long as `--start`/`--end` match exactly. **Never include
-`--reset`** — it discards the 50 cycles this file documents.
+Run from `backtest-harness/`. `backtest_state.json`'s `run_id`/cursor
+(`e68525f9-...`/`2026-04-29`) reuse automatically as long as `--start`/
+`--end` match exactly. **Never include `--reset`** — it discards the 50
+cycles this file documents. (Registered `training`; `--run-kind` is fresh-run-only.)
 
 ---
 

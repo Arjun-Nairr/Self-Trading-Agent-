@@ -202,6 +202,28 @@ export function latestPositions(trades, limit = 20) {
   return { positions: all.slice(0, limit), total: all.length };
 }
 
+/* ------------------------------------------------------ run classification */
+
+// Registry-backed run discovery: only 'training' runs that actually have
+// at least one snapshot, most-recent-first, deduped. 'smoke' and
+// 'archived' runs are excluded even if they have snapshots — durable
+// classification lives in Neon's backtest_run_registry
+// (trade-journal-mcp/schema.sql), not a dashboard-only hidden list. A
+// run_id with no registry row at all (should not happen post-migration,
+// but never assumed) is excluded too, same as smoke/archived.
+export function trainingRunsFromRows(registryRows, snapshotRows) {
+  const trainingIds = new Set(
+    (registryRows || []).filter(r => r.run_kind === "training").map(r => r.run_id)
+  );
+  const seen = new Set(), runs = [];
+  for (const r of (snapshotRows || [])) {
+    if (!r.run_id || !trainingIds.has(r.run_id) || seen.has(r.run_id)) continue;
+    seen.add(r.run_id);
+    runs.push({ run_id: r.run_id, latest_created_at: r.created_at, latest_day_label: r.day_label });
+  }
+  return runs;
+}
+
 /* --------------------------------------------------------- run isolation */
 
 // Throws if any row carries a run_id other than the expected one. Used

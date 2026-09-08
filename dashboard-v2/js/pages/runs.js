@@ -5,13 +5,10 @@ function benchmarkRow(label) {
   return `<div class="kv"><span class="k">${label}</span><span class="v" style="font-weight:400;color:var(--text-faint)">not available from Neon — see docs/evaluations/round2_benchmark_sensitivity.md</span></div>`;
 }
 
-const REFLECTIONS_LIMIT = 5;
-
 export function render(el, data) {
   const { trades, snapshots, insights, failedCount, lastFailed } = data;
   const { closed } = pairTrades(trades);
   const adequate = closed.length >= 30;
-  const recentInsights = insights.slice(0, REFLECTIONS_LIMIT);
 
   el.innerHTML = `
     <div class="section-title">Current strategy profile</div>
@@ -40,8 +37,8 @@ export function render(el, data) {
     </div>
 
     <div class="section-title">Reflections</div>
-    ${recentInsights.length
-      ? `<div class="panel"><table class="responsive"><thead><tr><th>Cycle</th><th>Insight</th><th>Time</th></tr></thead><tbody>${recentInsights.map(r => `<tr><td data-label="Cycle">${esc(r.cycle_type)}</td><td data-label="Insight">${esc(r.insight_text)}</td><td data-label="Time">${time(r.created_at)}</td></tr>`).join("")}</tbody></table></div>`
+    ${insights.length
+      ? `<div class="panel"><table class="responsive"><thead><tr><th>Cycle</th><th>Insight</th><th>Time</th></tr></thead><tbody>${insights.map(r => `<tr><td data-label="Cycle">${esc(r.cycle_type)}</td><td data-label="Insight">${esc(r.insight_text)}</td><td data-label="Time">${time(r.created_at)}</td></tr>`).join("")}</tbody></table></div>`
       : `<div class="card empty" style="padding:16px">No reflection entries yet.</div>`}
 
     ${renderTechnicalDetails(failedCount, lastFailed)}
@@ -57,7 +54,7 @@ function renderTechnicalDetails(failedCount, lastFailed) {
     <details class="tech-details">
       <summary>Technical: failure history</summary>
       <div class="kv-list" style="margin-top:8px">
-        <div class="kv"><span class="k">Failed cycles (lifetime)</span><span class="v">${failedCount ?? 0}</span></div>
+        <div class="kv"><span class="k">Failed cycles in this run</span><span class="v">${failedCount ?? 0}</span></div>
         <div class="kv"><span class="k">Last failed attempt</span><span class="v">${lastFailed ? time(lastFailed.created_at) : "none recorded"}</span></div>
       </div>
       ${lastFailed ? `<p class="tech-note">${esc(lastFailed.description || "A cycle failed.")}</p>` : ""}

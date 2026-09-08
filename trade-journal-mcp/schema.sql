@@ -494,3 +494,59 @@ DO $$ BEGIN
         OR (action <> 'BUY' AND expected_reward_risk >= 0)
     );
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-09-09) -- backtest run registry.
+--
+-- Durable classification of each backtest run_id as 'training' (real,
+-- evaluation-ready), 'smoke' (end-to-end infra test), or 'archived'
+-- (preserved historical run) -- at the database/harness level, not a
+-- dashboard-only hidden list. Additive only: no historical trades/
+-- portfolio_snapshots/agent_activity/insight_log/backtest_cycle_evidence
+-- row is touched, deleted, or relabeled by this migration -- it only adds
+-- one new table and classifies existing run_ids into it.
+--
+-- run_id is the unique key (a run has exactly one classification, ever --
+-- see _register_run's collision check in server.py, which fails loudly on
+-- any attempt to re-register an existing run_id under a different
+-- run_kind rather than silently overwriting it). run_kind is intentionally
+-- a locked three-value CHECK, not free text like agent_activity.event_type
+-- -- unlike that field, there is no reason for this vocabulary to grow, and
+-- a typo'd fourth value here would silently break run discovery.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS backtest_run_registry (
+    run_id     UUID PRIMARY KEY,
+    run_kind   TEXT NOT NULL CHECK (run_kind IN ('training', 'smoke', 'archived')),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Dashboard V2 reads this the same read-only way it reads every other
+-- table -- SELECT only, RLS-gated, never writable from the browser. This
+-- grant is unrelated to (and does not change) backtest_cycle_evidence's
+-- own protection boundary, which stays deliberately un-granted above.
+GRANT SELECT ON backtest_run_registry TO anonymous;
+ALTER TABLE backtest_run_registry ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'backtest_run_registry' AND policyname = 'anonymous_read_backtest_run_registry'
+    ) THEN
+        CREATE POLICY anonymous_read_backtest_run_registry ON backtest_run_registry FOR SELECT TO anonymous USING (true);
+    END IF;
+END $$;
+
+-- Historical classification, seeded once. Every distinct non-null run_id
+-- across trades/portfolio_snapshots/insight_log/agent_activity/
+-- backtest_cycle_evidence was inventoried before writing this block (six
+-- total, all accounted for below -- see HANDOFF.md §3/§9 and
+-- docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md for the
+-- provenance of each smoke-test id). ON CONFLICT DO NOTHING keeps this
+-- block safe to re-run without overwriting a real classification.
+INSERT INTO backtest_run_registry (run_id, run_kind) VALUES
+    ('e68525f9-ce89-4588-a57e-866f28cd99fd', 'training'), -- active Round 2 tranche, 50 cycles
+    ('26f1d371-08db-4885-ab24-b42200792fb7', 'archived'), -- Round 1, conservative profile, 125 cycles
+    ('97d112e8-57be-4632-a503-0417993cdf51', 'smoke'),    -- 3-cycle Round 2 pilot (one-share sizing defect found)
+    ('c55f0fc2-5073-4cf8-bc5c-17800e139bfc', 'smoke'),    -- --reset attempt, crashed cycle 1 (usage-accumulator null bug)
+    ('1bf9af3d-8375-45b2-8cdb-313fd56832d5', 'smoke'),    -- 3-cycle --reset smoke test (stale 1% risk-budget bug found)
+    ('81db75e5-f9e9-48df-8bf1-0a2f581d3db8', 'smoke')     -- 3-cycle --reset smoke test confirming the fix
+ON CONFLICT (run_id) DO NOTHING;

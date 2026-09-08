@@ -1492,6 +1492,45 @@ asyncio.run(main())
     run_in("trade-journal", script)
 
 
+def register_run(run_id: str, run_kind: str) -> dict:
+    """Idempotently register (run_id, run_kind) in backtest_run_registry --
+    see _register_run's docstring in trade-journal-mcp/server.py for the
+    full idempotency/collision contract (same-kind twice is a safe no-op;
+    a DIFFERENT run_kind for an already-registered run_id fails loudly).
+    Called from main() BEFORE any Hermes call or other database write for
+    the run -- see the --run-kind handling there."""
+    script = f'''
+import asyncio, json
+from server import _register_run
+
+async def main():
+    row = await _register_run({run_id!r}, {run_kind!r})
+    print(json.dumps({{"run_id": str(row["run_id"]), "run_kind": row["run_kind"]}}))
+
+asyncio.run(main())
+'''
+    return json_from(run_in("trade-journal", script))
+
+
+def get_registered_run_kind(run_id: str) -> str | None:
+    """Read-only: the stored run_kind for run_id, or None if it was never
+    registered (a pre-existing run from before this migration, or a
+    genuinely unregistered id). main()'s resume path fails closed on
+    None rather than silently continuing -- see _get_run_kind's own
+    docstring in trade-journal-mcp/server.py."""
+    script = f'''
+import asyncio, json
+from server import _get_run_kind
+
+async def main():
+    kind = await _get_run_kind({run_id!r})
+    print(json.dumps({{"run_kind": kind}}))
+
+asyncio.run(main())
+'''
+    return json_from(run_in("trade-journal", script))["run_kind"]
+
+
 def resolve_trade_fill(decision_id: str, fill: dict) -> None:
     """Resolve an already-journaled queued decision to its real fill --
     the SAME decision_id record_queued_decision used, never a new one.
@@ -3227,6 +3266,23 @@ def main() -> None:
                              "ticker<->alias assignments Hermes already "
                              "learned this run")
     parser.add_argument("--reset", action="store_true")
+    # Durable run classification (backtest_run_registry, trade-journal-mcp/
+    # schema.sql) -- required for a FRESH run so a smoke test can never be
+    # mistaken for real training data at the database level, not just in
+    # the dashboard. choices= structurally excludes 'archived' here --
+    # archived is migration-only (see schema.sql) and can never start a
+    # new run. A RESUMED run reuses its already-registered classification
+    # automatically; passing --run-kind on resume is optional and only
+    # checked for a conflict (see the registration block below).
+    parser.add_argument("--run-kind", choices=["training", "smoke"], default=None,
+                        help="REQUIRED for a fresh run (including --reset): "
+                             "'training' (real, evaluation-ready) or "
+                             "'smoke' (end-to-end infrastructure test, "
+                             "never shown in normal dashboard views). "
+                             "Optional when resuming -- reuses the run's "
+                             "stored classification; a conflicting value "
+                             "fails closed instead of silently relabeling "
+                             "the run.")
     args = parser.parse_args()
 
     preflight()
@@ -3240,7 +3296,8 @@ def main() -> None:
         (REPO / "watchlist" / "watchlist.json").read_text()
     )["tickers"]
 
-    if STATE_PATH.exists():
+    is_resume = STATE_PATH.exists()
+    if is_resume:
         state = json.loads(STATE_PATH.read_text())
         portfolio = Portfolio.from_dict(state["portfolio"])
         cursor = date.fromisoformat(state["cursor"])
@@ -3287,6 +3344,50 @@ def main() -> None:
         run_id = str(uuid.uuid4())
         print(f"starting fresh run (run_id={run_id})")
     run_key = run_id
+
+    # Durable run classification -- BEFORE any Hermes call or other
+    # database write for this run (see backtest_run_registry,
+    # trade-journal-mcp/schema.sql). A fresh run must be explicitly
+    # classified; a resumed run reuses its already-registered kind and
+    # fails closed on a conflict or on a pre-existing, unregistered run.
+    if is_resume:
+        registered_kind = get_registered_run_kind(run_id)
+        if registered_kind is None:
+            raise SystemExit(
+                f"run_id {run_id} has no backtest_run_registry row -- a "
+                "pre-existing, unregistered run cannot be resumed silently. "
+                "Register its real classification directly (see "
+                "trade-journal-mcp/schema.sql's backtest run registry "
+                "migration) before resuming, or start a genuinely new run "
+                "with --reset --run-kind training|smoke."
+            )
+        if registered_kind == "archived":
+            raise SystemExit(
+                f"run_id {run_id} is registered as 'archived' -- archived "
+                "runs are migration-only and can never be resumed for new "
+                "cycles."
+            )
+        if args.run_kind is not None and args.run_kind != registered_kind:
+            raise SystemExit(
+                f"--run-kind {args.run_kind!r} conflicts with run_id "
+                f"{run_id}'s already-registered classification "
+                f"{registered_kind!r}. A run's classification is permanent "
+                "once set -- resuming reuses it automatically; omit "
+                "--run-kind or pass the matching value."
+            )
+        run_kind = registered_kind
+        print(f"resuming run_id={run_id} as registered kind={run_kind!r}")
+    else:
+        if args.run_kind is None:
+            raise SystemExit(
+                "a fresh run (including --reset) requires an explicit "
+                "--run-kind training|smoke before any Hermes call or "
+                "database write. 'archived' is migration-only and cannot "
+                "start a new run -- see trade-journal-mcp/schema.sql."
+            )
+        run_kind = args.run_kind
+        register_run(run_id, run_kind)
+        print(f"registered run_id={run_id} as kind={run_kind!r}")
 
     end = date.fromisoformat(end_str)
     completed = 0

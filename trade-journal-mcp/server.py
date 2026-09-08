@@ -671,6 +671,66 @@ async def _get_recent_activity(
     return [dict(r) for r in rows]
 
 
+_VALID_RUN_KINDS = {"training", "smoke", "archived"}
+
+
+async def _register_run(run_id: str, run_kind: str) -> dict[str, Any]:
+    """Idempotently register a backtest run's durable classification in
+    backtest_run_registry -- a run is 'training' (real, evaluation-ready),
+    'smoke' (end-to-end infra test, never shown in normal dashboard views),
+    or 'archived' (preserved historical run, never shown in normal
+    dashboard views).
+
+    Same INSERT ON CONFLICT DO NOTHING + fallback SELECT + mismatch-fails-
+    loudly pattern as _record_decision: supplying the SAME (run_id,
+    run_kind) twice is a safe no-op (a resumed run re-registering its own
+    stored kind, or a retried harness invocation). Supplying a DIFFERENT
+    run_kind for an already-registered run_id fails loudly instead of
+    silently overwriting a real classification -- a run's kind is
+    permanent once set, by design (see run_backtest.py's own --run-kind
+    handling, which is the only caller that ever writes here)."""
+    if run_kind not in _VALID_RUN_KINDS:
+        raise ValueError(f"run_kind must be one of {sorted(_VALID_RUN_KINDS)}, got {run_kind!r}")
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO backtest_run_registry (run_id, run_kind)
+        VALUES ($1, $2)
+        ON CONFLICT (run_id) DO NOTHING
+        RETURNING *
+        """,
+        run_id, run_kind,
+    )
+    if row is None:
+        row = await pool.fetchrow(
+            "SELECT * FROM backtest_run_registry WHERE run_id = $1", run_id,
+        )
+        if row is None:
+            raise ValueError(
+                f"run_id {run_id} conflicted on insert but no row exists -- unexpected state"
+            )
+        if row["run_kind"] != run_kind:
+            raise ValueError(
+                f"run_id {run_id} is already registered as {row['run_kind']!r}, "
+                f"cannot re-register as {run_kind!r} -- a run's classification "
+                "is permanent once set."
+            )
+    return dict(row)
+
+
+async def _get_run_kind(run_id: str) -> str | None:
+    """Read-only lookup -- None if no registry row exists for this run_id
+    (a pre-existing run that predates this migration, or a genuinely
+    unregistered id). run_backtest.py treats None on resume as a hard
+    failure rather than silently continuing -- see its own --run-kind
+    handling."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT run_kind FROM backtest_run_registry WHERE run_id = $1", run_id,
+    )
+    return row["run_kind"] if row else None
+
+
 def _jsonable(obj):
     """asyncpg returns datetime/Decimal objects FastMCP's JSON encoder chokes on."""
     return json.loads(json.dumps(obj, default=str))
