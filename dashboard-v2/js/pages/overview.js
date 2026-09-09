@@ -100,9 +100,9 @@ function renderPositions(open, snap) {
 // market data, no per-trade path). Colors reference CSS custom properties
 // so the chart stays readable in both themes without a redraw.
 //
-// preserveAspectRatio="none" lets the SVG's geometry (line/area/gridlines/
-// dashed baseline) stretch to the card's full width at every breakpoint
-// instead of the old fixed-aspect-ratio letterboxing. That non-uniform
+// preserveAspectRatio="none" lets the SVG's geometry (line/area/gridlines)
+// stretch to the card's full width at every breakpoint instead of the old
+// fixed-aspect-ratio letterboxing. That non-uniform
 // scaling would distort SVG <text>, so every human-readable label lives
 // outside the SVG as plain HTML, absolutely positioned over a CSS grid
 // using the exact same x()/y() fractions the SVG geometry uses — the
@@ -130,7 +130,6 @@ function renderChart(snapshots) {
   const plotW = W - PADX * 2, plotH = H - PADY * 2;
   const x = i => PADX + (i / (series.length - 1)) * plotW;
   const y = v => PADY + (1 - (v - min) / range) * plotH;
-  const baseY = y(STARTING_EQUITY);
   const plotBottom = H - PADY;
 
   const points = vals.map((v, i) => `${x(i).toFixed(2)},${y(v).toFixed(2)}`).join(" ");
@@ -139,6 +138,8 @@ function renderChart(snapshots) {
   const lineColor = positive ? "var(--green)" : "var(--red)";
   const fillColor = positive ? "var(--green-dim)" : "var(--red-dim)";
   const areaPoints = `${x(0).toFixed(2)},${plotBottom.toFixed(2)} ${points} ${x(series.length - 1).toFixed(2)},${plotBottom.toFixed(2)}`;
+  // No dashed starting-equity reference line — the $100,000 Y-axis value
+  // below already communicates that level; a second annotation was redundant.
 
   const first = series[0], lastPt = series[series.length - 1];
   const midIdx = Math.floor((series.length - 1) / 2);
@@ -179,12 +180,9 @@ function renderChart(snapshots) {
         <div class="chart-plot">
           <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="equity-chart" role="img" aria-label="${esc(summary)}">
             ${gridSvg}
-            <line x1="0" y1="${baseY.toFixed(2)}" x2="${W}" y2="${baseY.toFixed(2)}"
-                  stroke="var(--text-faint)" stroke-width="0.3" stroke-dasharray="1.4 1.4" vector-effect="non-scaling-stroke"/>
             <polygon points="${areaPoints}" fill="${fillColor}" stroke="none"/>
             <polyline points="${points}" fill="none" stroke="${lineColor}" stroke-width="0.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
           </svg>
-          <span class="chart-start-label" style="top:${baseY.toFixed(2)}%">Starting equity</span>
         </div>
         <div class="chart-x-axis">${xAxisHtml}</div>
       </div>
