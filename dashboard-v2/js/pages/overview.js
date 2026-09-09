@@ -99,6 +99,13 @@ function renderPositions(open, snap) {
 // Vanilla SVG line chart, built only from stored portfolio_snapshots (no
 // market data, no per-trade path). Colors reference CSS custom properties
 // so the chart stays readable in both themes without a redraw.
+//
+// preserveAspectRatio="none" makes the chart stretch to the card's full
+// width at every breakpoint instead of the old fixed 3:1 viewBox
+// letterboxing on wide screens. That trades a little non-uniform text
+// stretch for genuinely full-width rendering — acceptable for short
+// currency/date labels, and .equity-chart's per-breakpoint height (see
+// app.css) keeps the stretch mild in practice.
 function renderChart(snapshots) {
   const series = equityCurveSeries(snapshots);
 
@@ -110,31 +117,66 @@ function renderChart(snapshots) {
   }
 
   const vals = series.map(s => s.equity);
-  const lo = Math.min(...vals, STARTING_EQUITY), hi = Math.max(...vals, STARTING_EQUITY);
+  const dataLo = Math.min(...vals), dataHi = Math.max(...vals);
+  const lo = Math.min(dataLo, STARTING_EQUITY), hi = Math.max(dataHi, STARTING_EQUITY);
   const pad = (hi - lo) * 0.15 || 500;
   const min = lo - pad, max = hi + pad, range = max - min || 1;
 
-  const W = 600, H = 200, PAD = 6;
-  const x = i => PAD + (i / (series.length - 1)) * (W - PAD * 2);
-  const y = v => PAD + (1 - (v - min) / range) * (H - PAD * 2);
+  const W = 640, H = 220;
+  const ML = 78, MR = 8, MT = 10, MB = 24; // room for y-axis $ labels and x-axis date labels
+  const plotW = W - ML - MR, plotH = H - MT - MB;
+  const x = i => ML + (i / (series.length - 1)) * plotW;
+  const y = v => MT + (1 - (v - min) / range) * plotH;
   const baseY = y(STARTING_EQUITY);
+  const plotBottom = MT + plotH;
 
   const points = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
   const last = vals[vals.length - 1];
-  const color = last >= STARTING_EQUITY ? "var(--green)" : "var(--red)";
+  const positive = last >= STARTING_EQUITY;
+  const lineColor = positive ? "var(--green)" : "var(--red)";
+  const fillColor = positive ? "var(--green-dim)" : "var(--red-dim)";
+  const areaPoints = `${x(0).toFixed(1)},${plotBottom.toFixed(1)} ${points} ${x(series.length - 1).toFixed(1)},${plotBottom.toFixed(1)}`;
+
   const first = series[0], lastPt = series[series.length - 1];
-  const summary = `Equity curve from ${first.label} (${money(vals[0])}) to ${lastPt.label} (${money(last)}), ${series.length} snapshots`;
+  const midIdx = Math.floor((series.length - 1) / 2);
+  const xTicks = [
+    { i: 0, label: first.label, anchor: "start" },
+    { i: midIdx, label: series[midIdx].label, anchor: "middle" },
+    { i: series.length - 1, label: lastPt.label, anchor: "end" },
+  ];
+
+  // Y-axis: the actual lowest and highest equity this series reached, plus
+  // the starting-equity benchmark — deduplicated by plotted pixel position
+  // (not raw value) so near-identical levels never render as overlapping
+  // labels.
+  const yWhole = v => "$" + Math.round(v).toLocaleString();
+  const yCandidates = [...new Set([dataLo, STARTING_EQUITY, dataHi])].sort((a, b) => a - b);
+  const yTicks = [];
+  for (const v of yCandidates) {
+    if (yTicks.length && Math.abs(y(v) - y(yTicks[yTicks.length - 1])) < 16) continue;
+    yTicks.push(v);
+  }
+
+  const summary = `Equity curve from ${first.label} (${money(vals[0])}) to ${lastPt.label} (${money(last)}), ` +
+    `${series.length} snapshots. Low ${money(dataLo)}, high ${money(dataHi)}, starting equity ${money(STARTING_EQUITY)}.`;
+
+  const yAxisSvg = yTicks.map(v => `
+    <line x1="${ML}" y1="${y(v).toFixed(1)}" x2="${W - MR}" y2="${y(v).toFixed(1)}" stroke="var(--border)" stroke-width="1"/>
+    <text x="${(ML - 8).toFixed(1)}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end" class="chart-axis-label">${esc(yWhole(v))}</text>`).join("");
+
+  const xAxisSvg = xTicks.map(t => `
+    <text x="${x(t.i).toFixed(1)}" y="${(H - 6).toFixed(1)}" text-anchor="${t.anchor}" class="chart-axis-label">${esc(t.label)}</text>`).join("");
 
   return `
     <div class="card chart-card">
-      <svg viewBox="0 0 ${W} ${H}" class="equity-chart" role="img" aria-label="${esc(summary)}">
-        <line x1="${PAD}" y1="${baseY.toFixed(1)}" x2="${W - PAD}" y2="${baseY.toFixed(1)}"
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="equity-chart" role="img" aria-label="${esc(summary)}">
+        ${yAxisSvg}
+        <line x1="${ML}" y1="${baseY.toFixed(1)}" x2="${W - MR}" y2="${baseY.toFixed(1)}"
               stroke="var(--text-faint)" stroke-width="1" stroke-dasharray="4 4"/>
-        <polyline points="${points}" fill="none" stroke="${color}" stroke-width="2" stroke-linejoin="round"/>
+        <text x="${(W - MR - 4).toFixed(1)}" y="${(baseY - 4).toFixed(1)}" text-anchor="end" class="chart-axis-label">Starting equity</text>
+        <polygon points="${areaPoints}" fill="${fillColor}" stroke="none"/>
+        <polyline points="${points}" fill="none" stroke="${lineColor}" stroke-width="2" stroke-linejoin="round"/>
+        ${xAxisSvg}
       </svg>
-      <div class="chart-labels">
-        <span>${esc(first.label)} · ${money(vals[0])}</span>
-        <span>${esc(lastPt.label)} · ${money(last)}</span>
-      </div>
     </div>`;
 }

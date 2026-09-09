@@ -264,11 +264,9 @@ tbody tr:hover td { background: var(--surface-2); }
 /* ------------------------------------------------------------------ chart */
 
 .chart-card { padding: 14px 16px; }
-.equity-chart { width: 100%; height: 180px; display: block; }
-.chart-labels {
-  display: flex; justify-content: space-between; font-size: 11px; color: var(--text-faint);
-  margin-top: 8px; font-variant-numeric: tabular-nums;
-}
+.equity-chart { width: 100%; height: 200px; display: block; }
+.chart-axis-label { font-size: 12px; fill: var(--text-faint); font-variant-numeric: tabular-nums; }
+@media (max-width: 700px) { .equity-chart { height: 160px; } }
 
 /* --------------------------------------------------------- strategy grid */
 
