@@ -1,0 +1,273 @@
+# Trading agent project backlog
+
+The single permanent store for possible and approved future work,
+organized by stable engineering sector — not a scattered feature list.
+`HANDOFF.md` is current verified operational state; this file never
+restates it. `docs/DISCUSSION_QUEUE.md` is unresolved decisions only;
+once a discussion resolves into an approved or candidate item, it moves
+here (and is removed there — never duplicated in both places).
+
+**Status:** `discussing`, `approved`, `implemented`, `deferred`, or
+`rejected`. **Priority (non-trivial items only):** `Now`, `Soon`,
+`Later`. Major architecture or trading-rule changes require an explicit
+user decision before Claude Code changes files.
+
+---
+
+## Global rules (apply across every sector)
+
+- **Round 2 baseline is frozen.** No casual training runs, no
+  `RULES.md`/`AGENTS.md`/`SOUL.md`/model changes, no Bayesian
+  optimization, no fundamental-data implementation — until the
+  measurement/evaluation-track decision (`HANDOFF.md` §10) is made.
+- **Dashboard V2 is deployed** (Cloudflare Pages, `mobile-test` preview
+  branch) for manual mobile feedback. Only real phone issues found
+  during that testing should reopen dashboard work — not new features.
+- **No LLM chart-pattern / graph-vision system.** Numeric technical
+  indicators (RSI/MACD/trend/support-resistance) remain the only
+  chart-derived evidence. This is a locked scope boundary, not an open
+  item.
+- **Human-approval boundary is absolute.** An evaluator (or any future
+  agent) may *recommend* changes but may never rewrite `RULES.md`,
+  `SOUL.md`, or trading-system behavior itself. Recommendations stay
+  advisory through the user/Claude workflow.
+
+---
+
+## 1. Orchestration, Context & Memory
+
+**Mission:** keep the Hermes harness's rules/context packaging and the
+reflection-memory mechanism honest — never mistake "the agent received
+information" for "the agent learned something real."
+
+**Implemented:** `RULES.md` mounted read-only, re-read in full every
+cycle (no partial-rules router); sentiment-is-veto-only (§5a), the
+project's deliberate prompt-injection defense; deterministic §6b
+activity-escalation (harness-controlled, never trading-agent-chosen);
+reflection injection (latest 2 run-scoped notes/cycle, new one every
+5th cycle).
+
+- **Now:** none — baseline frozen.
+- **Soon:** Audit cycles 26–50 `backtest_cycle_evidence` for whether
+  reflections measurably changed later decisions (not just were
+  received). Status `discussing`. Prerequisite: none to *run* the
+  audit (read-only, no training); required *before* any change to
+  reflection retention/cadence/design. See `docs/DISCUSSION_QUEUE.md` #3.
+- **Later:** Split `RULES.md` into always-on binding rules + optional
+  harness-selected reference material (never trading-agent-selected).
+  Status `deferred`. Prerequisite: baseline unfreezes AND `RULES.md`'s
+  real length is judged an actual problem. See
+  `docs/DISCUSSION_QUEUE.md` #5. Do not introduce `MEMORY.md`/`USER.md`
+  or any other uncontrolled backtest memory source.
+
+**Rejected:** OpenCode Go / DeepSeek V4 Flash gateway switch —
+unresolved upstream hang; locked model stays `openai-codex`/`gpt-5.4-mini`.
+
+---
+
+## 2. Market Intelligence & Data
+
+**Mission:** expand what evidence the trading agent can see without
+ever letting a new source become a disguised buy trigger.
+
+**Implemented:** technicals (`maverick-mcp`: RSI/MACD/trend/support-
+resistance) as entry evidence; news (`google-news-rss-mcp`/backtest
+historical) as a negative veto/exit signal only, never standalone;
+fixed 10-ticker watchlist universe.
+
+- **Now:** none — fundamental-data work explicitly frozen.
+- **Soon:** none.
+- **Later:**
+  - SEC EDGAR fundamentals ingestion. Status `approved` (tool
+    direction only). Prerequisite: baseline unfreezes; point-in-time
+    filing dates, normalization, rate-limit handling still need design
+    approval.
+  - Cache-first, on-demand fundamentals router (check stored data
+    first, fetch only when missing/stale). Status `approved` (direction
+    only). Prerequisite: freshness policy + identity mapping + durable
+    storage design still needs approval.
+  - Fundamental observation period before entry (let the agent watch a
+    company across days when urgency is low). Status `discussing`.
+    Prerequisite: must not become a blanket waiting rule that
+    suppresses valid trades.
+  - Source convergence for any future evidence source (Reddit/social,
+    fundamentals): no global percentage-weight scoring; a new source
+    needs a defined role + independent corroboration, and positive
+    sentiment alone — from any source, alone or combined — can never
+    create a buy. Status `deferred`. Prerequisite: a concrete proposal
+    to add a new source. See `docs/DISCUSSION_QUEUE.md` #4.
+  - Reuse Maverick for broader dynamic screening. Status `discussing`.
+    Prerequisite: confirm its real screener fields + point-in-time
+    behavior before designing around it.
+  - News prefetching/caching outside the trading window. Status
+    `discussing`. Prerequisite: freshness/deduplication/point-in-time
+    rules; news stays veto/exit-only.
+  - Broader dynamic opportunity screening beyond the fixed watchlist.
+    Status `discussing`. Prerequisite: avoid hard-coded "safe"
+    tickers, survivorship bias, and uncontrolled universe churn.
+
+**Locked scope boundary:** no LLM chart-pattern/graph-vision analysis
+— see Global rules.
+
+---
+
+## 3. Execution, Risk & Security
+
+**Mission:** every dollar-affecting decision passes a deterministic,
+fail-closed gate before it can execute, live or backtest — and the
+same discipline extends to anything the public can reach.
+
+**Implemented:** `risk_checker.py` — pure, deterministic, fail-closed
+enforcement of every `RULES.md` numeric rule, shared live/backtest;
+decision-time vs. execution-time double validation; one-lot model (a
+SELL must close the whole position); hard prohibitions (§9: no
+averaging down, no widening/removing a stop, no off-watchlist trades,
+no same-ticker double position, no same-day stop-out re-entry, no cap
+overrides); Dashboard V2's public preview is anonymous, **SELECT-only**
+against Neon's Data API — `backtest_cycle_evidence` is excluded from
+that grant (verified).
+
+- **Now:** none.
+- **Soon:** Dashboard authentication / access hardening review. Status
+  `discussing`. Why now: Dashboard V2 is genuinely public (Cloudflare
+  preview) for the first time, even though read-only and SELECT-only.
+  Prerequisite: decide whether masked/aggregate backtest data at this
+  sensitivity level needs auth before any wider hosting, or whether
+  the current anonymous-SELECT-only boundary is sufficient long-term.
+- **Later:**
+  - Live bracket/OCO orders (broker-side protective exits — today's
+    `alpaca-mcp` submits a single order only). Status `deferred`.
+    Prerequisite: live-mode order design.
+  - Ambiguous-write reconciliation/retry (check broker state after a
+    timeout/5xx before retrying, so an order is never duplicated).
+    Status `deferred`. Prerequisite: needed before serious continuous
+    live-paper operation.
+  - Broker partial-fill handling (not modeled in the current one-lot
+    flow). Status `deferred`. Prerequisite: same as above.
+
+---
+
+## 4. Evidence, Evaluation & Optimization
+
+**Mission:** never treat a small or ambiguous sample as proof, and
+never optimize before measurement is trustworthy.
+
+**Implemented:** `backtest_run_registry` — durable `training`/`smoke`/
+`archived` classification, required before any fresh run or Hermes
+call; `backtest_cycle_evidence` (cycles 26–50: full masked prompt/
+input/response per cycle); benchmark & sensitivity report
+(`docs/evaluations/round2_benchmark_sensitivity.md` — trading system
+vs. cash/SPY/watchlist/SMA(10) baseline, plus rule-parameter
+sensitivity) — **this was previously misfiled as "deferred" in this
+document; it is implemented.**
+
+- **Now:** the evaluation-track decision itself (`HANDOFF.md` §10):
+  (a) existing evidence suffices for Bayesian optimization, (b) run
+  another unchanged tranche first, or (c) improve measurement first.
+  Status `discussing` — the report's own recommendation is (c), a
+  recommendation to weigh, not a decision made.
+- **Soon:** none — everything below is gated on the §10 decision above.
+- **Later:**
+  - Review aggressive Phase 1 rule numbers against filled/closed-trade
+    evidence. Status `deferred`. Prerequisite: baseline unfreezes;
+    never change `RULES.md` from a tiny sample or P&L alone.
+  - Richer per-trade measurement capture (time-stop horizon and
+    stop-distance-bound sensitivity are not mechanically identifiable
+    today; per-trade token attribution is only approximate). Status
+    `deferred`. Prerequisite: a future training run designed to
+    capture it.
+  - Survivorship-bias mitigation (point-in-time universe construction
+    — the current watchlist was screened using in-window knowledge).
+    Status `deferred`. Prerequisite: baseline unfreezes.
+  - Separate evaluation agent that reviews completed cycles and
+    proposes judgment/rule/UX/system improvements. Status `discussing`.
+    Prerequisite: must use run-isolated, point-in-time evidence and
+    report real sample size.
+
+**Locked principle:** human-approval boundary for evaluator
+suggestions — see Global rules. Status `implemented`.
+
+---
+
+## 5. Platform, Reliability & Operations
+
+**Mission:** keep the hub-and-spoke Docker/Neon stack durable and
+observable without expanding scope during a healthy run.
+
+**Implemented:** hub-and-spoke Docker topology, pinned image digests,
+no tool container can reach another; Neon Postgres as single source of
+truth for decisions/executions/activity/insights/snapshots/evidence,
+`mode`/`run_id`-isolated; idempotent writes with full field-mismatch
+detection on any `decision_id` collision; durable per-cycle checkpoint
+(essential-vs-best-effort write ordering — a crash after commit can
+lose dashboard detail but never duplicate a trade).
+
+- **Now:** none.
+- **Soon:**
+  - Verify a finite outer timeout on Maverick/yfinance fetches, so one
+    provider hang can't stall a cycle indefinitely. Status `deferred`.
+    No architectural approval needed; implementation still reviewed.
+  - Preserve failure tracebacks for training-cycle failures
+    (observability-only). Status `discussing`.
+- **Later:**
+  - Continuous live paper-trading scheduler (run the agent
+    automatically on a defined cadence after training). Status
+    `discussing`. Prerequisite: live mode has never run — cadence,
+    recovery, and market-calendar behavior all need design.
+  - Host the trading stack on an always-on machine (free Render is
+    unsuitable for the full engine). Status `discussing`. Prerequisite:
+    hosting, secrets, persistence, and monitoring plan.
+  - Host the dashboard separately from the host machine. Status `idea`.
+    Prerequisite: the sector 3 authentication review above, before any
+    wider public hosting.
+
+---
+
+## 6. Interface, Learning & Communication
+
+**Mission:** make the project's real state legible — to the user on
+their phone, in the architecture vault, and to anyone outside the
+project — without ever overstating what the data actually shows.
+
+**Implemented:** Dashboard V2 (`dashboard-v2/`) — full IA rebuild
+(Overview/Trades/Decisions/Runs & Evaluation), reuses V1's exact
+read-only Neon pattern; responsive desktop/mobile shell (verified
+1440/768/390/320px); light/dark theme toggle; plain-English rejection
+labels; compact 20-position trade ledger; RULES.md-synced strategy
+profile card; full-width honest equity chart (data-derived Y/X axes,
+no fake data); trade-decision detail panel and historical-run selector
+already exist in V2. Dashboard V1 (`dashboard/index.html`) — original
+monitoring dashboard, stays active until an explicit cutover decision.
+Obsidian vault (`docs/obsidian/`) — engineering-ground-truth canvases.
+Public-facing LinkedIn-safe architecture canvas
+(`docs/obsidian/05-linkedin-architecture.canvas`) — screenshot-ready,
+no secrets/run IDs/paths.
+
+- **Now:** Dashboard V2 manual mobile feedback collection (public
+  Cloudflare `mobile-test` preview). Status `discussing`. Only real
+  issues found here should reopen dashboard work — see Global rules.
+- **Soon:** Dashboard V2 cutover decision (V2 becomes the active
+  dashboard; V1's fate). Status `discussing`. Prerequisite: mobile
+  testing above genuinely completes. See `docs/DISCUSSION_QUEUE.md` #1.
+- **Later:**
+  - Individual-trade experience (one trade's full entry/current/exit
+    state, reasoning, invalidation condition, activity timeline in one
+    place — agreed NOW-order item 3 on
+    `docs/obsidian/03-project-workflow.canvas`). Status `approved`
+    (direction only). Prerequisite: V2 cutover decision above.
+  - Per-trade progress/price chart (movement toward stop/target).
+    Status `discussing`. Prerequisite: daily snapshots may support a
+    basic version; full intraday history needs additional data.
+  - Recruiter/LinkedIn presentation assets beyond the existing
+    architecture canvas. Status `idea`. No prerequisite; scope each
+    asset individually before building.
+
+**Note:** "The Hermes Ledger" is the user's own optional personal
+study artifact — not project scope, not authoritative, not tracked
+here as work.
+
+---
+
+*Detailed repair history, benchmark numbers, and completed-fix
+narratives live in `HANDOFF.md` and `docs/history/` — never copied
+here.*
