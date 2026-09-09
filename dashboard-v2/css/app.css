@@ -242,10 +242,17 @@ tbody tr:hover td { background: var(--surface-2); }
 }
 .close-detail:hover { background: var(--surface-2); }
 
-.kv-list .kv { display: flex; justify-content: space-between; padding: 6px 0; border-top: 1px solid var(--border); font-size: 13px; }
+/* flex-wrap + min-width:0 on both children: a long free-text value (e.g.
+   the benchmark-comparison "not available from Neon..." note, or a long
+   trade reasoning string) must wrap onto its own line at narrow widths
+   instead of forcing this row -- and the whole page -- wider. Flex items
+   default to min-width:auto (their unwrapped content width), which is
+   exactly what silently caused page-level horizontal overflow on Runs &
+   Evaluation at 320-390px before this fix. */
+.kv-list .kv { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; padding: 6px 0; border-top: 1px solid var(--border); font-size: 13px; }
 .kv-list .kv:first-child { border-top: none; }
-.kv-list .kv .k { color: var(--text-dim); }
-.kv-list .kv .v { font-weight: 700; font-variant-numeric: tabular-nums; }
+.kv-list .kv .k { color: var(--text-dim); min-width: 0; }
+.kv-list .kv .v { font-weight: 700; font-variant-numeric: tabular-nums; min-width: 0; overflow-wrap: break-word; }
 
 .lifecycle { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 14px; }
 .lifecycle .step {

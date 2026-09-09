@@ -37,7 +37,7 @@ export function render(el, data) {
 
   el.innerHTML = `
     <div class="section-title">Journaled order outcomes</div>
-    <div class="stats-grid" style="grid-template-columns:repeat(4,1fr)">
+    <div class="stats-grid">
       <div class="stat"><div class="stat-label">Total journaled</div><div class="stat-value">${outcomes.total}</div></div>
       <div class="stat"><div class="stat-label">Filled</div><div class="stat-value">${outcomes.filled}</div></div>
       <div class="stat"><div class="stat-label">Rejected</div><div class="stat-value">${outcomes.rejected}</div></div>
