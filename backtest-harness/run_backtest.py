@@ -3250,7 +3250,10 @@ def _run_cycle_or_halt(run_day_fn: "Callable[[], tuple[Portfolio, dict, Callable
         return None, True
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Factory, no I/O -- extracted from main() so tests can inspect the
+    exact CLI contract (e.g. --run-kind's choices structurally excluding
+    'archived') without invoking main() or spawning a subprocess."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--start", default="2026-02-17")
     parser.add_argument("--end", default="2026-08-14")
@@ -3273,7 +3276,7 @@ def main() -> None:
     # archived is migration-only (see schema.sql) and can never start a
     # new run. A RESUMED run reuses its already-registered classification
     # automatically; passing --run-kind on resume is optional and only
-    # checked for a conflict (see the registration block below).
+    # checked for a conflict (see resolve_run_kind below).
     parser.add_argument("--run-kind", choices=["training", "smoke"], default=None,
                         help="REQUIRED for a fresh run (including --reset): "
                              "'training' (real, evaluation-ready) or "
@@ -3283,6 +3286,68 @@ def main() -> None:
                              "stored classification; a conflicting value "
                              "fails closed instead of silently relabeling "
                              "the run.")
+    return parser
+
+
+class RunKindError(ValueError):
+    """Raised by resolve_run_kind when the run's classification cannot be
+    established. main() catches this and re-raises as SystemExit with the
+    same message -- kept as a plain ValueError subclass (not SystemExit
+    itself) so the decision is assertable in tests without argparse/sys
+    machinery."""
+
+
+def resolve_run_kind(is_resume: bool, requested_kind: str | None, run_id: str,
+                      registered_kind: str | None) -> str:
+    """Pure decision, zero I/O: given whether this is a resume, what
+    --run-kind (if any) was passed, and what backtest_run_registry already
+    has on file for run_id (None if unregistered -- resolved by the
+    caller via get_registered_run_kind, never looked up in here), return
+    the run_kind this run must proceed under, or raise RunKindError naming
+    exactly why not.
+
+    main() calls this BEFORE any Hermes call or other database write --
+    this function IS that gate; every run's classification is decided
+    here, nowhere else. registered_kind is ignored for a fresh run (there
+    is nothing registered yet to conflict with)."""
+    if is_resume:
+        if registered_kind is None:
+            raise RunKindError(
+                f"run_id {run_id} has no backtest_run_registry row -- a "
+                "pre-existing, unregistered run cannot be resumed silently. "
+                "Register its real classification directly (see "
+                "trade-journal-mcp/schema.sql's backtest run registry "
+                "migration) before resuming, or start a genuinely new run "
+                "with --reset --run-kind training|smoke."
+            )
+        if registered_kind == "archived":
+            raise RunKindError(
+                f"run_id {run_id} is registered as 'archived' -- archived "
+                "runs are migration-only and can never be resumed for new "
+                "cycles."
+            )
+        if requested_kind is not None and requested_kind != registered_kind:
+            raise RunKindError(
+                f"--run-kind {requested_kind!r} conflicts with run_id "
+                f"{run_id}'s already-registered classification "
+                f"{registered_kind!r}. A run's classification is permanent "
+                "once set -- resuming reuses it automatically; omit "
+                "--run-kind or pass the matching value."
+            )
+        return registered_kind
+    else:
+        if requested_kind is None:
+            raise RunKindError(
+                "a fresh run (including --reset) requires an explicit "
+                "--run-kind training|smoke before any Hermes call or "
+                "database write. 'archived' is migration-only and cannot "
+                "start a new run -- see trade-journal-mcp/schema.sql."
+            )
+        return requested_kind
+
+
+def main() -> None:
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     preflight()
@@ -3347,45 +3412,17 @@ def main() -> None:
 
     # Durable run classification -- BEFORE any Hermes call or other
     # database write for this run (see backtest_run_registry,
-    # trade-journal-mcp/schema.sql). A fresh run must be explicitly
-    # classified; a resumed run reuses its already-registered kind and
-    # fails closed on a conflict or on a pre-existing, unregistered run.
+    # trade-journal-mcp/schema.sql). The decision itself is pure
+    # (resolve_run_kind); only the registry lookup/write below touches
+    # the network, and only for exactly the branch that needs it.
+    registered_kind = get_registered_run_kind(run_id) if is_resume else None
+    try:
+        run_kind = resolve_run_kind(is_resume, args.run_kind, run_id, registered_kind)
+    except RunKindError as exc:
+        raise SystemExit(str(exc))
     if is_resume:
-        registered_kind = get_registered_run_kind(run_id)
-        if registered_kind is None:
-            raise SystemExit(
-                f"run_id {run_id} has no backtest_run_registry row -- a "
-                "pre-existing, unregistered run cannot be resumed silently. "
-                "Register its real classification directly (see "
-                "trade-journal-mcp/schema.sql's backtest run registry "
-                "migration) before resuming, or start a genuinely new run "
-                "with --reset --run-kind training|smoke."
-            )
-        if registered_kind == "archived":
-            raise SystemExit(
-                f"run_id {run_id} is registered as 'archived' -- archived "
-                "runs are migration-only and can never be resumed for new "
-                "cycles."
-            )
-        if args.run_kind is not None and args.run_kind != registered_kind:
-            raise SystemExit(
-                f"--run-kind {args.run_kind!r} conflicts with run_id "
-                f"{run_id}'s already-registered classification "
-                f"{registered_kind!r}. A run's classification is permanent "
-                "once set -- resuming reuses it automatically; omit "
-                "--run-kind or pass the matching value."
-            )
-        run_kind = registered_kind
         print(f"resuming run_id={run_id} as registered kind={run_kind!r}")
     else:
-        if args.run_kind is None:
-            raise SystemExit(
-                "a fresh run (including --reset) requires an explicit "
-                "--run-kind training|smoke before any Hermes call or "
-                "database write. 'archived' is migration-only and cannot "
-                "start a new run -- see trade-journal-mcp/schema.sql."
-            )
-        run_kind = args.run_kind
         register_run(run_id, run_kind)
         print(f"registered run_id={run_id} as kind={run_kind!r}")
 
