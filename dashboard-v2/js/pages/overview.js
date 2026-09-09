@@ -100,12 +100,14 @@ function renderPositions(open, snap) {
 // market data, no per-trade path). Colors reference CSS custom properties
 // so the chart stays readable in both themes without a redraw.
 //
-// preserveAspectRatio="none" makes the chart stretch to the card's full
-// width at every breakpoint instead of the old fixed 3:1 viewBox
-// letterboxing on wide screens. That trades a little non-uniform text
-// stretch for genuinely full-width rendering — acceptable for short
-// currency/date labels, and .equity-chart's per-breakpoint height (see
-// app.css) keeps the stretch mild in practice.
+// preserveAspectRatio="none" lets the SVG's geometry (line/area/gridlines/
+// dashed baseline) stretch to the card's full width at every breakpoint
+// instead of the old fixed-aspect-ratio letterboxing. That non-uniform
+// scaling would distort SVG <text>, so every human-readable label lives
+// outside the SVG as plain HTML, absolutely positioned over a CSS grid
+// using the exact same x()/y() fractions the SVG geometry uses — the
+// labels stay pixel-aligned with their chart level without ever passing
+// through the SVG's own coordinate transform.
 function renderChart(snapshots) {
   const series = equityCurveSeries(snapshots);
 
@@ -122,27 +124,28 @@ function renderChart(snapshots) {
   const pad = (hi - lo) * 0.15 || 500;
   const min = lo - pad, max = hi + pad, range = max - min || 1;
 
-  const W = 640, H = 220;
-  const ML = 78, MR = 8, MT = 10, MB = 24; // room for y-axis $ labels and x-axis date labels
-  const plotW = W - ML - MR, plotH = H - MT - MB;
-  const x = i => ML + (i / (series.length - 1)) * plotW;
-  const y = v => MT + (1 - (v - min) / range) * plotH;
+  // Plain 0-100 coordinate space — with no text inside the SVG any more,
+  // the exact viewBox size no longer matters, only the fractions below do.
+  const W = 100, H = 100, PADX = 1.5, PADY = 6;
+  const plotW = W - PADX * 2, plotH = H - PADY * 2;
+  const x = i => PADX + (i / (series.length - 1)) * plotW;
+  const y = v => PADY + (1 - (v - min) / range) * plotH;
   const baseY = y(STARTING_EQUITY);
-  const plotBottom = MT + plotH;
+  const plotBottom = H - PADY;
 
-  const points = vals.map((v, i) => `${x(i).toFixed(1)},${y(v).toFixed(1)}`).join(" ");
+  const points = vals.map((v, i) => `${x(i).toFixed(2)},${y(v).toFixed(2)}`).join(" ");
   const last = vals[vals.length - 1];
   const positive = last >= STARTING_EQUITY;
   const lineColor = positive ? "var(--green)" : "var(--red)";
   const fillColor = positive ? "var(--green-dim)" : "var(--red-dim)";
-  const areaPoints = `${x(0).toFixed(1)},${plotBottom.toFixed(1)} ${points} ${x(series.length - 1).toFixed(1)},${plotBottom.toFixed(1)}`;
+  const areaPoints = `${x(0).toFixed(2)},${plotBottom.toFixed(2)} ${points} ${x(series.length - 1).toFixed(2)},${plotBottom.toFixed(2)}`;
 
   const first = series[0], lastPt = series[series.length - 1];
   const midIdx = Math.floor((series.length - 1) / 2);
   const xTicks = [
-    { i: 0, label: first.label, anchor: "start" },
-    { i: midIdx, label: series[midIdx].label, anchor: "middle" },
-    { i: series.length - 1, label: lastPt.label, anchor: "end" },
+    { pct: x(0), label: first.label, anchor: "start" },
+    { pct: x(midIdx), label: series[midIdx].label, anchor: "middle" },
+    { pct: x(series.length - 1), label: lastPt.label, anchor: "end" },
   ];
 
   // Y-axis: the actual lowest and highest equity this series reached, plus
@@ -153,30 +156,37 @@ function renderChart(snapshots) {
   const yCandidates = [...new Set([dataLo, STARTING_EQUITY, dataHi])].sort((a, b) => a - b);
   const yTicks = [];
   for (const v of yCandidates) {
-    if (yTicks.length && Math.abs(y(v) - y(yTicks[yTicks.length - 1])) < 16) continue;
+    if (yTicks.length && Math.abs(y(v) - y(yTicks[yTicks.length - 1])) < 8) continue;
     yTicks.push(v);
   }
 
   const summary = `Equity curve from ${first.label} (${money(vals[0])}) to ${lastPt.label} (${money(last)}), ` +
     `${series.length} snapshots. Low ${money(dataLo)}, high ${money(dataHi)}, starting equity ${money(STARTING_EQUITY)}.`;
 
-  const yAxisSvg = yTicks.map(v => `
-    <line x1="${ML}" y1="${y(v).toFixed(1)}" x2="${W - MR}" y2="${y(v).toFixed(1)}" stroke="var(--border)" stroke-width="1"/>
-    <text x="${(ML - 8).toFixed(1)}" y="${(y(v) + 3.5).toFixed(1)}" text-anchor="end" class="chart-axis-label">${esc(yWhole(v))}</text>`).join("");
+  const gridSvg = yTicks.map(v =>
+    `<line x1="0" y1="${y(v).toFixed(2)}" x2="${W}" y2="${y(v).toFixed(2)}" stroke="var(--border)" stroke-width="0.3"/>`).join("");
 
-  const xAxisSvg = xTicks.map(t => `
-    <text x="${x(t.i).toFixed(1)}" y="${(H - 6).toFixed(1)}" text-anchor="${t.anchor}" class="chart-axis-label">${esc(t.label)}</text>`).join("");
+  const yAxisHtml = yTicks.map(v =>
+    `<span class="chart-y-tick" style="top:${y(v).toFixed(2)}%">${esc(yWhole(v))}</span>`).join("");
+
+  const xAxisHtml = xTicks.map(t =>
+    `<span class="chart-x-tick" data-anchor="${t.anchor}" style="left:${t.pct.toFixed(2)}%">${esc(t.label)}</span>`).join("");
 
   return `
     <div class="card chart-card">
-      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="equity-chart" role="img" aria-label="${esc(summary)}">
-        ${yAxisSvg}
-        <line x1="${ML}" y1="${baseY.toFixed(1)}" x2="${W - MR}" y2="${baseY.toFixed(1)}"
-              stroke="var(--text-faint)" stroke-width="1" stroke-dasharray="4 4"/>
-        <text x="${(W - MR - 4).toFixed(1)}" y="${(baseY - 4).toFixed(1)}" text-anchor="end" class="chart-axis-label">Starting equity</text>
-        <polygon points="${areaPoints}" fill="${fillColor}" stroke="none"/>
-        <polyline points="${points}" fill="none" stroke="${lineColor}" stroke-width="2" stroke-linejoin="round"/>
-        ${xAxisSvg}
-      </svg>
+      <div class="chart-grid">
+        <div class="chart-y-axis">${yAxisHtml}</div>
+        <div class="chart-plot">
+          <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="equity-chart" role="img" aria-label="${esc(summary)}">
+            ${gridSvg}
+            <line x1="0" y1="${baseY.toFixed(2)}" x2="${W}" y2="${baseY.toFixed(2)}"
+                  stroke="var(--text-faint)" stroke-width="0.3" stroke-dasharray="1.4 1.4" vector-effect="non-scaling-stroke"/>
+            <polygon points="${areaPoints}" fill="${fillColor}" stroke="none"/>
+            <polyline points="${points}" fill="none" stroke="${lineColor}" stroke-width="0.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+          </svg>
+          <span class="chart-start-label" style="top:${baseY.toFixed(2)}%">Starting equity</span>
+        </div>
+        <div class="chart-x-axis">${xAxisHtml}</div>
+      </div>
     </div>`;
 }
