@@ -5,27 +5,22 @@ let selectedKey = null;
 function key(t) { return `${t.ticker}__${t.created_at}`; }
 
 export function render(el, data) {
-  const { trades, blockedActivity, activity } = data;
-  if (!trades.length) {
+  const { decisionRows, decisionCounts, blockedActivity, activity } = data;
+  const rowsData = decisionRows || [];
+  const counts = decisionCounts || { total: 0, filled: 0, rejected: 0, pending: 0 };
+
+  if (!rowsData.length) {
     el.innerHTML = `<div class="empty">No decisions recorded yet for this ${data.mode === "backtest" ? "run" : "account"}.</div>`;
     return;
   }
 
-  // Exact trade-row statuses only. Pre-journal decision-time rejections
-  // never reach `trades` at all in this anonymous dashboard's data — the
-  // full evaluated → proposed → accepted funnel needs cycle evidence,
-  // which is intentionally out of scope here (see the note below).
-  const outcomes = {
-    total: trades.length,
-    filled: trades.filter(t => t.status === "filled").length,
-    rejected: trades.filter(t => t.status === "rejected").length,
-    pending: trades.filter(t => t.status === "pending").length,
-  };
+  // Run-wide status totals come from bounded count-only queries in
+  // data.js; the table below is the newest DECISIONS_LIMIT rows from a
+  // bounded list query — the whole decision list is never loaded here.
   const dist = rejectionDistribution(blockedActivity);
+  const selected = rowsData.find(t => key(t) === selectedKey) || null;
 
-  const selected = trades.find(t => key(t) === selectedKey) || null;
-
-  const rows = [...trades].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).map(t => `
+  const rows = rowsData.map(t => `
     <tr data-key="${esc(key(t))}" class="responsive">
       <td data-label="Time">${time(t.created_at)}</td>
       <td data-label="Ticker" class="ticker">${esc(t.ticker)}</td>
@@ -38,12 +33,12 @@ export function render(el, data) {
   el.innerHTML = `
     <div class="section-title">Journaled order outcomes</div>
     <div class="stats-grid">
-      <div class="stat"><div class="stat-label">Total journaled</div><div class="stat-value">${outcomes.total}</div></div>
-      <div class="stat"><div class="stat-label">Filled</div><div class="stat-value">${outcomes.filled}</div></div>
-      <div class="stat"><div class="stat-label">Rejected</div><div class="stat-value">${outcomes.rejected}</div></div>
-      <div class="stat"><div class="stat-label">Pending</div><div class="stat-value">${outcomes.pending}</div></div>
+      <div class="stat"><div class="stat-label">Total journaled</div><div class="stat-value">${counts.total}</div></div>
+      <div class="stat"><div class="stat-label">Filled</div><div class="stat-value">${counts.filled}</div></div>
+      <div class="stat"><div class="stat-label">Rejected</div><div class="stat-value">${counts.rejected}</div></div>
+      <div class="stat"><div class="stat-label">Pending</div><div class="stat-value">${counts.pending}</div></div>
     </div>
-    <p style="font-size:11px;color:var(--text-faint);margin:8px 0 0">This counts journaled trade records only. The full proposal funnel (evaluated → proposed → accepted) requires cycle evidence and is intentionally unavailable to this dashboard.</p>
+    <p style="font-size:11px;color:var(--text-faint);margin:8px 0 0">Run-wide counts of journaled trade records. The full proposal funnel (evaluated → proposed → accepted) requires cycle evidence and is intentionally unavailable to this dashboard.</p>
 
     <div class="section-title">Rejection reasons</div>
     ${dist.length
@@ -51,11 +46,12 @@ export function render(el, data) {
       : `<div class="card empty" style="padding:16px">No blocked decisions recorded.</div>`}
     <p style="font-size:11px;color:var(--text-faint);margin:8px 0 0">News is never a positive BUY trigger in this system — it can only veto an otherwise technically-justified entry (RULES.md §5a).</p>
 
-    <div class="section-title">Decisions</div>
+    <div class="section-title">Recent decisions</div>
     <div class="panel"><table class="responsive">
       <thead><tr><th>Time</th><th>Ticker</th><th>Action</th><th>Outcome</th><th>Confidence</th><th>Signal</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
+    <p style="font-size:11px;color:var(--text-faint);margin:8px 0 0">Showing the ${rowsData.length} most recent decision${rowsData.length === 1 ? "" : "s"} for this ${data.mode === "backtest" ? "run" : "account"}.</p>
     <div id="decision-detail"></div>
   `;
 

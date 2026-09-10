@@ -224,6 +224,23 @@ export function trainingRunsFromRows(registryRows, snapshotRows) {
   return runs;
 }
 
+/* --------------------------------------------------------- decisions */
+
+// Newest `limit` decision rows (created_at desc) plus run-wide status
+// counts. In the live app these come from BOUNDED Neon queries in
+// data.js — a `limit=<limit>` list query and `count`-only queries, never
+// a whole-list fetch. This helper reproduces the identical shape from an
+// in-memory array so the dev fixtures and this file's tests match the
+// app exactly.
+export function decisionSummary(trades, limit = 10) {
+  const list = [...(trades || [])].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  const count = status => list.filter(t => t.status === status).length;
+  return {
+    rows: list.slice(0, limit),
+    counts: { total: list.length, filled: count("filled"), rejected: count("rejected"), pending: count("pending") },
+  };
+}
+
 /* --------------------------------------------------------- run isolation */
 
 // Throws if any row carries a run_id other than the expected one. Used

@@ -5,6 +5,16 @@
 // never imports this file) — see the "fixtures must not remain exposed as
 // a normal mode" requirement.
 
+import { decisionSummary } from "./calc.js";
+
+// The Decisions page consumes decisionRows/decisionCounts (data.js builds
+// these from bounded Neon queries). Here they derive from each fixture's
+// own `trades` via the same helper, so the shape stays identical.
+const decisionDescriptors = {
+  decisionRows: { enumerable: true, get() { return decisionSummary(this.trades, 10).rows; } },
+  decisionCounts: { enumerable: true, get() { return decisionSummary(this.trades, 10).counts; } },
+};
+
 const RUN_ID = "fixture-run-0001";
 const now = Date.now();
 const hoursAgo = h => new Date(now - h * 3600_000).toISOString();
@@ -126,3 +136,7 @@ export const FIXTURE_STALE = {
   failedCount: 0,
   lastFailed: null,
 };
+
+for (const fx of [FIXTURE_BACKTEST, FIXTURE_LIVE_EMPTY, FIXTURE_STALE]) {
+  Object.defineProperties(fx, decisionDescriptors);
+}

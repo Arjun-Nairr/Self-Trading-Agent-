@@ -12,7 +12,7 @@
 <div class="dev-bar">
   <strong>DEV FIXTURE PREVIEW</strong> — not part of the shipped app, not linked from index.html
   <label>Fixture: <select id="fx"><option value="FIXTURE_BACKTEST">Populated backtest run</option><option value="FIXTURE_LIVE_EMPTY">Empty live-paper account</option><option value="FIXTURE_STALE">Stale data</option></select></label>
-  <label>Page: <select id="pg"><option value="overview">Overview</option><option value="trades">Trades</option><option value="decisions">Decisions</option><option value="runs">Runs &amp; Evaluation</option></select></label>
+  <label>Page: <select id="pg"><option value="overview">Overview</option><option value="trades">Trades</option><option value="decisions">Decisions</option><option value="runs">Runs &amp; Evaluation</option><option value="roadmap">Roadmap</option></select></label>
   <button type="button" id="theme-toggle" aria-label="Toggle dark mode" aria-pressed="false">🌙 Dark</button>
 </div>
 <div class="shell">
@@ -24,10 +24,11 @@ import { render as renderOverview } from "../js/pages/overview.js";
 import { render as renderTrades } from "../js/pages/trades.js";
 import { render as renderDecisions } from "../js/pages/decisions.js";
 import { render as renderRuns } from "../js/pages/runs.js";
+import { render as renderRoadmap } from "../js/pages/roadmap.js";
 import { initTheme } from "../js/theme.js";
 initTheme();
 
-const PAGES = { overview: renderOverview, trades: renderTrades, decisions: renderDecisions, runs: renderRuns };
+const PAGES = { overview: renderOverview, trades: renderTrades, decisions: renderDecisions, runs: renderRuns, roadmap: renderRoadmap };
 const fxSel = document.getElementById("fx"), pgSel = document.getElementById("pg"), root = document.getElementById("page-root");
 
 function draw() {

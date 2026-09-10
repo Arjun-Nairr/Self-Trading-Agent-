@@ -105,6 +105,15 @@ fixed 10-ticker watchlist universe.
   - Broader dynamic opportunity screening beyond the fixed watchlist.
     Status `discussing`. Prerequisite: avoid hard-coded "safe"
     tickers, survivorship bias, and uncontrolled universe churn.
+  - RAG-backed filing/document retrieval. Status `deferred`. What it is:
+    retrieval of the relevant *passages* from a large, point-in-time-
+    gated corpus of raw SEC filings, earnings materials, and later news
+    — **not** a replacement for normalized financial metrics, and not
+    justified merely because the ticker count grows. Prerequisites:
+    fundamentals ingestion already exists; primary-source
+    citations/provenance are retained on every passage; retrieval is
+    cut off by the simulated date (no lookahead); the agent receives
+    only the retrieved evidence, never unrestricted document access.
 
 **Locked scope boundary:** no LLM chart-pattern/graph-vision analysis
 — see Global rules.
@@ -230,14 +239,20 @@ their phone, in the architecture vault, and to anyone outside the
 project — without ever overstating what the data actually shows.
 
 **Implemented:** Dashboard V2 (`dashboard-v2/`) — full IA rebuild
-(Overview/Trades/Decisions/Runs & Evaluation), reuses V1's exact
-read-only Neon pattern; responsive desktop/mobile shell (verified
+(Overview/Trades/Decisions/Runs & Evaluation/Roadmap), reuses V1's
+exact read-only Neon pattern; responsive desktop/mobile shell (verified
 1440/768/390/320px); light/dark theme toggle; plain-English rejection
 labels; compact 20-position trade ledger; RULES.md-synced strategy
 profile card; full-width honest equity chart (data-derived Y/X axes,
 no fake data); trade-decision detail panel and historical-run selector
-already exist in V2. Dashboard V1 (`dashboard/index.html`) — original
-monitoring dashboard, stays active until an explicit cutover decision.
+already exist in V2. **Roadmap page** — a static, zero-Neon visual
+projection of this file (the six sectors, each grouped into completed/
+active/next/deferred), read-only, never an editable task manager.
+**Decisions page** requests only the newest 10 decision rows for the
+selected run (a bounded list query plus bounded count-only queries for
+the run-wide totals — never a whole-list fetch). Dashboard V1
+(`dashboard/index.html`) — original monitoring dashboard, stays active
+until an explicit cutover decision.
 Obsidian vault (`docs/obsidian/`) — engineering-ground-truth canvases.
 Public-facing LinkedIn-safe architecture canvas
 (`docs/obsidian/05-linkedin-architecture.canvas`) — screenshot-ready,

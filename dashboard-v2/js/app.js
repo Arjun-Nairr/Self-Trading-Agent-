@@ -4,6 +4,7 @@ import { render as renderOverview } from "./pages/overview.js";
 import { render as renderTrades } from "./pages/trades.js";
 import { render as renderDecisions } from "./pages/decisions.js";
 import { render as renderRuns } from "./pages/runs.js";
+import { render as renderRoadmap } from "./pages/roadmap.js";
 import { initTheme } from "./theme.js";
 
 const PAGES = {
@@ -11,7 +12,12 @@ const PAGES = {
   trades: { label: "Trades", render: renderTrades },
   decisions: { label: "Decisions", render: renderDecisions },
   runs: { label: "Runs & Evaluation", render: renderRuns },
+  roadmap: { label: "Roadmap", render: renderRoadmap },
 };
+
+// Roadmap is a static, mode-independent projection of the project
+// backlog — the shell issues no Neon request while it is the active page.
+const STATIC_PAGES = new Set(["roadmap"]);
 
 const state = {
   mode: "backtest",
@@ -30,7 +36,14 @@ function renderNav() {
   topNav.innerHTML = Object.keys(PAGES).map(id => btn(id)).join("");
   bottomNav.innerHTML = Object.keys(PAGES).map(id => btn(id, `class="nav-item"`)).join("");
   [...topNav.querySelectorAll("button"), ...bottomNav.querySelectorAll("button")].forEach(b => {
-    b.addEventListener("click", () => { state.page = b.dataset.page; renderNav(); renderPage(state.lastData); });
+    b.addEventListener("click", () => {
+      const wasStatic = STATIC_PAGES.has(state.page);
+      state.page = b.dataset.page;
+      renderNav();
+      if (STATIC_PAGES.has(state.page)) refresh(false);        // static page: swap content, no fetch
+      else if (wasStatic || !state.lastData) refresh(true);    // (re)entering a data page: fetch fresh
+      else renderPage(state.lastData);                          // data ↔ data: cheap swap
+    });
   });
 }
 
@@ -54,10 +67,10 @@ function showSkeleton() {
 }
 
 function renderPage(data) {
-  if (!data) return;
+  if (!data && !STATIC_PAGES.has(state.page)) return;
   const container = el("page-root");
   container.innerHTML = "";
-  PAGES[state.page].render(container, { ...data, mode: state.mode, run_id: state.runId }, { runs: state.runs });
+  PAGES[state.page].render(container, { ...(data || {}), mode: state.mode, run_id: state.runId }, { runs: state.runs });
 }
 
 function renderHealthBar(data) {
@@ -77,6 +90,15 @@ function renderHealthBar(data) {
 }
 
 async function refresh(withSkeleton) {
+  if (STATIC_PAGES.has(state.page)) {
+    // No run data needed — and no Neon/Data API request is made.
+    // (.health-bar sets display:flex, which beats [hidden]; clear it too.)
+    const bar = el("health-bar");
+    bar.innerHTML = ""; bar.hidden = true;
+    setStatus("Roadmap · project overview");
+    renderPage(state.lastData);
+    return;
+  }
   if (withSkeleton) showSkeleton();
   setStatus(`${state.mode.toUpperCase()} · loading…`, "busy");
   try {

@@ -9,9 +9,11 @@ import {
   assertRunIsolated, isBlockedRow, rejectionDistribution, STARTING_EQUITY,
   relatedActivity, openPositionDetail, computeHealth, equityCurveSeries,
   ruleLabel, positionsFromTrades, latestPositions, trainingRunsFromRows,
+  decisionSummary,
 } from "../js/calc.js";
 import { STRATEGY_PROFILE, CIRCUIT_BREAKER_NOTE } from "../js/strategy-profile.js";
 import { REFLECTION_LIMIT } from "../js/data.js";
+import { ROADMAP_SECTORS } from "../js/roadmap-data.js";
 
 let n = 0;
 function test(name, fn) { fn(); n++; console.log(`ok - ${name}`); }
@@ -310,6 +312,49 @@ test("trainingRunsFromRows: empty/null inputs return an empty list, never throw"
 
 test("REFLECTION_LIMIT: reflection retrieval is capped at exactly five", () => {
   assert.equal(REFLECTION_LIMIT, 5);
+});
+
+/* ---------------------------------------------------------- decisions */
+
+test("decisionSummary: newest N rows + run-wide status counts, bounded slice", () => {
+  const trades = [];
+  for (let i = 0; i < 14; i++) {
+    trades.push({
+      ticker: `T${i}`,
+      status: i % 3 === 0 ? "rejected" : i % 3 === 1 ? "filled" : "pending",
+      created_at: new Date(2026, 0, 1 + i).toISOString(),
+    });
+  }
+  const { rows, counts } = decisionSummary(trades, 10);
+  assert.equal(rows.length, 10);            // capped, never the whole list
+  assert.equal(rows[0].ticker, "T13");     // newest first
+  assert.equal(rows[9].ticker, "T4");
+  assert.equal(counts.total, 14);          // run-wide, not the sliced count
+  assert.equal(counts.filled + counts.rejected + counts.pending, 14);
+
+  assert.deepEqual(decisionSummary([], 10), { rows: [], counts: { total: 0, filled: 0, rejected: 0, pending: 0 } });
+  assert.deepEqual(decisionSummary(null, 10).counts, { total: 0, filled: 0, rejected: 0, pending: 0 });
+});
+
+/* ----------------------------------------------------------- roadmap data */
+
+test("roadmap data: exactly six sectors, all four groups, public-safe text", () => {
+  assert.equal(ROADMAP_SECTORS.length, 6);
+  // no URLs, UUIDs, credentials, or endpoints in any user-visible string
+  const forbidden = /(https?:\/\/|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-|password|secret|bearer\s|api[_-]?key|neon\.tech)/i;
+  const seenNumbers = new Set();
+  for (const s of ROADMAP_SECTORS) {
+    assert.ok(s.name && s.mission, `sector ${s.n} has a name and a mission`);
+    assert.ok(!seenNumbers.has(s.n), `sector number ${s.n} is unique`);
+    seenNumbers.add(s.n);
+    for (const key of ["completed", "active", "next", "deferred"]) {
+      assert.ok(Array.isArray(s[key]), `sector ${s.n} .${key} is an array`);
+      for (const item of s[key]) {
+        assert.equal(typeof item, "string");
+        assert.ok(!forbidden.test(item), `sector ${s.n} .${key} item stays public-safe: ${item}`);
+      }
+    }
+  }
 });
 
 /* --------------------------------------------------------- run isolation */

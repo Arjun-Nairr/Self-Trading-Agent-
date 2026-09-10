@@ -1,5 +1,9 @@
 import { assertRunIsolated, trainingRunsFromRows } from "./calc.js";
 
+// Decisions page shows only the newest N decision rows — requested at
+// this limit, never fetched whole and sliced.
+export const DECISIONS_LIMIT = 10;
+
 // The ONLY module that talks to Neon. UI/page code must never construct a
 // database request itself — it calls the functions below and gets back
 // plain objects/arrays.
@@ -98,15 +102,28 @@ export async function listTrainingRuns() {
 export async function loadRunData(mode, run_id) {
   const m = MODES[mode];
   const runFilter = run_id ? `&run_id=eq.${run_id}` : "";
+  const tradeScope = `?execution_mode=eq.${m.trades}${runFilter}`;
+  const decisionCount = extra => qCount("trades", `${tradeScope}${extra}`);
 
-  const [trades, activity, snapshots, blockedActivity, insights, failedCount, lastFailedRows] = await Promise.all([
-    qAll("trades", `?execution_mode=eq.${m.trades}${runFilter}&order=created_at.desc`),
+  const [
+    trades, activity, snapshots, blockedActivity, insights, failedCount, lastFailedRows,
+    decisionRows, dTotal, dFilled, dRejected, dPending,
+  ] = await Promise.all([
+    qAll("trades", `${tradeScope}&order=created_at.desc`),
     q("agent_activity", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=200`),
     qAll("portfolio_snapshots", `?mode=eq.${m.snapshots}${runFilter}&order=created_at.desc`),
     qAll("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=in.(risk_check,order_rejected)&order=created_at.desc`),
     q("insight_log", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=${REFLECTION_LIMIT}`),
     qCount("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed`),
     q("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed&order=created_at.desc&limit=1`),
+    // Decisions page: newest N rows only (bounded list query), plus
+    // run-wide status totals from count-only queries — the whole trade
+    // list is never loaded for this page.
+    q("trades", `${tradeScope}&order=created_at.desc&limit=${DECISIONS_LIMIT}`),
+    decisionCount(""),
+    decisionCount("&status=eq.filled"),
+    decisionCount("&status=eq.rejected"),
+    decisionCount("&status=eq.pending"),
   ]);
 
   // Defense-in-depth: the query above already filters by run_id server-
@@ -115,8 +132,14 @@ export async function loadRunData(mode, run_id) {
   assertRunIsolated(trades, run_id);
   assertRunIsolated(snapshots, run_id);
   assertRunIsolated(activity, run_id);
+  assertRunIsolated(decisionRows, run_id);
 
-  return { trades, activity, snapshots, blockedActivity, insights, failedCount, lastFailed: lastFailedRows[0] ?? null };
+  return {
+    trades, activity, snapshots, blockedActivity, insights, failedCount,
+    lastFailed: lastFailedRows[0] ?? null,
+    decisionRows,
+    decisionCounts: { total: dTotal, filled: dFilled, rejected: dRejected, pending: dPending },
+  };
 }
 
 export const REFRESH_MS = 15000;

@@ -1,10 +1,16 @@
 # Dashboard V2 — candidate redesign (not yet the active dashboard)
 
 Full IA + visual rebuild of the trading dashboard: Overview / Trades /
-Decisions / Runs & Evaluation, one shared shell for backtest and live paper
-(mode is a header control, not a separate app). Vanilla HTML/CSS/JS — no
-framework, no build step, no package manager, no external UI libraries or
-fonts.
+Decisions / Runs & Evaluation / Roadmap, one shared shell for backtest and
+live paper (mode is a header control, not a separate app). Vanilla
+HTML/CSS/JS — no framework, no build step, no package manager, no external
+UI libraries or fonts.
+
+The **Roadmap** page is a read-only visual projection of
+`docs/PROJECT_BACKLOG.md` (six engineering sectors, each grouped into
+completed / active / next / deferred). It reads a static local module only
+and makes **zero Neon / Data API calls**; the shell issues no request while
+it is the active page.
 
 **V1 (`dashboard/index.html`) remains the active dashboard.** This is a
 separate candidate site under `dashboard-v2/`; removing this whole directory
@@ -21,7 +27,8 @@ python -m http.server 8843
 Run from `dashboard-v2/`, then open `http://127.0.0.1:8843/`. Any static
 file server works — there is nothing to build or install.
 
-Fixture preview (dev-only, not linked from the shipped app):
+Fixture preview (dev-only, not linked from the shipped app — covers all
+five pages, Roadmap included):
 `http://127.0.0.1:8843/dev/fixtures-preview.html`
 
 ## Fixture-based checks
@@ -33,7 +40,8 @@ node test/calc.test.mjs
 Plain Node `assert`, no test framework installed. Covers trade pairing,
 realized P&L, win rate, max drawdown, total return, the risk-checker
 rejection rule, the best-effort activity matcher, the open-position detail
-lookup, run isolation, and null/empty inputs.
+lookup, run isolation, the newest-N decision summary, the Roadmap data
+shape / public-safety guard, and null/empty inputs.
 
 ## Structure
 
@@ -41,7 +49,8 @@ lookup, run isolation, and null/empty inputs.
 |---|---|
 | `js/calc.js` | Pure calculation + formatting functions. No fetch, no DOM. Shared by the app and the tests. |
 | `js/data.js` | The **only** module that talks to Neon. Reuses V1's exact auth flow, query helpers, and endpoints. |
-| `js/pages/*.js` | One render module per page — `render(container, data, ctx)`, pure DOM building. |
+| `js/roadmap-data.js` | Static, public-safe roadmap content for the Roadmap page. No fetch, no DOM, no secrets/URLs/IDs. |
+| `js/pages/*.js` | One render module per page — `render(container, data, ctx)`, pure DOM building. `pages/roadmap.js` ignores `data` and reads `roadmap-data.js` only. |
 | `js/app.js` | Shell bootstrap: mode/run/page state, refresh loop, loading/error states. |
 | `js/fixtures.js` | Representative local fixtures (dev preview only — never imported by `index.html`). |
 | `dev/fixtures-preview.html` | Dev-only page for inspecting all four pages against fixtures. Not linked from `index.html`. |
@@ -54,6 +63,11 @@ database request themselves — they receive plain objects from
 `loadRunData()`. `backtest_cycle_evidence` is never queried (excluded from
 the anonymous grant, and out of scope for this dashboard). Every request is
 a `GET`; no write-capable request exists anywhere in this directory.
+
+The **Decisions** page requests only the newest 10 decision rows for the
+selected run (a bounded `limit=10` list query) plus its run-wide status
+totals from `count`-only queries — it never loads the full decision list.
+The **Roadmap** page makes no request at all.
 
 ## Metric parity with V1
 
