@@ -731,6 +731,52 @@ async def _get_run_kind(run_id: str) -> str | None:
     return row["run_kind"] if row else None
 
 
+_VALID_RUN_STATUSES = {"running", "completed", "failed"}
+
+
+async def _record_run_status(
+    run_id: str, status: str, current_day: int, total_days: int | None = None,
+) -> dict[str, Any]:
+    """Upsert this run's lifecycle status -- backtest_run_status, the
+    explicit record Dashboard V2's run-status indicator reads instead of
+    ever inferring "is this run actively training" from a
+    portfolio_snapshots timestamp (see run_backtest.py's own
+    record_run_status, the only caller, which never calls this for a
+    non-'training' run_kind).
+
+    First write for a run_id sets `started_at` (the column default); every
+    later call for the same run_id only advances `status`/`current_day`/
+    `updated_at` -- `started_at` is never touched again. `total_days` is
+    `None` on a plain per-cycle progress update (COALESCE keeps whatever
+    was already stored); passed a real value only when the harness knows a
+    fresh target (run start, or a resumed invocation with a new --days),
+    so a stale target is never silently overwritten by an unrelated
+    progress write.
+
+    'running' with an old `updated_at` is how the dashboard derives
+    "paused" -- there is deliberately no separate 'paused' status written
+    here; see run_backtest.py's own best-effort write points for exactly
+    when 'failed' is written (a halted cycle) vs. left to go stale
+    (an invocation simply ending mid-window, expected between resumes)."""
+    if status not in _VALID_RUN_STATUSES:
+        raise ValueError(f"status must be one of {sorted(_VALID_RUN_STATUSES)}, got {status!r}")
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO backtest_run_status (run_id, status, current_day, total_days)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (run_id) DO UPDATE SET
+            status = EXCLUDED.status,
+            current_day = EXCLUDED.current_day,
+            total_days = COALESCE(EXCLUDED.total_days, backtest_run_status.total_days),
+            updated_at = now()
+        RETURNING *
+        """,
+        run_id, status, current_day, total_days,
+    )
+    return dict(row)
+
+
 def _jsonable(obj):
     """asyncpg returns datetime/Decimal objects FastMCP's JSON encoder chokes on."""
     return json.loads(json.dumps(obj, default=str))

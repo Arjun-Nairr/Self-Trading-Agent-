@@ -241,6 +241,95 @@ export function decisionSummary(trades, limit = 10) {
   };
 }
 
+/* ------------------------------------------------------ run-status banner */
+
+// Clearly documented staleness threshold (also surfaced to the user via
+// the banner's own title="" — see overview.js): backtest_run_status is
+// written best-effort AFTER a cycle fully commits (run_backtest.py), so a
+// single real cycle's whole wall-clock time (LLM call + tool round-trips)
+// must fit comfortably inside this window, or a still-healthy run would
+// flash "Paused" mid-cycle. 10 minutes is well above this project's
+// observed per-cycle time and still short enough to flag a genuinely
+// stopped harness promptly.
+export const RUN_STATUS_STALE_MS = 10 * 60_000;
+
+// "3 minutes ago" / "2 hours ago" / "yesterday" style — only as granular
+// as the banner needs, never sub-minute (a training cycle takes minutes,
+// not seconds, so "12 seconds ago" would just be noise).
+export function relativeTime(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return "unknown time";
+  const mins = Math.round(ms / 60_000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} minute${mins === 1 ? "" : "s"} ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  return `${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+/**
+ * Maps a backtest_run_status row to what the Overview run-status banner
+ * shows — or `null` to render nothing. Pure: takes every fact as an
+ * explicit argument, no Date.now()/fetch of its own, so it is directly
+ * unit-testable (mirrors risk_checker.py's/run_backtest.py's own pure-
+ * decision-function style in this project).
+ *
+ * `isTrainingRun` MUST come from registry-backed membership (e.g.
+ * `ctx.runs` — already filtered to run_kind === "training" by
+ * trainingRunsFromRows) — never inferred from the status row alone. A
+ * smoke or archived run's status row (which should never exist — the
+ * harness only ever writes one for run_kind === "training" — but this is
+ * the dashboard's own independent check, belt and suspenders) is refused
+ * here regardless.
+ *
+ * 'failed' and a stale 'running' are deliberately the SAME displayed
+ * state ("paused") — the four states this banner supports are Training /
+ * Paused / Complete / hidden, not five; an explicit failure just means
+ * the pause is reported immediately instead of waiting out the staleness
+ * window.
+ */
+export function runStatusView({ statusRow, isTrainingRun, runLabel, now = Date.now(), staleMs = RUN_STATUS_STALE_MS }) {
+  if (!isTrainingRun || !statusRow) return null;
+  const { status, current_day, total_days, updated_at } = statusRow;
+  const dayLabel = `Day ${current_day}${total_days != null ? ` / ${total_days}` : ""}`;
+  const ageMs = now - new Date(updated_at).getTime();
+
+  if (status === "completed") {
+    return { kind: "complete", label: `Complete — ${runLabel || dayLabel}`, ageMs };
+  }
+  if (status === "failed" || ageMs > staleMs) {
+    return { kind: "paused", label: `Paused — last update ${relativeTime(ageMs)}`, ageMs };
+  }
+  return { kind: "training", label: `Training — ${dayLabel}`, ageMs };
+}
+
+// Session-only dismissal. `storage` is injectable (sessionStorage in the
+// real app, a plain fake in tests) — keyed by run_id so dismissing the
+// banner while looking at one run never silently hides a genuinely
+// different run's status later in the same session.
+const RUN_STATUS_DISMISS_PREFIX = "dashboard-v2:run-status-dismissed:";
+
+export function runStatusDismissKey(runId) {
+  return RUN_STATUS_DISMISS_PREFIX + runId;
+}
+
+export function isRunStatusDismissed(storage, runId) {
+  try {
+    return storage.getItem(runStatusDismissKey(runId)) === "1";
+  } catch {
+    return false; // a storage failure must never hide a real, live status
+  }
+}
+
+export function dismissRunStatus(storage, runId) {
+  try {
+    storage.setItem(runStatusDismissKey(runId), "1");
+  } catch {
+    // best-effort only -- a session that can't persist the dismissal just
+    // shows the banner again next render, never a hard failure
+  }
+}
+
 /* --------------------------------------------------------- run isolation */
 
 // Throws if any row carries a run_id other than the expected one. Used

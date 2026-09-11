@@ -12,7 +12,7 @@
 <div class="dev-bar">
   <strong>DEV FIXTURE PREVIEW</strong> — not part of the shipped app, not linked from index.html
   <label>Fixture: <select id="fx"><option value="FIXTURE_BACKTEST">Populated backtest run</option><option value="FIXTURE_LIVE_EMPTY">Empty live-paper account</option><option value="FIXTURE_STALE">Stale data</option></select></label>
-  <label>Page: <select id="pg"><option value="overview">Overview</option><option value="trades">Trades</option><option value="decisions">Decisions</option><option value="runs">Runs &amp; Evaluation</option><option value="roadmap">Roadmap</option></select></label>
+  <label>Page: <select id="pg"><option value="overview">Overview</option><option value="trades">Trades</option><option value="decisions">Decisions</option><option value="runs">Runs</option><option value="roadmap">Roadmap</option></select></label>
   <button type="button" id="theme-toggle" aria-label="Toggle dark mode" aria-pressed="false">🌙 Dark</button>
 </div>
 <div class="shell">
@@ -34,8 +34,14 @@ const fxSel = document.getElementById("fx"), pgSel = document.getElementById("pg
 function draw() {
   const data = fixtures[fxSel.value];
   const mode = fxSel.value === "FIXTURE_BACKTEST" ? "backtest" : "live";
+  // Registry-backed training-run membership, same shape listTrainingRuns()
+  // returns -- lets the fixture preview actually exercise the Overview
+  // run-status banner instead of it always reading as "not a training run".
+  const runs = mode === "backtest" && data.run_id
+    ? [{ run_id: data.run_id, latest_day_label: data.trades?.[0]?.day_label }]
+    : [];
   root.innerHTML = "";
-  PAGES[pgSel.value](root, { ...data, mode, run_id: data.run_id }, { runs: [] });
+  PAGES[pgSel.value](root, { ...data, mode, run_id: data.run_id }, { runs });
 }
 fxSel.addEventListener("change", draw);
 pgSel.addEventListener("change", draw);

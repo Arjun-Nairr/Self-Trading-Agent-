@@ -550,3 +550,46 @@ INSERT INTO backtest_run_registry (run_id, run_kind) VALUES
     ('1bf9af3d-8375-45b2-8cdb-313fd56832d5', 'smoke'),    -- 3-cycle --reset smoke test (stale 1% risk-budget bug found)
     ('81db75e5-f9e9-48df-8bf1-0a2f581d3db8', 'smoke')     -- 3-cycle --reset smoke test confirming the fix
 ON CONFLICT (run_id) DO NOTHING;
+
+-- ---------------------------------------------------------------------------
+-- Migration (dashboard run-status indicator) -- an explicit lifecycle status
+-- record for a training run, so Dashboard V2's run-status banner never has
+-- to infer "is this run actively training" from a portfolio_snapshots
+-- timestamp. One row per run_id, upserted by run_backtest.py at three
+-- points: the start of a training invocation, after every completed cycle
+-- (progress), and once at the end (see run_backtest.py's own
+-- record_run_status/main() for exactly when each write happens -- a cycle
+-- failure writes 'failed' too, best-effort, never blocking the run itself).
+-- 'running' with a stale updated_at is how the dashboard derives "Paused"
+-- -- there is deliberately no separate 'paused' status value written here.
+--
+-- Never written for a 'smoke' or 'archived' run -- run_backtest.py checks
+-- run_kind == 'training' before calling record_run_status at all, so a
+-- smoke run can never even acquire a row here. The dashboard also
+-- independently requires the run to appear in backtest_run_registry as
+-- 'training' (the same registry-membership check every other training-only
+-- view already uses) before it will render anything from this table --
+-- belt and suspenders against a smoke run ever reading as active training.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS backtest_run_status (
+    run_id      UUID PRIMARY KEY REFERENCES backtest_run_registry(run_id),
+    status      TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed')),
+    current_day INTEGER NOT NULL DEFAULT 0,
+    total_days  INTEGER,
+    started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Same read-only contract as every other dashboard-facing table: SELECT
+-- only, RLS-gated, never writable from the browser. No new write access is
+-- granted to the anonymous role by this migration.
+GRANT SELECT ON backtest_run_status TO anonymous;
+ALTER TABLE backtest_run_status ENABLE ROW LEVEL SECURITY;
+DO $$ BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_policies
+        WHERE schemaname = 'public' AND tablename = 'backtest_run_status' AND policyname = 'anonymous_read_backtest_run_status'
+    ) THEN
+        CREATE POLICY anonymous_read_backtest_run_status ON backtest_run_status FOR SELECT TO anonymous USING (true);
+    END IF;
+END $$;

@@ -18,7 +18,7 @@ const DATA_API_URL = "https://ep-falling-thunder-b1mr6i56.apirest.c-5.eu-central
 
 // One Neon database throughout; mode is a column value, not a separate
 // connection — identical mapping to V1.
-// Runs & Evaluation shows only the latest 5 reflections — fetched at
+// The Runs page shows only the latest 5 reflections — fetched at
 // exactly this limit so there is no client-side overfetch/slice to keep
 // in sync with the UI's own cap.
 export const REFLECTION_LIMIT = 5;
@@ -107,7 +107,7 @@ export async function loadRunData(mode, run_id) {
 
   const [
     trades, activity, snapshots, blockedActivity, insights, failedCount, lastFailedRows,
-    decisionRows, dTotal, dFilled, dRejected, dPending,
+    decisionRows, dTotal, dFilled, dRejected, dPending, runStatusRows,
   ] = await Promise.all([
     qAll("trades", `${tradeScope}&order=created_at.desc`),
     q("agent_activity", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=200`),
@@ -124,6 +124,11 @@ export async function loadRunData(mode, run_id) {
     decisionCount("&status=eq.filled"),
     decisionCount("&status=eq.rejected"),
     decisionCount("&status=eq.pending"),
+    // Overview run-status banner: at most one row, for the currently
+    // selected backtest run only (this table is backtest-only, has one
+    // row per run_id — see trade-journal-mcp/schema.sql). Live mode has
+    // no run_id, so there is nothing to fetch and nothing to show.
+    run_id ? q("backtest_run_status", `?run_id=eq.${run_id}&limit=1`) : Promise.resolve([]),
   ]);
 
   // Defense-in-depth: the query above already filters by run_id server-
@@ -139,6 +144,7 @@ export async function loadRunData(mode, run_id) {
     lastFailed: lastFailedRows[0] ?? null,
     decisionRows,
     decisionCounts: { total: dTotal, filled: dFilled, rejected: dRejected, pending: dPending },
+    runStatus: runStatusRows[0] ?? null,
   };
 }
 

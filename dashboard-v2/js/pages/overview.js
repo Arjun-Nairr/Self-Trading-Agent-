@@ -1,12 +1,40 @@
 import {
   pairTrades, realizedPnl, unrealizedPnl, winRate, maxDrawdown, totalReturn,
   money, pctSigned, pctPlain, esc, STARTING_EQUITY, openPositionDetail, equityCurveSeries,
+  runStatusView, isRunStatusDismissed, dismissRunStatus,
 } from "../calc.js";
 
 const STALE_MS = 24 * 3600_000; // live mode only — see render() below
 
 function stat(label, value, cls = "", sub = "") {
   return `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${cls}">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ""}</div>`;
+}
+
+function trainingRunLabel(runId, runs) {
+  const short = `${runId.slice(0, 8)}…`;
+  const meta = (runs || []).find(r => r.run_id === runId);
+  return meta && meta.latest_day_label ? `${short} · ${meta.latest_day_label}` : short;
+}
+
+// Compact, closeable, near the top of Overview -- not a modal. Hidden
+// entirely when there's nothing to show (no run_id, no classified
+// training run, or dismissed this session) -- see runStatusView's own
+// contract in calc.js for exactly what "classified training run" means.
+function renderRunStatus(data, ctx) {
+  if (data.mode !== "backtest" || !data.run_id) return "";
+  if (isRunStatusDismissed(window.sessionStorage, data.run_id)) return "";
+  const isTrainingRun = (ctx.runs || []).some(r => r.run_id === data.run_id);
+  const view = runStatusView({
+    statusRow: data.runStatus,
+    isTrainingRun,
+    runLabel: trainingRunLabel(data.run_id, ctx.runs),
+  });
+  if (!view) return "";
+  return `
+    <div class="run-status-banner ${view.kind}" title="Marked paused after 10 minutes without a progress update from the backtest harness">
+      <span>${esc(view.label)}</span>
+      <button type="button" class="close-run-status" data-run-id="${esc(data.run_id)}" aria-label="Dismiss for this session">×</button>
+    </div>`;
 }
 
 export function render(el, data, ctx) {
@@ -35,6 +63,7 @@ export function render(el, data, ctx) {
   }
 
   el.innerHTML = `
+    ${renderRunStatus(data, ctx || {})}
     ${staleBanner}
     <section>
       <div class="section-title">Portfolio</div>
@@ -66,6 +95,14 @@ export function render(el, data, ctx) {
       ${renderChart(snapshots)}
     </section>
   `;
+
+  const closeBtn = el.querySelector(".close-run-status");
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => {
+      dismissRunStatus(window.sessionStorage, closeBtn.dataset.runId);
+      render(el, data, ctx); // re-render immediately -- no need to wait for the next poll
+    });
+  }
 }
 
 function renderPositions(open, snap) {

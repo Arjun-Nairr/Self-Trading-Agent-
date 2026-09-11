@@ -11,7 +11,7 @@ const PAGES = {
   overview: { label: "Overview", render: renderOverview },
   trades: { label: "Trades", render: renderTrades },
   decisions: { label: "Decisions", render: renderDecisions },
-  runs: { label: "Runs & Evaluation", render: renderRuns },
+  runs: { label: "Runs", render: renderRuns },
   roadmap: { label: "Roadmap", render: renderRoadmap },
 };
 

@@ -1512,6 +1512,36 @@ asyncio.run(main())
     return json_from(run_in("trade-journal", script))
 
 
+def record_run_status(run_id: str, status: str, current_day: int, total_days: int | None = None) -> None:
+    """Best-effort lifecycle status write for Dashboard V2's run-status
+    indicator (backtest_run_status -- see trade-journal-mcp/schema.sql and
+    _record_run_status's docstring in trade-journal-mcp/server.py for the
+    full upsert contract). Only ever called for run_kind == "training" --
+    see main() -- so a smoke run never acquires a row here at all, never
+    mind one that could misread as active training.
+
+    Always called the same best-effort way do_observability() is (never
+    lets a status-write failure halt the run or mask a real exception --
+    see every call site in main()): this is dashboard-facing visibility,
+    not essential state. A failure here can leave the indicator stale or
+    absent; it can never corrupt the portfolio, duplicate a trade, or
+    replay a Hermes call."""
+    script = f'''
+import asyncio, json
+from server import _record_run_status
+
+async def main():
+    row = await _record_run_status(
+        {run_id!r}, {status!r}, current_day={current_day},
+        total_days={total_days!r},
+    )
+    print(json.dumps({{"run_id": str(row["run_id"]), "status": row["status"]}}))
+
+asyncio.run(main())
+'''
+    run_in("trade-journal", script)
+
+
 def get_registered_run_kind(run_id: str) -> str | None:
     """Read-only: the stored run_kind for run_id, or None if it was never
     registered (a pre-existing run from before this migration, or a
@@ -3429,6 +3459,20 @@ def main() -> None:
     end = date.fromisoformat(end_str)
     completed = 0
     run_usage = {"total_tokens": 0, "api_calls": 0, "estimated_cost_usd": 0.0}
+
+    # Run-status indicator (dashboard-v2 Overview banner): "running", with
+    # this invocation's target = wherever the run already stands plus what
+    # it was just asked to do (args.days). Best-effort, training-only --
+    # see record_run_status's own docstring. Never called for smoke/
+    # archived, so those can never appear as active training.
+    if run_kind == "training":
+        try:
+            record_run_status(
+                run_id, "running", portfolio.trading_days_elapsed,
+                total_days=portfolio.trading_days_elapsed + args.days,
+            )
+        except Exception as exc:
+            print(f"  RUN-STATUS UPDATE FAILED (start) for run_id={run_id}: {type(exc).__name__}: {exc}")
     while completed < args.days and cursor <= end:
         if cursor.weekday() >= 5:
             cursor += timedelta(days=1)
@@ -3453,6 +3497,12 @@ def main() -> None:
             run_id=run_id,
         )
         if halted:
+            if run_kind == "training":
+                try:
+                    record_run_status(run_id, "failed", portfolio.trading_days_elapsed)
+                except Exception as exc:
+                    print(f"  RUN-STATUS UPDATE FAILED (failed marker) for run_id={run_id}: "
+                          f"{type(exc).__name__}: {exc}")
             break
         portfolio, summary, do_observability = result
 
@@ -3506,7 +3556,34 @@ def main() -> None:
             print(f"  OBSERVABILITY FAILED (snapshot/activity) for day_index={day_index}: "
                   f"{type(exc).__name__}: {exc} -- essential work already committed, continuing")
 
+        # Run-status progress update -- same best-effort contract as
+        # do_observability just above. total_days is omitted (None) here
+        # on purpose: this is a per-cycle progress tick, not a new target,
+        # so the value written at the top of main() (or by a future
+        # resumed invocation) is preserved via COALESCE, never overwritten
+        # by a plain progress write.
+        if run_kind == "training":
+            try:
+                record_run_status(run_id, "running", portfolio.trading_days_elapsed)
+            except Exception as exc:
+                print(f"  RUN-STATUS UPDATE FAILED (progress) for day_index={day_index}: "
+                      f"{type(exc).__name__}: {exc}")
+
         cursor += timedelta(days=1)
+
+    if run_kind == "training":
+        try:
+            if cursor > end:
+                # The whole requested date window is exhausted -- the run
+                # is genuinely done, not just this invocation's chunk of
+                # it. Anything less (completed >= args.days but cursor
+                # still <= end) is a normal between-invocations gap: left
+                # as "running", so the dashboard's own staleness check
+                # (not a write here) is what turns it into "Paused" if no
+                # further invocation follows in time.
+                record_run_status(run_id, "completed", portfolio.trading_days_elapsed)
+        except Exception as exc:
+            print(f"  RUN-STATUS UPDATE FAILED (final) for run_id={run_id}: {type(exc).__name__}: {exc}")
 
     final = portfolio.equity_curve[-1]
     print(f"\n{'=' * 70}")

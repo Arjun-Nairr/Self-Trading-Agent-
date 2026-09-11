@@ -215,6 +215,22 @@ tbody tr:hover td { background: var(--surface-2); }
   font-size: 12px; margin-bottom: 14px; border: 1px solid #f2c94c;
 }
 
+/* Run-status indicator (Overview, top) -- compact, one line, closeable
+   for this browser session only. Not a modal/popup; subtle by design. */
+.run-status-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 7px 12px; border-radius: var(--radius); font-size: 12px; font-weight: 600;
+  margin-bottom: 14px; border: 1px solid var(--border);
+}
+.run-status-banner.training { background: var(--blue-dim); color: var(--blue); border-color: transparent; }
+.run-status-banner.paused { background: var(--amber-dim); color: var(--amber); border-color: #f2c94c; }
+.run-status-banner.complete { background: var(--green-dim); color: var(--green); border-color: transparent; }
+.run-status-banner .close-run-status {
+  border: none; background: transparent; color: inherit; cursor: pointer; font-size: 15px;
+  line-height: 1; padding: 2px 5px; opacity: 0.65; flex: none;
+}
+.run-status-banner .close-run-status:hover { opacity: 1; }
+
 .skel { position: relative; overflow: hidden; background: var(--surface-2); border-radius: var(--radius); }
 .skel::after {
   content: ""; position: absolute; inset: 0;

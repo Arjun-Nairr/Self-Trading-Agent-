@@ -103,6 +103,10 @@ export const FIXTURE_BACKTEST = {
   ],
   failedCount: 1,
   lastFailed: { created_at: hoursAgo(80), description: "Cycle 37 failed: expected_reward_risk contract mismatch." },
+  // Run-status banner: recent update -> the "Training" state. See
+  // runStatusView (calc.js) for the Paused/Complete/hidden branches,
+  // covered by test/calc.test.mjs rather than a separate fixture each.
+  runStatus: { status: "running", current_day: 41, total_days: 50, updated_at: hoursAgo(0.02) },
 };
 
 // ---- an empty live-paper account: no snapshots, no trades, nothing to

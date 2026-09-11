@@ -9,7 +9,8 @@ import {
   assertRunIsolated, isBlockedRow, rejectionDistribution, STARTING_EQUITY,
   relatedActivity, openPositionDetail, computeHealth, equityCurveSeries,
   ruleLabel, positionsFromTrades, latestPositions, trainingRunsFromRows,
-  decisionSummary,
+  decisionSummary, runStatusView, relativeTime, RUN_STATUS_STALE_MS,
+  isRunStatusDismissed, dismissRunStatus, runStatusDismissKey,
 } from "../js/calc.js";
 import { STRATEGY_PROFILE, CIRCUIT_BREAKER_NOTE } from "../js/strategy-profile.js";
 import { REFLECTION_LIMIT } from "../js/data.js";
@@ -355,6 +356,109 @@ test("roadmap data: exactly six sectors, all four groups, public-safe text", () 
       }
     }
   }
+});
+
+/* ------------------------------------------------------- run-status banner */
+
+const NOW = Date.parse("2026-09-11T12:00:00Z");
+
+test("runStatusView: hidden when there's no status row, or the run isn't training-classified", () => {
+  assert.equal(runStatusView({ statusRow: null, isTrainingRun: true, now: NOW }), null);
+  assert.equal(
+    runStatusView({
+      statusRow: { status: "running", current_day: 3, total_days: 10, updated_at: new Date(NOW).toISOString() },
+      isTrainingRun: false, // e.g. a smoke run -- registry membership says no, regardless of the row existing
+      now: NOW,
+    }),
+    null,
+  );
+});
+
+test("runStatusView: 'Training — Day X / Y' for a fresh 'running' row", () => {
+  const view = runStatusView({
+    statusRow: { status: "running", current_day: 41, total_days: 50, updated_at: new Date(NOW - 60_000).toISOString() },
+    isTrainingRun: true, now: NOW,
+  });
+  assert.deepEqual(view.kind, "training");
+  assert.equal(view.label, "Training — Day 41 / 50");
+});
+
+test("runStatusView: a smoke run can never read as active training, even with a (hypothetical) fresh row", () => {
+  // Belt-and-suspenders check: the harness never writes a status row for a
+  // non-training run at all (see run_backtest.py), but the dashboard's own
+  // isTrainingRun gate must independently refuse to show one anyway.
+  const smokeRunStatusRow = { status: "running", current_day: 2, total_days: 3, updated_at: new Date(NOW).toISOString() };
+  assert.equal(runStatusView({ statusRow: smokeRunStatusRow, isTrainingRun: false, now: NOW }), null);
+});
+
+test("runStatusView: stale 'running' (beyond the documented threshold) reads as 'Paused'", () => {
+  const staleUpdatedAt = new Date(NOW - (RUN_STATUS_STALE_MS + 60_000)).toISOString();
+  const view = runStatusView({
+    statusRow: { status: "running", current_day: 20, total_days: 50, updated_at: staleUpdatedAt },
+    isTrainingRun: true, now: NOW,
+  });
+  assert.equal(view.kind, "paused");
+  assert.match(view.label, /^Paused — last update /);
+});
+
+test("runStatusView: 'running' just inside the threshold still reads as 'Training', not 'Paused'", () => {
+  const justInside = new Date(NOW - (RUN_STATUS_STALE_MS - 60_000)).toISOString();
+  const view = runStatusView({
+    statusRow: { status: "running", current_day: 20, total_days: 50, updated_at: justInside },
+    isTrainingRun: true, now: NOW,
+  });
+  assert.equal(view.kind, "training");
+});
+
+test("runStatusView: an explicit 'failed' status reads as 'Paused' immediately, even if recently updated", () => {
+  const view = runStatusView({
+    statusRow: { status: "failed", current_day: 12, total_days: 50, updated_at: new Date(NOW - 1000).toISOString() },
+    isTrainingRun: true, now: NOW,
+  });
+  assert.equal(view.kind, "paused");
+});
+
+test("runStatusView: 'completed' reads as 'Complete — <run label>', regardless of staleness", () => {
+  const longAgo = new Date(NOW - 999 * 3600_000).toISOString();
+  const view = runStatusView({
+    statusRow: { status: "completed", current_day: 50, total_days: 50, updated_at: longAgo },
+    isTrainingRun: true, runLabel: "e68525f9… · Day 71", now: NOW,
+  });
+  assert.equal(view.kind, "complete");
+  assert.equal(view.label, "Complete — e68525f9… · Day 71");
+});
+
+test("relativeTime: minutes/hours/days buckets, never sub-minute", () => {
+  assert.equal(relativeTime(0), "just now");
+  assert.equal(relativeTime(20_000), "just now");
+  assert.equal(relativeTime(5 * 60_000), "5 minutes ago");
+  assert.equal(relativeTime(60_000), "1 minute ago");
+  assert.equal(relativeTime(3 * 3600_000), "3 hours ago");
+  assert.equal(relativeTime(2 * 24 * 3600_000), "2 days ago");
+});
+
+test("run-status dismissal: session-only, keyed per run_id, storage failure never hides a live status", () => {
+  const store = new Map();
+  const fakeStorage = {
+    getItem: k => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, v),
+  };
+  assert.equal(isRunStatusDismissed(fakeStorage, "run-a"), false);
+  dismissRunStatus(fakeStorage, "run-a");
+  assert.equal(isRunStatusDismissed(fakeStorage, "run-a"), true);
+  // a different run_id is unaffected by dismissing "run-a"
+  assert.equal(isRunStatusDismissed(fakeStorage, "run-b"), false);
+  assert.equal(store.get(runStatusDismissKey("run-a")), "1");
+
+  // a storage that throws (e.g. disabled/blocked sessionStorage) must
+  // degrade to "not dismissed" (fail open, never silently hide a real
+  // status), and dismissRunStatus must not throw either
+  const throwingStorage = {
+    getItem: () => { throw new Error("blocked"); },
+    setItem: () => { throw new Error("blocked"); },
+  };
+  assert.equal(isRunStatusDismissed(throwingStorage, "run-a"), false);
+  assert.doesNotThrow(() => dismissRunStatus(throwingStorage, "run-a"));
 });
 
 /* --------------------------------------------------------- run isolation */

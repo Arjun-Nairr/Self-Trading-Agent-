@@ -1,7 +1,7 @@
 # Dashboard V2 — candidate redesign (not yet the active dashboard)
 
 Full IA + visual rebuild of the trading dashboard: Overview / Trades /
-Decisions / Runs & Evaluation / Roadmap, one shared shell for backtest and
+Decisions / Runs / Roadmap, one shared shell for backtest and
 live paper (mode is a header control, not a separate app). Vanilla
 HTML/CSS/JS — no framework, no build step, no package manager, no external
 UI libraries or fonts.
@@ -114,7 +114,7 @@ drawdown/return formulas unchanged).
 - **No live benchmark comparison.** SPY / watchlist / SMA(10) figures live
   only in `docs/evaluations/round2_benchmark_sensitivity.md` — HANDOFF.md
   §8 already documents that no benchmark series is wired into the
-  dashboard. The Runs & Evaluation page says so explicitly rather than
+  dashboard. The Runs page says so explicitly rather than
   inventing a live-computed number.
 - **No per-trade decision→activity foreign key.** The schema exposed to the
   anonymous role has no link from a `trades` row to the `agent_activity`
