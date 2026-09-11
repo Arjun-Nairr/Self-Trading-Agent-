@@ -37,16 +37,23 @@ REPO = Path(__file__).resolve().parent.parent
 RUN_ID = "e68525f9-ce89-4588-a57e-866f28cd99fd"  # completed Round 2 training run
 OUT_PATH = REPO / "docs" / "evaluations" / "round2_trade_journey.md"
 
-# Exact literal exit-reason strings the harness itself writes for a
-# mechanical exit (record_exit/simulate_trading_day, run_backtest.py) --
-# an EXACT prefix match against these, never fuzzy keyword matching, is
-# what makes "mechanical_*" a trustworthy category. Anything else (a
-# discretionary SELL's free-form Hermes prose) is deliberately left
-# "unclassified" with its raw text preserved rather than guessed at.
+# Exact literal exit-reason prefixes known to mean a mechanical exit --
+# either the harness's own fixed strings (record_exit/simulate_trading_day,
+# run_backtest.py) or, for time-stops specifically, a small explicit
+# allowlist of the exact discretionary phrasings verified present in the
+# real Round 2 report (docs/evaluations/round2_trade_journey.md). An EXACT
+# prefix match against a known-good string, never fuzzy keyword matching
+# ("stop" alone proves nothing), is what keeps "mechanical_*" trustworthy.
+# Any other free-form Hermes prose is deliberately left "unclassified"
+# with its raw text preserved rather than guessed at -- extend this list
+# only by adding another exact, verified prefix, never a substring/regex.
 _MECHANICAL_PREFIXES = [
     ("Mechanical exit: stop hit", "mechanical_stop"),
     ("Mechanical exit: target hit", "mechanical_target"),
     ("Mechanical exit: time stop (", "mechanical_time_stop"),
+    ("Closed because the time stop expired", "mechanical_time_stop"),
+    ("5-day time stop reached;", "mechanical_time_stop"),
+    ("The 5-day time stop has been reached", "mechanical_time_stop"),
 ]
 
 

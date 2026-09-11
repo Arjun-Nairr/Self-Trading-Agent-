@@ -51,6 +51,23 @@ check("discretionary prose stays unclassified, not keyword-guessed",
 check("None notes -> unclassified", classify_exit_reason(None), "unclassified")
 check("empty notes -> unclassified", classify_exit_reason(""), "unclassified")
 
+# -- allowlisted discretionary time-stop phrasings (exact prefixes only) --
+check("'Closed because the time stop expired' prefix",
+      classify_exit_reason("Closed because the time stop expired -- no further edge in holding."),
+      "mechanical_time_stop")
+check("'5-day time stop reached;' prefix",
+      classify_exit_reason("5-day time stop reached; taking the exit as designed."),
+      "mechanical_time_stop")
+check("'The 5-day time stop has been reached' prefix",
+      classify_exit_reason("The 5-day time stop has been reached, so I am closing the position "
+                            "mechanically instead of stretching the hold."),
+      "mechanical_time_stop")
+# Near-miss: mentions the time stop but does not match any allowlisted
+# prefix exactly -- must stay unclassified, not fuzzy-matched in.
+check("near-miss time-stop mention stays unclassified",
+      classify_exit_reason("Approaching the 5-day time stop soon, closing early to lock in gains."),
+      "unclassified")
+
 # -- pair_trades: one-lot, no-overlap, sequential per ticker -------------
 rows = [
     trade("AAA", "BUY", "filled", 10.0, 100, "2026-01-01T09:00", "2026-01-02T16:00"),

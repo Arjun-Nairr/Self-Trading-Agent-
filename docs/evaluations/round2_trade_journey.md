@@ -1,6 +1,6 @@
 # Round 2 per-trade journey evaluation
 
-Run: `e68525f9-ce89-4588-a57e-866f28cd99fd` · Generated: 2026-09-11T22:25:59 · Source: direct asyncpg (NEON_DATABASE_URL), read-only SELECT
+Run: `e68525f9-ce89-4588-a57e-866f28cd99fd` · Generated: 2026-09-11T23:02:43 · Source: direct asyncpg (NEON_DATABASE_URL), read-only SELECT
 
 Offline, read-only, human-evaluation-only report (same boundary as `geometry_scan.py`/`counterfactual.py`/`benchmark_sensitivity.py`). Never wired into `run_backtest.py`, never read by Hermes. Built entirely from `trades` and `portfolio_snapshots.open_positions_detail`, already written by the existing harness — no new capture, no new table, no new tool. Trade identities are masked labels; see `trade-journal-mcp/schema.sql` for the real (unmasked) stored rows.
 
@@ -10,7 +10,7 @@ Offline, read-only, human-evaluation-only report (same boundary as `geometry_sca
 - Full daily-journey coverage: 14
 - Zero-day (same-session exit, no intermediate journey by construction): 2
 - Partial coverage (should not occur — flagged if it does): 0
-- Mechanical time-stop exits: 3 (in-the-money at exit: 3, underwater: 0)
+- Mechanical time-stop exits: 10 (in-the-money at exit: 8, underwater: 2)
 
 ## Trades
 
@@ -153,7 +153,7 @@ Max daily-close P&L: $-305.23 · Min daily-close P&L: $-305.23
 - Entry fill: $148.57 x 130 @ 2026-09-01 14:26:51.848024+00:00
 - Exit fill: $157.44 @ 2026-09-01 15:13:29.664820+00:00
 - Realized P&L: $1,153.10 (+5.97%)
-- Exit reason: `unclassified` — raw: 'Closed because the time stop expired before the setup reached its target or stop; exits come before new entries.'
+- Exit reason: `mechanical_time_stop` — raw: 'Closed because the time stop expired before the setup reached its target or stop; exits come before new entries.'
 - Trading-day snapshots while open: 2/2 (full)
 
 | Day | Price | Unrealized P&L | Dist to stop | Dist to target |
@@ -168,7 +168,7 @@ Max daily-close P&L: $-79.30 · Min daily-close P&L: $-252.20
 - Entry fill: $28.44 x 684 @ 2026-09-01 14:27:06.454092+00:00
 - Exit fill: $29.39 @ 2026-09-01 15:13:33.781676+00:00
 - Realized P&L: $649.80 (+3.34%)
-- Exit reason: `unclassified` — raw: 'Closed because the time stop expired before the setup reached its target or stop; exits come before new entries.'
+- Exit reason: `mechanical_time_stop` — raw: 'Closed because the time stop expired before the setup reached its target or stop; exits come before new entries.'
 - Trading-day snapshots while open: 2/2 (full)
 
 | Day | Price | Unrealized P&L | Dist to stop | Dist to target |
@@ -183,7 +183,7 @@ Max daily-close P&L: $314.64 · Min daily-close P&L: $307.80
 - Entry fill: $32.83 x 597 @ 2026-09-01 14:27:13.085902+00:00
 - Exit fill: $34.14 @ 2026-09-01 15:13:37.820489+00:00
 - Realized P&L: $782.07 (+3.99%)
-- Exit reason: `unclassified` — raw: 'Closed because the time stop expired before the setup reached its target or stop; exits come before new entries.'
+- Exit reason: `mechanical_time_stop` — raw: 'Closed because the time stop expired before the setup reached its target or stop; exits come before new entries.'
 - Trading-day snapshots while open: 2/2 (full)
 
 | Day | Price | Unrealized P&L | Dist to stop | Dist to target |
@@ -198,7 +198,7 @@ Max daily-close P&L: $788.04 · Min daily-close P&L: $405.96
 - Entry fill: $28.40 x 699 @ 2026-09-01 15:19:22.380654+00:00
 - Exit fill: $28.30 @ 2026-09-01 15:32:59.044049+00:00
 - Realized P&L: $-69.90 (-0.35%)
-- Exit reason: `unclassified` — raw: '5-day time stop reached; exit is mechanical and does not require waiting for stop or target.'
+- Exit reason: `mechanical_time_stop` — raw: '5-day time stop reached; exit is mechanical and does not require waiting for stop or target.'
 - Trading-day snapshots while open: 3/3 (full)
 
 | Day | Price | Unrealized P&L | Dist to stop | Dist to target |
@@ -214,7 +214,7 @@ Max daily-close P&L: $733.95 · Min daily-close P&L: $6.99
 - Entry fill: $37.43 x 529 @ 2026-09-01 15:19:28.838509+00:00
 - Exit fill: $39.90 @ 2026-09-01 15:33:02.824492+00:00
 - Realized P&L: $1,306.63 (+6.60%)
-- Exit reason: `unclassified` — raw: '5-day time stop reached; close the position before looking for new entries.'
+- Exit reason: `mechanical_time_stop` — raw: '5-day time stop reached; close the position before looking for new entries.'
 - Trading-day snapshots while open: 3/3 (full)
 
 | Day | Price | Unrealized P&L | Dist to stop | Dist to target |
@@ -230,7 +230,7 @@ Max daily-close P&L: $851.69 · Min daily-close P&L: $84.64
 - Entry fill: $27.45 x 736 @ 2026-09-01 15:19:35.230969+00:00
 - Exit fill: $29.11 @ 2026-09-01 15:33:06.594498+00:00
 - Realized P&L: $1,221.76 (+6.05%)
-- Exit reason: `unclassified` — raw: '5-day time stop reached; the position should be exited mechanically.'
+- Exit reason: `mechanical_time_stop` — raw: '5-day time stop reached; the position should be exited mechanically.'
 - Trading-day snapshots while open: 3/3 (full)
 
 | Day | Price | Unrealized P&L | Dist to stop | Dist to target |
@@ -246,7 +246,7 @@ Max daily-close P&L: $897.92 · Min daily-close P&L: $500.48
 - Entry fill: $159.36 x 127 @ 2026-09-01 15:22:56.067016+00:00
 - Exit fill: $156.73 @ 2026-09-01 15:38:30.964637+00:00
 - Realized P&L: $-334.01 (-1.65%)
-- Exit reason: `unclassified` — raw: 'The 5-day time stop has been reached, so I am closing the position mechanically instead of stretching the hold.'
+- Exit reason: `mechanical_time_stop` — raw: 'The 5-day time stop has been reached, so I am closing the position mechanically instead of stretching the hold.'
 - Trading-day snapshots while open: 3/3 (full)
 
 | Day | Price | Unrealized P&L | Dist to stop | Dist to target |
