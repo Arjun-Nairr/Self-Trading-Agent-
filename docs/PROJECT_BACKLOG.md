@@ -135,6 +135,16 @@ fixed 10-ticker watchlist universe.
     effects. Prerequisite: do not implement, alter the current fixed
     watchlist, restart training, or change rules until the frozen
     Round 2 measurement/evaluation decision (`HANDOFF.md` §10) is made.
+  - Measurable technical-strategy library. Status `discussing` / `Later`.
+    Evaluate a small number of objective swing-trading concepts (for
+    example momentum, mean reversion, breakout, relative strength, or
+    event response) as separate deterministic evidence features. Do not
+    reproduce discretionary named frameworks wholesale or add LLM chart
+    interpretation. Each feature needs a defined calculation, point-in-time
+    data, a single stated role in entry/exit judgment, and comparison against
+    the current technical baseline across the pre-committed regime suite.
+    Prerequisite: richer measurement and the evaluation-track decision; add
+    one feature at a time, not a combined strategy stack.
 
 **Locked scope boundary:** no LLM chart-pattern/graph-vision analysis
 — see Global rules.
