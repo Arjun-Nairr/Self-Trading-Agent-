@@ -114,6 +114,27 @@ fixed 10-ticker watchlist universe.
     citations/provenance are retained on every passage; retrieval is
     cut off by the simulated date (no lookahead); the agent receives
     only the retrieved evidence, never unrestricted document access.
+  - Point-in-time dynamic candidate selector. Status `discussing`. Goal:
+    replace the fixed 10-name watchlist as the *live* system's scaling
+    mechanism, without turning selection into a hidden trade signal.
+    Pipeline: broad eligible universe → deterministic low-bar selector
+    → LLM trading-agent judgment → risk checker → execution. The
+    selector only narrows attention — it must never itself judge a
+    trade good or create a buy trigger. High-recall only: eligibility,
+    liquidity, history, price, and news-coverage criteria — never
+    predictive scoring. Must run in both modes: live selects from the
+    current broader universe; backtest reproduces the identical
+    selection logic using only data available as of each simulated
+    date, and selected candidates stay alias-masked before reaching the
+    trading agent, same as today. Required safeguards before any
+    implementation: point-in-time universe membership (no survivorship
+    bias); historical `as_of` gating on every selector input; a durable
+    per-cycle record of both selected and rejected names with reasons;
+    a fixed-watchlist baseline preserved for comparison; selector impact
+    evaluated separately from trading-agent judgment and risk-rule
+    effects. Prerequisite: do not implement, alter the current fixed
+    watchlist, restart training, or change rules until the frozen
+    Round 2 measurement/evaluation decision (`HANDOFF.md` §10) is made.
 
 **Locked scope boundary:** no LLM chart-pattern/graph-vision analysis
 — see Global rules.
