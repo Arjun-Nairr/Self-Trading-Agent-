@@ -8,6 +8,11 @@
 // trading agent is profitable, live, autonomous with real money, or
 // "learning" where that has not been shown. No invented metrics or
 // completion percentages.
+//
+// Every `deferred` ("Later / gated") item ends with " — <reason>" —
+// pages/roadmap.js splits on that separator to show a short, stated
+// pause reason next to the item, per this page's own design rule that
+// nothing sits in that lane without saying why.
 
 export const ROADMAP_INTRO =
   "A concise snapshot of the six engineering areas of this project. It is a " +
@@ -35,7 +40,7 @@ export const ROADMAP_SECTORS = [
       "Audit whether past reflections measurably changed later decisions, not just that they were seen",
     ],
     deferred: [
-      "Split the rules document into always-on core rules plus optional reference material, chosen by the harness (never by the agent)",
+      "Split the rules document into always-on core rules plus optional reference material, chosen by the harness (never by the agent) — Needs the baseline to unfreeze first.",
     ],
   },
   {
@@ -51,13 +56,14 @@ export const ROADMAP_SECTORS = [
     active: [],
     next: [],
     deferred: [
-      "Company fundamentals from public filings (statements, liabilities, debt) with point-in-time filing dates",
-      "Cache-first fundamentals lookup: check stored data first, fetch only when missing or stale",
-      "Optional multi-day observation of a company before entry when there is no urgency",
-      "Defined rules for combining any future evidence source — independent corroboration required; positive sentiment alone never creates a buy",
-      "Broader, controlled opportunity screening beyond the fixed universe",
-      "Pre-fetching and caching news ahead of the decision window",
-      "RAG-backed retrieval over a large, date-gated corpus of raw filings, earnings materials and (later) news — returns the relevant passages with their sources, not a replacement for normalized financial numbers. Conditional on fundamentals ingestion existing first.",
+      "Company fundamentals from public filings (statements, liabilities, debt) with point-in-time filing dates — Needs the frozen-baseline evaluation decision first.",
+      "Cache-first fundamentals lookup: check stored data first, fetch only when missing or stale — Needs the frozen-baseline evaluation decision first.",
+      "Optional multi-day observation of a company before entry when there is no urgency — Still under discussion, not yet scoped.",
+      "Defined rules for combining any future evidence source, so positive sentiment alone can never create a buy — Waiting on a concrete proposal to add a new source.",
+      "Broader, controlled opportunity screening beyond the fixed universe — Still under discussion, not yet scoped.",
+      "Pre-fetching and caching news ahead of the decision window — Still under discussion, not yet scoped.",
+      "RAG-backed retrieval over a large, date-gated corpus of raw filings, earnings materials and later news: conditional document retrieval, not a replacement for normalized financial metrics — Needs fundamentals ingestion to exist first.",
+      "A point-in-time dynamic candidate selector to replace the fixed watchlist for live trading, narrowing attention only and never judging a trade itself — Needs the frozen-baseline evaluation decision first.",
     ],
   },
   {
@@ -76,9 +82,10 @@ export const ROADMAP_SECTORS = [
     ],
     next: [],
     deferred: [
-      "Broker-side protective (bracket / OCO) exit orders for live paper trading",
-      "Safe retry handling after an ambiguous order result, so an order is never duplicated",
-      "Partial-fill handling for live paper trading",
+      "Broker-side protective (bracket / OCO) exit orders for live paper trading — Required before live-paper activation.",
+      "Safe retry handling after an ambiguous order result, so an order is never duplicated — Required before live-paper activation.",
+      "Partial-fill handling for live paper trading — Required before live-paper activation.",
+      "A deterministic news-verification gate for new live entries, so execution fails closed on a missing or stale news check — Required before live-paper activation.",
     ],
   },
   {
@@ -96,10 +103,11 @@ export const ROADMAP_SECTORS = [
     ],
     next: [],
     deferred: [
-      "Review the current aggressive rule settings against real completed-trade evidence",
-      "Richer per-trade measurement capture during a future run",
-      "Reduce survivorship bias with point-in-time universe construction",
-      "A separate evaluation agent that reviews completed cycles and proposes improvements — advisory only, never able to rewrite rules or behavior",
+      "Review the current aggressive rule settings against real completed-trade evidence — Needs the frozen-baseline evaluation decision first.",
+      "Richer per-trade measurement capture during a future run — Needs the frozen-baseline evaluation decision first.",
+      "Reduce survivorship bias with point-in-time universe construction — Needs the frozen-baseline evaluation decision first.",
+      "A separate evaluation agent that reviews completed cycles and proposes improvements, advisory only — Still under discussion, not yet scoped.",
+      "A regime-diverse sampled evaluation suite across rallies, selloffs, and sideways markets, as a prerequisite for any future optimization — Needs the frozen-baseline evaluation decision first.",
     ],
   },
   {
@@ -117,9 +125,9 @@ export const ROADMAP_SECTORS = [
       "Preserve failure details when a run cycle fails, for diagnosis",
     ],
     deferred: [
-      "A scheduler for continuous paper trading after the training phase",
-      "Hosting the stack on an always-on machine",
-      "Hosting the dashboard separately (needs the access-control review first)",
+      "A scheduler for continuous paper trading after the training phase — Live mode has never run; needs its own design first.",
+      "Hosting the trading stack on an always-on machine — Needs a hosting, credential-handling, and persistence plan first.",
+      "Hosting the dashboard separately from the host machine — Needs the access-control review above first.",
     ],
   },
   {
@@ -141,9 +149,9 @@ export const ROADMAP_SECTORS = [
       "Decide whether Dashboard V2 replaces the original dashboard",
     ],
     deferred: [
-      "A single-trade detail view: entry to current to exit, reasoning, and invalidation condition in one place",
-      "A per-trade progress chart toward stop or target",
-      "Additional recruiter and presentation material beyond the current architecture diagram",
+      "A single-trade detail view: entry to current to exit, reasoning, and invalidation condition in one place — Needs the V2 cutover decision first.",
+      "A per-trade progress chart toward stop or target — Needs richer per-trade price data first.",
+      "Additional recruiter and presentation material beyond the current architecture diagram — Still under discussion, not yet scoped.",
     ],
   },
 ];

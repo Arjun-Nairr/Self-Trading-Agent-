@@ -174,6 +174,15 @@ that grant (verified).
     live-paper operation.
   - Broker partial-fill handling (not modeled in the current one-lot
     flow). Status `deferred`. Prerequisite: same as above.
+  - Deterministic news-verification gate for live entries. Status
+    `approved` / `Later`. Before live-paper activation, a new BUY must
+    carry an explicit successful, fresh news-fetch verification; an
+    empty-but-successful headline result is valid, but an error, missing,
+    or stale result is not. Reject only new entries when verification is
+    absent — exits remain permitted regardless of news availability.
+    Prerequisite: wire the status into the live entry-validation path,
+    not merely agent instructions. The backtest already fails closed when
+    its historical-news fetch fails.
 
 ---
 
