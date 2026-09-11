@@ -213,6 +213,31 @@ document; it is implemented.**
     proposes judgment/rule/UX/system improvements. Status `discussing`.
     Prerequisite: must use run-isolated, point-in-time evidence and
     report real sample size.
+  - Regime-diverse sampled evaluation suite. Status `discussing`. Role:
+    a *prerequisite for* Bayesian optimization, not an approved
+    experiment. Goal: replace single-window-only evaluation (today's
+    evidence is one continuous 50-day window, `docs/evaluations/
+    round2_benchmark_sensitivity.md`) with a fixed, pre-committed
+    stress suite of separate one-month backtest episodes drawn from a
+    broader historical period, testing robustness across rallies,
+    selloffs, high-volatility conditions, and sideways markets —
+    reducing the chance of optimizing to one continuous window.
+    Required design constraints before any implementation: define the
+    regime-classification and stratified sampling method *before*
+    seeing any candidate results (pure random month selection cannot
+    guarantee regime coverage); record the eligible historical range,
+    selected months, selection method, and random seed before comparing
+    configurations; reset portfolio state independently per one-month
+    episode; run every candidate configuration against the identical
+    pre-committed episode suite; keep a separate, untouched set of
+    later and regime-diverse months for final out-of-sample evaluation;
+    preserve point-in-time gating, alias masking, next-day execution,
+    and durable `training`/`smoke`/`archived` classification in every
+    episode; evaluate selector/configuration impact separately from LLM
+    trading judgment and deterministic risk-rule effects. This does not
+    approve implementation, restart training, change rules, or begin
+    Bayesian optimization — the existing `HANDOFF.md` §10 measurement/
+    evaluation decision remains the gate.
 
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.
