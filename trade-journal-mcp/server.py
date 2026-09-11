@@ -228,6 +228,7 @@ def _decision_field_mismatches(
     execution_mode: str, strategy_profile: str | None = None,
     min_reward_risk_used: float | None = None,
     proposed_entry_price: float | None = None,
+    exit_provenance: str | None = None,
 ) -> list[str]:
     """Every field that DEFINES the decision -- not only the four
     (ticker/action/quantity/order_type) the prior check compared. A genuine
@@ -260,6 +261,7 @@ def _decision_field_mismatches(
         ("strategy_profile", row["strategy_profile"] == strategy_profile),
         ("min_reward_risk_used", _num_close(row["min_reward_risk_used"], min_reward_risk_used)),
         ("proposed_entry_price", _num_close(row["proposed_entry_price"], proposed_entry_price)),
+        ("exit_provenance", row["exit_provenance"] == exit_provenance),
     ]
     return [name for name, ok in checks if not ok]
 
@@ -286,6 +288,7 @@ async def _record_decision(
     strategy_profile: str | None = None,
     min_reward_risk_used: float | None = None,
     proposed_entry_price: float | None = None,
+    exit_provenance: str | None = None,
 ) -> dict[str, Any]:
     """decision_id: optional caller-supplied id. Live Hermes never passes
     one (always gets a fresh uuid4, unchanged behavior). The backtest
@@ -315,7 +318,17 @@ async def _record_decision(
     BUY decisions only) -- persisted directly, never derived later from
     intended_notional / intended_quantity (that division is a reconstructed
     guess, not the real proposed figure). NULL for mechanical SELLs and
-    every pre-existing row."""
+    every pre-existing row.
+
+    exit_provenance (trades.exit_provenance, schema.sql migration): on a
+    SELL row, WHO/WHAT caused the exit -- 'harness_stop'/'harness_target'/
+    'harness_time_stop' (record_exit, deterministic from the harness's own
+    fixed reason string) or 'agent_requested' (record_trade/
+    record_queued_decision/this module's own record_decision tool,
+    whenever action='SELL' -- set from the row's own action, never
+    inferred from strategy_notes prose). NULL on a BUY (not applicable)
+    and on any pre-migration row (see trade_journey_report.py's
+    fingerprint-based historical reconciliation for those)."""
     _validate_decision_fields(
         action, confidence, primary_signal, expected_reward_risk,
         invalidation_condition, strategy_notes, technical_basis,
@@ -331,8 +344,8 @@ async def _record_decision(
                              strategy_notes, data_timestamps, stop_price,
                              target_price, run_id, execution_mode,
                              strategy_profile, min_reward_risk_used,
-                             proposed_entry_price)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+                             proposed_entry_price, exit_provenance)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
         ON CONFLICT (decision_id) DO NOTHING
         RETURNING *
         """,
@@ -341,7 +354,7 @@ async def _record_decision(
         expected_reward_risk, invalidation_condition, strategy_notes,
         json.dumps(_normalize_data_timestamps(data_timestamps)) if data_timestamps else None,
         stop_price, target_price, run_id, execution_mode,
-        strategy_profile, min_reward_risk_used, proposed_entry_price,
+        strategy_profile, min_reward_risk_used, proposed_entry_price, exit_provenance,
     )
     if row is None:
         # A caller-supplied decision_id that already exists -- a retry of
@@ -364,7 +377,7 @@ async def _record_decision(
             data_timestamps=data_timestamps, stop_price=stop_price, target_price=target_price,
             limit_price=limit_price, run_id=run_id, execution_mode=execution_mode,
             strategy_profile=strategy_profile, min_reward_risk_used=min_reward_risk_used,
-            proposed_entry_price=proposed_entry_price,
+            proposed_entry_price=proposed_entry_price, exit_provenance=exit_provenance,
         )
         if mismatches:
             raise ValueError(
@@ -829,6 +842,10 @@ async def record_decision(
         limit_price, technical_basis, strategy_notes, data_timestamps,
         stop_price=stop_price, target_price=target_price,
         execution_mode="alpaca",
+        # exit_provenance: set here, server-side, from the row's own
+        # action -- never a new field Hermes has to supply itself (no new
+        # LLM response field, per the schema.sql migration's own contract).
+        exit_provenance="agent_requested" if action == "SELL" else None,
     ))
 
 

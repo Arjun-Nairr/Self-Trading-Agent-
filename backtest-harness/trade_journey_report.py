@@ -24,6 +24,31 @@ same-session stop-outs with no intermediate day by construction. See
 docs/evaluations/round2_trade_journey.md's own Limitations section for
 what this does and does not let you evaluate.
 
+Provenance reconciliation (this migration): an earlier version of this
+report classified an exit as "mechanical_time_stop" purely from note
+wording (any strategy_notes prefix mentioning the time stop), which
+conflated WHO caused the exit with WHAT the note said -- 7 real
+Hermes-authored SELLs that independently checked and stated the same
+5-day time stop (AGENTS.md Step 3's own instruction to do so) got
+counted as harness-mechanical. Round 2 predates trades.exit_provenance
+(added by this same change, see trade-journal-mcp/schema.sql), so every
+historical row here is reconciled from structural evidence instead: the
+exact fingerprint record_exit() (run_backtest.py) writes on every
+mechanical exit -- confidence=None, primary_signal='other',
+invalidation_condition="n/a -- mechanical exit, not a discretionary
+decision" -- versus the fingerprint any real Hermes-authored decision
+must satisfy to have passed trade-journal-mcp/server.py's
+_validate_decision_fields (confidence 1-5, a real primary_signal).
+Reconciled Round 2 split (see classify_provenance below): 5
+harness_stop, 0 harness_target, 3 harness_time_stop, 8
+agent_requested_exit (7 of which carry a secondary "agent time-stop
+rationale" label, 1 a thesis-invalidation SELL) -- 8 mechanical + 8
+agent-requested still totals 16, matching
+docs/evaluations/round2_50cycle_evaluation_extract.md's own mechanical/
+discretionary split (6+2=8 / 7+1=8); only that brief's INTERNAL
+stop-vs-time-stop split (6/2) was wrong and is corrected there by this
+same change, on this same structural evidence.
+
 Run: python trade_journey_report.py   (writes docs/evaluations/round2_trade_journey.md)
 Test: python test_trade_journey_report.py
 """
@@ -37,32 +62,88 @@ REPO = Path(__file__).resolve().parent.parent
 RUN_ID = "e68525f9-ce89-4588-a57e-866f28cd99fd"  # completed Round 2 training run
 OUT_PATH = REPO / "docs" / "evaluations" / "round2_trade_journey.md"
 
-# Exact literal exit-reason prefixes known to mean a mechanical exit --
-# either the harness's own fixed strings (record_exit/simulate_trading_day,
-# run_backtest.py) or, for time-stops specifically, a small explicit
-# allowlist of the exact discretionary phrasings verified present in the
-# real Round 2 report (docs/evaluations/round2_trade_journey.md). An EXACT
-# prefix match against a known-good string, never fuzzy keyword matching
-# ("stop" alone proves nothing), is what keeps "mechanical_*" trustworthy.
-# Any other free-form Hermes prose is deliberately left "unclassified"
-# with its raw text preserved rather than guessed at -- extend this list
-# only by adding another exact, verified prefix, never a substring/regex.
-_MECHANICAL_PREFIXES = [
-    ("Mechanical exit: stop hit", "mechanical_stop"),
-    ("Mechanical exit: target hit", "mechanical_target"),
-    ("Mechanical exit: time stop (", "mechanical_time_stop"),
-    ("Closed because the time stop expired", "mechanical_time_stop"),
-    ("5-day time stop reached;", "mechanical_time_stop"),
-    ("The 5-day time stop has been reached", "mechanical_time_stop"),
+# A SECONDARY, informational label on an already-proven agent_requested_exit
+# -- never a category promotion. AGENTS.md Step 3 asks Hermes to check the
+# 5-day time stop itself, independently of the harness's own mechanical
+# enforcement, so a real discretionary SELL legitimately says so in its own
+# words. An EXACT prefix match against these specific, verified phrasings
+# (never fuzzy keyword matching -- "stop" alone proves nothing) is what
+# keeps this trustworthy; any other free-form Hermes prose gets no
+# secondary label, raw text still preserved either way.
+_AGENT_TIME_STOP_RATIONALE_PREFIXES = [
+    "Closed because the time stop expired",
+    "5-day time stop reached;",
+    "The 5-day time stop has been reached",
 ]
 
 
-def classify_exit_reason(notes: str | None) -> str:
+def _agent_rationale_label(notes: str | None) -> str | None:
     notes = notes or ""
-    for prefix, category in _MECHANICAL_PREFIXES:
+    for prefix in _AGENT_TIME_STOP_RATIONALE_PREFIXES:
         if notes.startswith(prefix):
-            return category
-    return "unclassified"
+            return "agent time-stop rationale"
+    return None
+
+
+def _is_harness_fingerprint(row: dict) -> bool:
+    """The exact structural marker record_exit() (run_backtest.py) writes
+    on every mechanical exit, and ONLY there -- confidence=None,
+    primary_signal='other', invalidation_condition the literal sentinel
+    string. Proof a specific code path wrote this row, not an inference
+    from prose."""
+    return (
+        row.get("confidence") is None
+        and row.get("primary_signal") == "other"
+        and (row.get("invalidation_condition") or "").startswith("n/a -- mechanical exit")
+    )
+
+
+def _is_agent_fingerprint(row: dict) -> bool:
+    """The shape every real Hermes-authored decision must satisfy to have
+    passed trade-journal-mcp/server.py's _validate_decision_fields at
+    write time -- confidence 1-5, a real primary_signal."""
+    c = row.get("confidence")
+    return c is not None and 1 <= c <= 5 and row.get("primary_signal") is not None
+
+
+def classify_provenance(exit_row: dict) -> tuple[str, str | None]:
+    """Returns (category, secondary_rationale_label). category is one of
+    harness_stop / harness_target / harness_time_stop /
+    agent_requested_exit / legacy_or_unresolved -- WHO/WHAT caused the
+    exit, proven from structural evidence, never guessed from note
+    wording alone (see the module docstring's reconciliation note).
+
+    Precedence:
+    1. A durable `exit_provenance` value already on the row (future runs,
+       written at decision time by record_exit/record_trade/
+       record_queued_decision/record_decision) is trusted directly.
+    2. Absent that -- every historical Round 2 row, migrated to
+       'legacy_unknown' -- fall back to the structural fingerprint: WHO
+       wrote the row is proven by confidence/primary_signal/
+       invalidation_condition; for a proven harness row, the literal
+       strategy_notes prefix (the same fixed string the harness itself
+       wrote) proves stop vs. target vs. time-stop.
+    3. Neither fingerprint matches: `legacy_or_unresolved`, never forced
+       into a neat count.
+    """
+    dp = exit_row.get("exit_provenance")
+    if dp in ("harness_stop", "harness_target", "harness_time_stop"):
+        return dp, None
+    if dp == "agent_requested":
+        return "agent_requested_exit", _agent_rationale_label(exit_row.get("strategy_notes"))
+
+    notes = exit_row.get("strategy_notes") or ""
+    if _is_harness_fingerprint(exit_row):
+        if notes.startswith("Mechanical exit: stop hit"):
+            return "harness_stop", None
+        if notes.startswith("Mechanical exit: target hit"):
+            return "harness_target", None
+        if notes.startswith("Mechanical exit: time stop"):
+            return "harness_time_stop", None
+        return "legacy_or_unresolved", None
+    if _is_agent_fingerprint(exit_row):
+        return "agent_requested_exit", _agent_rationale_label(notes)
+    return "legacy_or_unresolved", None
 
 
 def pair_trades(trades: list[dict]) -> list[dict]:
@@ -131,6 +212,7 @@ def build_journey(pair: dict, snapshots: list[dict]) -> dict:
     exit_price = float(exit_["fill_price"])
     pnl = (exit_price - fill_price) * fill_qty
     pnl_pct = (exit_price / fill_price - 1) * 100 if fill_price else 0.0
+    provenance, rationale_label = classify_provenance(exit_)
 
     return {
         "ticker": ticker,
@@ -142,7 +224,8 @@ def build_journey(pair: dict, snapshots: list[dict]) -> dict:
         "pnl": pnl,
         "pnl_pct": pnl_pct,
         "raw_exit_reason": exit_["strategy_notes"],
-        "exit_reason_category": classify_exit_reason(exit_["strategy_notes"]),
+        "provenance": provenance,
+        "rationale_label": rationale_label,
         "coverage": coverage,
         "expected_days": expected,
         "captured_days": captured,
@@ -171,11 +254,12 @@ def _money(v: float | None) -> str:
 
 def render_trade_section(j: dict) -> str:
     lines = [f"### {j['label']}", ""]
+    rationale_line = f" · {j['rationale_label']}" if j["rationale_label"] else ""
     lines.append(
         f"- Entry fill: {_money(j['entry_fill_price'])} x {j['entry_fill_qty']} @ {j['entry_fill_ts']}\n"
         f"- Exit fill: {_money(j['exit_fill_price'])} @ {j['exit_ts']}\n"
         f"- Realized P&L: {_money(j['pnl'])} ({j['pnl_pct']:+.2f}%)\n"
-        f"- Exit reason: `{j['exit_reason_category']}` — raw: {j['raw_exit_reason']!r}\n"
+        f"- Exit provenance: `{j['provenance']}`{rationale_line} — raw note: {j['raw_exit_reason']!r}\n"
         f"- Trading-day snapshots while open: {j['captured_days']}/{j['expected_days']} ({j['coverage']})"
     )
     lines.append("")
@@ -204,8 +288,20 @@ def render_report(run_id: str, journeys: list[dict], source: str) -> str:
     full = [j for j in journeys if j["coverage"] == "full"]
     zero = [j for j in journeys if j["coverage"] == "zero_day"]
     partial = [j for j in journeys if j["coverage"] == "partial"]
-    time_stops = [j for j in journeys if j["exit_reason_category"] == "mechanical_time_stop"]
-    ts_winning = [j for j in time_stops if j["pnl"] >= 0]
+
+    harness_stop = [j for j in journeys if j["provenance"] == "harness_stop"]
+    harness_target = [j for j in journeys if j["provenance"] == "harness_target"]
+    harness_time_stop = [j for j in journeys if j["provenance"] == "harness_time_stop"]
+    agent_exits = [j for j in journeys if j["provenance"] == "agent_requested_exit"]
+    legacy = [j for j in journeys if j["provenance"] == "legacy_or_unresolved"]
+    agent_ts_rationale = [j for j in agent_exits if j["rationale_label"] == "agent time-stop rationale"]
+
+    # Time-stop OUTCOME (in-the-money vs. underwater at exit) is reported
+    # only for the PROVEN mechanical path -- never for an agent-requested
+    # exit, even one carrying the time-stop rationale label, since that
+    # exit was the agent's own choice, not the harness's deterministic
+    # 5-day rule firing.
+    ts_winning = [j for j in harness_time_stop if j["pnl"] >= 0]
 
     out = [
         "# Round 2 per-trade journey evaluation",
@@ -226,8 +322,19 @@ def render_report(run_id: str, journeys: list[dict], source: str) -> str:
         f"- Full daily-journey coverage: {len(full)}",
         f"- Zero-day (same-session exit, no intermediate journey by construction): {len(zero)}",
         f"- Partial coverage (should not occur — flagged if it does): {len(partial)}",
-        f"- Mechanical time-stop exits: {len(time_stops)} (in-the-money at exit: {len(ts_winning)}, "
-        f"underwater: {len(time_stops) - len(ts_winning)})",
+        "",
+        "**Exit provenance** (WHO/WHAT caused the exit — see the module "
+        "docstring's reconciliation note for how historical rows are proven, "
+        "not guessed):",
+        "",
+        f"- Deterministic harness exits: {len(harness_stop) + len(harness_target) + len(harness_time_stop)} "
+        f"— `harness_stop` {len(harness_stop)}, `harness_target` {len(harness_target)}, "
+        f"`harness_time_stop` {len(harness_time_stop)} (in-the-money at exit: {len(ts_winning)}, "
+        f"underwater: {len(harness_time_stop) - len(ts_winning)})",
+        f"- Agent-requested exits: {len(agent_exits)} (of which {len(agent_ts_rationale)} carry the "
+        "secondary `agent time-stop rationale` label — the agent's own stated reason, never counted "
+        "as harness-mechanical)",
+        f"- Legacy/unresolved (provenance not provable from available evidence): {len(legacy)}",
         "",
         "## Trades",
         "",
@@ -287,6 +394,7 @@ async def _fetch_direct(run_id: str) -> tuple[list[dict], list[dict]]:
     try:
         trade_rows = await conn.fetch(
             "SELECT ticker, action, status, fill_price, fill_quantity, strategy_notes, "
+            "confidence, primary_signal, invalidation_condition, exit_provenance, "
             "created_at, updated_at FROM trades WHERE run_id=$1 ORDER BY created_at",
             run_id,
         )

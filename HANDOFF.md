@@ -238,21 +238,17 @@ Two different levels of detail exist across the 50 completed cycles —
 - **Cycles 26–50: exact masked-prompt/input/response evidence for every
   one** — `backtest_cycle_evidence` holds the verbatim rendered prompt,
   exact masked inputs, final validated response, every candidate's
-  proposed/no_proposal status, and rules-file hashes per cycle. Makes it
-  possible to audit whether the trading agent actually read what it was shown —
-  something tranche 1 cannot support.
-- Real runtime `model`/`provider`/`reasoning_effort` fields on evidence
-  rows are `NULL` for every row so far (the real trading-agent usage report has
-  never included those keys) — not a bug, will populate automatically if
-  a future trading-agent runtime reports them.
+  proposed/no_proposal status, and rules-file hashes per cycle — lets a
+  later audit check the trading agent actually read what it was shown,
+  which tranche 1 cannot support.
+- Real runtime `model`/`provider`/`reasoning_effort` fields on evidence rows are `NULL` so far (never reported by the real usage payload) — populates automatically once reported.
 
 **Evaluation status:** the full 50-cycle run has been evaluated on two
 levels. Read first: `docs/evaluations/round2_50cycle_evaluation_extract.md`
-— the active, compact brief (headline facts, labeled verified/
-interpretation/unknown). For row-level detail consult the archived raw
-reports it links to: `docs/history/evaluations/round2_50cycle_evaluation_extract_RAW.md`
-(cycles 1–50) and `..._tranche1_evaluation_extract.md` (cycles 1–25,
-narrower) — open only if the task genuinely needs that detail.
+— the active, compact brief. Row-level detail: the archived raw reports
+it links to, `docs/history/evaluations/round2_50cycle_evaluation_extract_RAW.md`
+(cycles 1–50) and `..._tranche1_evaluation_extract.md` (cycles 1–25) —
+open only if genuinely needed.
 
 **Benchmark and sensitivity pass (2026-09-05, corrected across four
 2026-09-06 passes — status current as of the fourth):**
@@ -273,12 +269,19 @@ concentration cap remains the more consequential lever
 **Verdict unchanged: improve measurement first** — not sufficient for Bayesian optimization, still unapproved.
 
 **Per-trade journey report** (offline, read-only, human-evaluation-only,
-`backtest-harness/trade_journey_report.py`): reconstructs each closed
-trade's daily price/P&L/stop-target path from data the harness already
-writes (no new capture). Round 2: 14/16 closed trades have a complete
-daily journey; the other 2 are genuine same-session stop-outs with no
-intermediate day. Explains actual five-day time-stop outcomes only —
-**not** a longer-hold or stop-distance-band counterfactual (needs re-fetched intraday bars, not just a re-read). `docs/evaluations/round2_trade_journey.md`.
+`backtest-harness/trade_journey_report.py`, `docs/evaluations/round2_trade_journey.md`):
+reconstructs each closed trade's daily price/P&L/stop-target path from
+data the harness already writes (no new capture). Round 2: 14/16 closed
+trades have a complete daily journey, the other 2 genuine same-session
+stop-outs. Explains actual five-day time-stop outcomes only — **not** a
+longer-hold or stop-distance-band counterfactual (needs re-fetched bars).
+Backs this with a durable **exit provenance** field (`trades.exit_provenance`,
+`schema.sql`) — deterministic harness exit (`harness_stop`/`harness_target`/
+`harness_time_stop`) or agent-requested, set server-side, never inferred
+from prose; pre-migration rows read `legacy_unknown`. Reconciled Round 2
+from structural evidence, not note wording: 5/0/3 harness stop/target/time-stop,
+8 agent-requested (7 with a time-stop rationale, 1 thesis-invalidation) —
+corrects `round2_50cycle_evaluation_extract.md`'s exit-reason-mix table (was 6/2, proven 5/3).
 
 ---
 
@@ -294,13 +297,10 @@ intermediate day. Explains actual five-day time-stop outcomes only —
 - **Asyncpg statement-cache fix's narrow scope** — `statement_cache_size=0`
   is only applied in `trade-journal-mcp/server.py`.
 - **No benchmark series wired into the dashboard itself** — a real,
-  offline comparison now exists (§7), but no live index-comparison line
-  in the dashboard UI.
+  offline comparison now exists (§7), but no live index-comparison line.
 - **Neon's anonymous-role exposure** — the dashboard's read role has no
-  auth beyond SELECT-only; `backtest_cycle_evidence` is excluded from
-  this grant (verified live).
-- **Per-trade (vs. per-cycle) token attribution** remains only
-  approximate.
+  auth beyond SELECT-only; `backtest_cycle_evidence` is excluded (verified live).
+- **Per-trade (vs. per-cycle) token attribution** remains only approximate.
 - **Cycles 1–25 have no exact evidence record** (see §7) — a real,
   permanent, accepted gap, not an oversight to fix later.
 - **Longer-hold/stop-distance-band counterfactuals still not
@@ -321,8 +321,8 @@ number needs to go through the user explicitly.
   temperament** — both superseded before/at Round 2's start. Archived:
   `docs/history/round2-conservative-draft/run2_prep_analysis.md`,
   `docs/history/SOUL_phase1_conservative_2026-08-30.md`.
-- **`quota_pacer.py`** — removed entirely (`750d80d`). Do not reference
-  it, `quota_pacer_state.json`, or a "weekly quota" as current.
+- **`quota_pacer.py`** — removed entirely (`750d80d`). Do not reference it,
+  `quota_pacer_state.json`, or a "weekly quota" as current.
 - **OpenCode Go + DeepSeek V4 Flash** — investigated, abandoned (a real,
   unresolved upstream hang). Locked model is still `openai-codex`/`gpt-5.4-mini`.
 - **Four Round-2 smoke-test `run_id`s** — superseded, before the real

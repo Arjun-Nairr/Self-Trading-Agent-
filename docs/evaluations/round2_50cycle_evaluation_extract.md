@@ -66,10 +66,19 @@ a new finding — raw report §2.2).
 
 ### Exit-reason mix (16 closed trades) — 🟢 Verified
 
+**Corrected 2026-09-11** (`trade_journey_report.py`'s provenance
+reconciliation, `docs/evaluations/round2_trade_journey.md`): the split
+below between mechanical stop hit / mechanical time stop was wrong in
+the original hand tally — proven from `trades.confidence`/
+`primary_signal`/`invalidation_condition`'s structural fingerprint
+(exactly what `run_backtest.py`'s `record_exit` writes vs. what a real
+Hermes decision must satisfy), not re-derived from note wording. Total
+mechanical (8) and total discretionary (8) are unaffected.
+
 | Trigger | Count |
 |---|---|
-| Mechanical stop hit | 6 |
-| Mechanical time stop | 2 |
+| Mechanical stop hit | 5 |
+| Mechanical time stop | 3 |
 | Hermes-initiated discretionary time-stop SELL | 7 |
 | Discretionary thesis-invalidation SELL | 1 |
 

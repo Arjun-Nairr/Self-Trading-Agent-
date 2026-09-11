@@ -1373,6 +1373,7 @@ async def main():
         run_id={run_id!r},
         strategy_profile={strategy_profile!r},
         min_reward_risk_used={min_reward_risk_used!r},
+        exit_provenance={("agent_requested" if decision["action"] == "SELL" else None)!r},
     )
     await _record_execution_result(
         d["decision_id"], status={fill["status"]!r},
@@ -1445,6 +1446,7 @@ async def main():
         strategy_profile={strategy_profile!r},
         min_reward_risk_used={min_reward_risk_used!r},
         proposed_entry_price={proposed_entry_price!r},
+        exit_provenance={("agent_requested" if decision["action"] == "SELL" else None)!r},
     )
 
 asyncio.run(main())
@@ -1604,6 +1606,23 @@ asyncio.run(main())
     run_in("trade-journal", script)
 
 
+def _exit_provenance_for_reason(reason: str) -> str:
+    """Deterministic trades.exit_provenance value for a MECHANICAL exit,
+    derived from the same fixed `reason` string simulate_trading_day
+    itself produces (never from a later re-read of strategy_notes) --
+    this is the write-time source of truth the trade-journey report's
+    provenance field exists to replace keyword-guessing with. Fails
+    loudly on an unrecognized reason rather than silently mislabeling
+    a future new exit kind."""
+    if reason.startswith("stop hit"):
+        return "harness_stop"
+    if reason.startswith("target hit"):
+        return "harness_target"
+    if reason.startswith("time stop"):
+        return "harness_time_stop"
+    raise ValueError(f"unrecognized mechanical exit reason, cannot derive exit_provenance: {reason!r}")
+
+
 def record_exit(real_ticker: str, quantity: int, exit_price: float, reason: str, decision_id: str,
                 run_id: str | None = None) -> str:
     """Journal a mechanical exit (stop/target/time-stop) as a real SELL row.
@@ -1646,6 +1665,7 @@ async def main():
         invalidation_condition="n/a -- mechanical exit, not a discretionary decision",
         strategy_notes={f"Mechanical exit: {reason}"!r},
         run_id={run_id!r},
+        exit_provenance={_exit_provenance_for_reason(reason)!r},
     )
     await _record_execution_result(
         d["decision_id"], status="filled",
