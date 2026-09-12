@@ -193,16 +193,43 @@ response-schema defect (`decisions` predates this milestone). Run_id
 fail-closed outcome (0 trades/evidence/snapshot rows), Round 2 restored
 and sha256-verified identical again.
 
-**Not green for a training decision** — the fundamentals-enabled path
-has still never completed one full cycle end-to-end, now for a reason
-entirely outside this milestone's own code: `RULES.md`/§3's locked model
-(`openai-codex` / `gpt-5.4-mini`) appears incompatible with the current
-Codex/ChatGPT-account auth configuration in this environment. That is a
-separate, pre-existing infrastructure/account issue for the user to
-resolve — not something this validation block's scope authorized fixing.
-**Still NOT done:** (1) live mode; (2) a fundamentals-enabled cycle
-actually completing (0/3 so far, blocked on the model/account issue
-above); (3) any training-evaluation run — frozen, unapproved.
+**Part 4 (2026-09-12, same day) — runtime-model migration, SUCCESS:**
+approved decision executed: `openai-codex` stays the provider,
+`gpt-5.4-mini` → `gpt-5.6-terra`, reasoning stays `medium`. Effective
+config confirmed to live in the PERSISTENT LOCAL gateway config
+(`~/.hermes-trading-agent/config.yaml`, `model.default`) — not
+`docker-compose.yml` (no env override there) and not any tracked file;
+no repository source-of-truth to change, so none was touched. Changed
+that one field, restarted only the `gateway` container. Cheap preflight
+(one no-tool/no-data `hermes -z` call through the real container path)
+confirmed `model: gpt-5.6-terra`, `provider: openai-codex`, a valid JSON
+reply, no HTTP/provider error — before any cycle ran.
+
+Retried the identical protected smoke procedure a third time (same
+backup/hash/isolate/restore discipline). **Run `31bd7421-42ba-43e3-
+a1cd-afb1f9d0d0d1`, classified `smoke`, completed 3/3 cycles** — the
+fundamentals-enabled path's first-ever full completion. 3 BUY proposals
+across the 3 days, every one `primary_signal: technical` with a valid
+`technical_basis`, all ultimately rejected at execution-time risk checks
+(real next-day gap/stop-distance) — 0 fills, an honest, real outcome.
+Audited: all 3 cycles have an evidence row with non-null
+`fundamentals_provenance` carrying genuine CIK/accession/source_url/
+filed_at per candidate; zero real ticker/company/CIK/accession/URL/raw
+filing date anywhere in prompt/input_payload/validated_response/
+`candidate_status`/`strategy_notes` (checked exhaustively against every
+real ticker and company name in the watchlist, not just the traded
+ones); `anonymous` still has zero grants on `backtest_cycle_evidence`.
+Round 2's local state sha256-verified identical to its pre-run backup
+again; Neon Round 2 counts (`trades` 64, `backtest_cycle_evidence` 25,
+`portfolio_snapshots` 50) unchanged.
+
+**Not yet green for a training decision** — the fundamentals-enabled
+*pipeline* now works end-to-end for the first time, but no BUY has ever
+actually filled under it (all 3 in this smoke were rejected at
+execution, not proof of a working entry path under real fills). **Still
+NOT done:** (1) live mode; (2) a fundamentals-enabled cycle with an
+actual fill (0 so far); (3) any training-evaluation run — frozen,
+unapproved pending that decision.
 
 - **Now:** none — fundamental-data *agent live-integration and any new
   training run* remain frozen/unapproved.

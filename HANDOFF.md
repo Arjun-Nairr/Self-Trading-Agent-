@@ -67,7 +67,7 @@ Two rounds so far:
 - **0 pending orders.**
 - **No `cycle_checkpoint.json` present** — every cycle through 50 is durably committed to `backtest_state.json` and Neon.
 - **Activity-escalation profile: still `aggressive_v1_base`** (min reward:risk 1.5:1) — never escalated. Current block started trading-day 40 with 4 completions so far (boundary at day 60, not yet reached).
-- **Locked model: `openai-codex` / `gpt-5.4-mini` / medium reasoning** — unchanged since Round 1; no commit since has touched gateway model config. Do not change without an explicit new decision.
+- **Round 2 itself ran entirely under `openai-codex` / `gpt-5.4-mini` / medium reasoning** — unchanged for the full 50-cycle run. The gateway's runtime model was migrated to `gpt-5.6-terra` on 2026-09-12, AFTER Round 2 completed and its state was last touched — see §6's fundamentals entry for the migration and §5 for the current locked value.
 
 **Verified via real, run-scoped Neon queries:** no duplicate `cycle_id` or
 `decision_id` anywhere in this run; exactly one `cycle_failed` activity
@@ -137,45 +137,16 @@ These do not change without an explicit new user decision. Full numbers
 and rationale live in `RULES.md`; this is the invariant list, not a
 restatement of every threshold.
 
-- **Model:** `openai-codex` / `gpt-5.4-mini` / medium reasoning (§3).
-- **`RULES.md` is the authoritative, locked rules source** — mounted
-  read-only into `gateway`, re-read every cycle. The trading agent may refine
-  judgment through reflection but may **never** loosen a limit — the one
-  approved exception is the deterministic §6b activity-escalation
-  mechanism, which is harness-controlled, never the trading agent's own choice.
-- **`risk_checker.py` enforces every numeric rule in code**, independent
-  of the model's own reasoning — pure functions, fail-closed on any
-  unknown/non-finite/non-positive value.
-- **Point-in-time masking + lookahead prevention**: masked ticker/company
-  identities (reshuffled per run), `as_of`-gated fetches, next-day queued
-  execution together guarantee a backtest decision never sees information
-  that wouldn't have existed yet.
-- **Decision-time vs. execution-time validation**: a proposal is validated
-  twice — decision-time is advisory (today's known state as a proxy);
-  execution-time (real next-day price) is the sole authority on whether a
-  trade actually happens.
+- **Model:** `openai-codex` / `gpt-5.6-terra` / medium reasoning — migrated 2026-09-12 from `gpt-5.4-mini`, which Codex stopped serving under the current ChatGPT-account auth (§6). Runtime-compatibility change only, not a strategy decision. Config lives at `~/.hermes-trading-agent/config.yaml` (`model.default`), NOT in this repo — no tracked file controls it. Round 2 ran entirely under the old model (§3).
+- **`RULES.md` is the authoritative, locked rules source** — mounted read-only into `gateway`, re-read every cycle. The trading agent may refine judgment through reflection but may **never** loosen a limit — the one approved exception is the deterministic §6b activity-escalation mechanism, which is harness-controlled, never the trading agent's own choice.
+- **`risk_checker.py` enforces every numeric rule in code**, independent of the model's own reasoning — pure functions, fail-closed on any unknown/non-finite/non-positive value.
+- **Point-in-time masking + lookahead prevention**: masked ticker/company identities (reshuffled per run), `as_of`-gated fetches, next-day queued execution together guarantee a backtest decision never sees information that wouldn't have existed yet.
+- **Decision-time vs. execution-time validation**: a proposal is validated twice — decision-time is advisory (today's known state as a proxy); execution-time (real next-day price) is the sole authority on whether a trade actually happens.
 - **One-lot model**: a discretionary SELL must close the entire position.
-- **Sentiment is a veto only, never a trigger** (§5a) — also the deliberate
-  prompt-injection defense.
-- **Hard prohibitions (§9)**: never average down; never widen/remove a
-  stop; never trade off-watchlist; never hold two open positions in the
-  same ticker; never re-enter same-day after a stop-out; never exceed any
-  cap; never loosen a limit through the trading agent's own reasoning
-  (escalation mechanism excepted, and that is harness-controlled, not the
-  trading agent deciding).
-- **Aggressive Phase 1 profile is the active rules regime** (not the
-  conservative Round-1 profile) — 2% risk/trade, 20% max position,
-  cash-only exposure with no cap on position count, 1.5:1 base / 1.25:1
-  escalated min reward:risk, 3–12% stop band, 5-trading-day time stop,
-  single −30%-drawdown circuit breaker only. Full table and the honest
-  cost of each loosened number: `docs/PHASE1_AGGRESSIVE_DESIGN.md` and
-  `RULES.md` §10.
-- **`SOUL.md` (Phase 2, active temperament)** is in sync with this
-  profile: search every eligible ticker each cycle, ordinary confidence
-  (3) is sufficient to act, a no-trade cycle is valid only when every
-  candidate has a concrete rejection reason. Honesty, evidence discipline
-  (no strategy lessons from a tiny/empty sample), and prompt-injection
-  resistance are unchanged from Round 1's temperament.
+- **Sentiment is a veto only, never a trigger** (§5a) — also the deliberate prompt-injection defense.
+- **Hard prohibitions (§9)**: never average down; never widen/remove a stop; never trade off-watchlist; never hold two open positions in the same ticker; never re-enter same-day after a stop-out; never exceed any cap; never loosen a limit through the trading agent's own reasoning (escalation mechanism excepted, and that is harness-controlled, not the trading agent deciding).
+- **Aggressive Phase 1 profile is the active rules regime** (not the conservative Round-1 profile) — 2% risk/trade, 20% max position, cash-only exposure with no cap on position count, 1.5:1 base / 1.25:1 escalated min reward:risk, 3–12% stop band, 5-trading-day time stop, single −30%-drawdown circuit breaker only. Full table and the honest cost of each loosened number: `docs/PHASE1_AGGRESSIVE_DESIGN.md` and `RULES.md` §10.
+- **`SOUL.md` (Phase 2, active temperament)** is in sync with this profile: search every eligible ticker each cycle, ordinary confidence (3) is sufficient to act, a no-trade cycle is valid only when every candidate has a concrete rejection reason. Honesty, evidence discipline (no strategy lessons from a tiny/empty sample), and prompt-injection resistance are unchanged from Round 1's temperament.
 - **`expected_reward_risk` is action-aware** (fixed 2026-09-01, `7c4ac06`):
   BUY requires finite `> 0`; SELL (or any non-BUY action) permits finite
   `>= 0` — 0.0 is the honest value for a closing decision, never
@@ -212,32 +183,38 @@ restatement of every threshold.
   (`backtest_cycle_evidence.fundamentals_provenance`, narrow nullable
   schema addition, reused from checkpoint on replay); enforced technical
   primacy (a fundamentals-enabled BUY must declare `primary_signal`
-  technical/both, `other` rejected). **Operational validation block
-  (2026-09-12, 3 attempts):** migration APPLIED, verified live on Neon
-  each time (`fundamentals_provenance` column exists; `anonymous` has
-  zero grants, boundary intact). Attempt 1 blocked: `SEC_EDGAR_USER_AGENT`
-  unset anywhere. Attempt 2 (var supplied session-only, never written to
-  `.env`; also fixed a stale `trade-journal` image predating
-  `backtest_run_registry` — rebuild, not a code edit) reached and failed
-  Day 1: `ResponseValidationError: response missing a 'decisions' list`.
-  Added a **failure-only diagnostic seam** (`ask_hermes`, local/gitignored
-  `.diagnostics/`, redacted, fires only when both attempts are exhausted —
-  see `test_execution_semantics.py`) and retried (attempt 3, `run_id
-  917cc076-85b7-4bc8-800e-811c0f47c35f`, `smoke`) — same failure, now
-  **root-caused**: the raw reply both times was `HTTP 400:
-  {"detail":"The 'gpt-5.4-mini' model is not supported when using Codex
-  with a ChatGPT account."}` — a Codex/model-account incompatibility
-  upstream of Hermes' own reasoning, **not** a fundamentals or response-
-  schema defect (`decisions` predates this milestone; the harness
-  correctly parsed and correctly rejected this reply). Every attempt
-  confirmed clean fail-closed (no state/checkpoint written, zero
-  `trades`/`backtest_cycle_evidence`/`portfolio_snapshots` rows) and
-  Round 2's local state restored + sha256-verified identical each time;
-  Neon Round 2 counts (`trades` 64, `backtest_cycle_evidence` 25,
-  `portfolio_snapshots` 50) unchanged throughout. (4) **still not done:**
-  live mode; a fundamentals-enabled cycle completing (0/3 so far —
-  blocked on the model/account issue above, unrelated to this milestone's
-  code); any training-evaluation run — frozen, unapproved.
+  technical/both, `other` rejected). **Operational validation, attempts
+  1–3 (2026-09-12):** migration APPLIED and reverified each time
+  (`anonymous` has zero grants, boundary intact). Attempts blocked/failed
+  in turn on `SEC_EDGAR_USER_AGENT` unset, then a stale `trade-journal`
+  image (rebuilt — not a code edit), then `ResponseValidationError:
+  response missing a 'decisions' list` on both attempts of a cycle — a
+  **failure-only diagnostic seam** was added to `ask_hermes` (local/
+  gitignored `.diagnostics/`, redacted, fires only when the retry path is
+  exhausted; 6 new tests) and root-caused attempt 3's identical failure as
+  `HTTP 400: {"detail":"The 'gpt-5.4-mini' model is not supported when
+  using Codex with a ChatGPT account."}` — a Codex/model-account issue,
+  not a fundamentals/schema defect. **Attempt 4 — SUCCESS (2026-09-12):**
+  runtime model migrated `gpt-5.4-mini` → `gpt-5.6-terra` (provider
+  `openai-codex`, reasoning `medium` unchanged) in the persisted gateway
+  config (`~/.hermes-trading-agent/config.yaml`, NOT part of this repo —
+  no tracked file controls it), gateway restarted alone. A no-tool/no-
+  data preflight call confirmed `model: gpt-5.6-terra` and a clean JSON
+  reply before any cycle ran. Smoke run `31bd7421-42ba-43e3-a1cd-
+  afb1f9d0d0d1` (`smoke`) completed **3/3 cycles**: 3 BUY proposals
+  (`primary_signal: technical`, `technical_basis: multiple` throughout),
+  all rejected at execution-time risk checks (gap/stop-distance), 0
+  fills. Audited and confirmed: evidence row + non-null
+  `fundamentals_provenance` (real CIK/accession/source_url/filed_at) for
+  all 3 cycles; zero real ticker/company/CIK/accession/URL/raw filing
+  date anywhere in prompt/input/response/`strategy_notes`; `anonymous`
+  still has zero grants. Every attempt (1–4) left Round 2 untouched —
+  sha256-verified identical local state each time; Neon Round 2 counts
+  (`trades` 64, `backtest_cycle_evidence` 25, `portfolio_snapshots` 50)
+  unchanged throughout. (4) **still not done:** live mode; any
+  training-evaluation run — the fundamentals-enabled *path* now works
+  end-to-end, but no BUY has ever actually filled in it (all 3 rejected
+  at execution) — frozen, unapproved pending that decision.
 
 ---
 
@@ -324,7 +301,9 @@ number needs to go through the user explicitly.
 - **`quota_pacer.py`** — removed entirely (`750d80d`). Do not reference it,
   `quota_pacer_state.json`, or a "weekly quota" as current.
 - **OpenCode Go + DeepSeek V4 Flash** — investigated, abandoned (a real,
-  unresolved upstream hang). Locked model is still `openai-codex`/`gpt-5.4-mini`.
+  unresolved upstream hang). Provider is still `openai-codex` (model
+  migrated `gpt-5.4-mini`→`gpt-5.6-terra` 2026-09-12, §5/§6 — a
+  compatibility fix, not a return to this abandoned alternative).
 - **Four Round-2 smoke-test `run_id`s** — superseded, before the real
   tranche started. **Never resume any of them.**
 - **Prior repair passes** (pre-tranche crashes/bugs) — no longer operationally
