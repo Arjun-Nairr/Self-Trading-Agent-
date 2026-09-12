@@ -25,11 +25,13 @@ from run_backtest import (
     PROFILE_BASE, PROFILE_ESCALATED, PROFILE_LEGACY, PROFILE_MIN_REWARD_RISK,
     STARTING_EQUITY, TIME_STOP_TRADING_DAYS,
     Holding, HermesResult, Portfolio, QueuedOrder, ResponseValidationError, ask_hermes,
-    PROMPT_SCHEMA_VERSION, _atomic_write_json, _candidate_status, _clear_checkpoint,
+    DIAGNOSTIC_EXCERPT_CHARS,
+    PROMPT_SCHEMA_VERSION, _atomic_write_json, _build_diagnostic_record, _candidate_status,
+    _clear_checkpoint,
     _expected_session_bar_times,
     _file_sha256, _limits_for_profile,
     _load_checkpoint, _maybe_advance_activity_block, _record_trade_completion,
-    _resolve_fundamentals_enabled,
+    _redact_diagnostic_text, _resolve_fundamentals_enabled,
     _resolve_seed, _resolve_window, _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
     build_decision_time_context, build_prompt,
     evaluate_bar_stop_target, evaluate_opening_gap, make_decision_id,
@@ -399,7 +401,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
 
     hermes_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
         hermes_calls.append(1)
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
         return HermesResult(response={
@@ -1348,7 +1350,7 @@ def test_stopped_out_today_resets_unconditionally_even_on_a_quiet_day():
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
                                "support": [95.0], "resistance": [110.0]}}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualifies today"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -2144,7 +2146,7 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
     captured_prompts = []
     queued_decision_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
         captured_prompts.append(prompt)
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
         return HermesResult(
@@ -2319,7 +2321,7 @@ def _evidence_scenario(decisions_to_propose, tmp_dir):
                            "support": [95.0], "resistance": [110.0]} for t in ("OLN", "DINO")}
     fake_news = {"OLN": [], "DINO": []}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
         return HermesResult(
             response={"decisions": decisions_to_propose,
                      "no_action_reason": "n/a" if decisions_to_propose else "nothing qualified"},
@@ -2439,6 +2441,139 @@ def test_ask_hermes_records_a_failed_first_attempt_in_retry_diagnostics():
     print("  ok  a failed first attempt is recorded in retry_diagnostics with attempt_count=2")
 
 
+def test_redact_diagnostic_text_scrubs_credential_shaped_strings():
+    """Correction pass, diagnostic seam -- generic credential/identity
+    patterns are scrubbed before anything touches disk."""
+    raw = (
+        'Authorization: Bearer sk-real-secret-abc123\n'
+        'api_key="live_1234567890"\n'
+        'postgresql://user:pw@host/db\n'
+        'User-Agent: HermesTradingAgent dwish543@gmail.com\n'
+    )
+    redacted = _redact_diagnostic_text(raw)
+    for leaked in ("sk-real-secret-abc123", "live_1234567890", "user:pw@host",
+                   "dwish543@gmail.com"):
+        assert leaked not in redacted, f"{leaked!r} leaked through redaction"
+    assert "[REDACTED]" in redacted
+    print("  ok  _redact_diagnostic_text scrubs Authorization/Bearer/api_key/"
+          "connection-string/User-Agent patterns")
+
+
+def test_build_diagnostic_record_shape_for_unparseable_and_malformed_replies():
+    """Correction pass, diagnostic seam -- exactly the requested fields,
+    nothing more; json_parse_ok distinguishes a parse failure from a
+    parseable-but-schema-invalid reply."""
+    not_json = "not even json"
+    rec1 = _build_diagnostic_record(not_json, ValueError("no JSON found"))
+    assert rec1["json_parse_ok"] is False
+    assert rec1["top_level_type"] is None
+    assert rec1["top_level_keys"] is None
+    assert rec1["reply_length"] == len(not_json)
+    assert "no JSON found" in rec1["validation_error"]
+
+    wrong_shape = json.dumps({"foo": "bar"})
+    rec2 = _build_diagnostic_record(wrong_shape, ValueError("response missing a 'decisions' list"))
+    assert rec2["json_parse_ok"] is True
+    assert rec2["top_level_type"] == "dict"
+    assert rec2["top_level_keys"] == ["foo"]
+    assert "decisions" in rec2["validation_error"]
+    assert rec2["raw_excerpt"] == wrong_shape
+    print("  ok  _build_diagnostic_record distinguishes parse failure from "
+          "parseable-but-schema-invalid, and carries only the requested fields")
+
+
+def test_ask_hermes_successful_reply_writes_no_diagnostic():
+    """Correction pass, diagnostic seam -- a clean first-try reply must
+    leave the diagnostics directory untouched."""
+    tmp_dir = Path(tempfile.mkdtemp()) / ".diagnostics"
+    good_raw = json.dumps({"decisions": [], "no_action_reason": "nothing qualified"})
+    usage = {"input_tokens": 10, "total_tokens": 10, "api_calls": 1}
+    with patch("run_backtest.DIAGNOSTICS_DIR", tmp_dir), \
+         patch("run_backtest._call_hermes", return_value=(good_raw, usage)):
+        result = ask_hermes("irrelevant prompt", {}, is_reflection_day=False,
+                            run_id="run-x", day_index=3)
+    assert result.attempt_count == 1
+    assert not tmp_dir.exists(), "no diagnostic directory/file for a successful reply"
+    print("  ok  a successful reply writes no diagnostic at all")
+
+
+def test_ask_hermes_recovering_retry_writes_no_diagnostic():
+    """A first attempt that fails but recovers on the retry has NOT
+    exhausted the retry path -- still no diagnostic written."""
+    tmp_dir = Path(tempfile.mkdtemp()) / ".diagnostics"
+    bad_raw = "not even json"
+    good_raw = json.dumps({"decisions": [], "no_action_reason": "nothing qualified"})
+    usage = {"input_tokens": 10, "total_tokens": 10, "api_calls": 1}
+    with patch("run_backtest.DIAGNOSTICS_DIR", tmp_dir), \
+         patch("run_backtest._call_hermes", side_effect=[(bad_raw, usage), (good_raw, usage)]):
+        result = ask_hermes("irrelevant prompt", {}, is_reflection_day=False,
+                            run_id="run-x", day_index=3)
+    assert result.attempt_count == 2
+    assert not tmp_dir.exists(), "a reply that recovers on retry is not 'exhausted' -- no diagnostic"
+    print("  ok  a first attempt that fails but recovers on retry writes no diagnostic")
+
+
+def test_ask_hermes_exhausted_retries_write_redacted_bounded_diagnostics_for_both_attempts():
+    """Correction pass, diagnostic seam -- the core case: two invalid
+    replies write one redacted, bounded diagnostic file per attempt,
+    named by (run_id, day_index, attempt), and the SAME original
+    exception still propagates to the caller (the cycle-halt path)."""
+    tmp_dir = Path(tempfile.mkdtemp()) / ".diagnostics"
+    bad_raw1 = "not even json, and it leaks Authorization: Bearer sk-should-not-survive"
+    bad_raw2 = json.dumps({"unexpected": "shape", "User-Agent": "HermesTradingAgent dwish543@gmail.com"})
+    usage = {"input_tokens": 10, "total_tokens": 10, "api_calls": 1}
+
+    with patch("run_backtest.DIAGNOSTICS_DIR", tmp_dir), \
+         patch("run_backtest._call_hermes", side_effect=[(bad_raw1, usage), (bad_raw2, usage)]):
+        try:
+            ask_hermes("irrelevant prompt", {}, is_reflection_day=False,
+                      run_id="run-y", day_index=7)
+            raise AssertionError("expected the exhausted retry path to raise")
+        except ResponseValidationError as exc:
+            assert "decisions" in str(exc), (
+                "the ORIGINAL exception (attempt 2's real validation error) must reach "
+                "the caller unmodified -- the cycle-halt path is completely unchanged"
+            )
+
+    written = sorted(tmp_dir.glob("run-y_day7_attempt*.json"))
+    assert len(written) == 2, f"expected one diagnostic per attempt, got {written}"
+
+    diag1 = json.loads(written[0].read_text())
+    diag2 = json.loads(written[1].read_text())
+    assert diag1["json_parse_ok"] is False, "attempt 1's raw reply never parsed as JSON"
+    assert "sk-should-not-survive" not in json.dumps(diag1), "attempt 1's diagnostic leaked a credential"
+    assert diag2["json_parse_ok"] is True
+    assert diag2["top_level_keys"] == sorted(["unexpected", "User-Agent"])
+    assert "dwish543@gmail.com" not in json.dumps(diag2), "attempt 2's diagnostic leaked an identity value"
+    assert len(diag1["raw_excerpt"]) <= DIAGNOSTIC_EXCERPT_CHARS + 50  # + redaction padding tolerance
+    print("  ok  exhausting the retry path writes one redacted, bounded diagnostic "
+          "per attempt, named by run_id/day_index/attempt, and the original exception "
+          "still reaches the cycle-halt path unmodified")
+
+
+def test_ask_hermes_diagnostic_write_failure_never_masks_the_real_exception():
+    """A diagnostic-write failure (e.g. an unwritable directory) must
+    never suppress or replace the real ResponseValidationError/
+    JSONDecodeError the cycle is about to halt on -- best-effort,
+    exactly like every other observability write in this codebase."""
+    bad_raw1 = "not even json"
+    bad_raw2 = "still not json"
+    usage = {"input_tokens": 10, "total_tokens": 10, "api_calls": 1}
+    # Point DIAGNOSTICS_DIR at a path that cannot be created (a file, not a
+    # directory, sits where the diagnostics dir would go).
+    blocking_file = Path(tempfile.mkdtemp()) / "blocked"
+    blocking_file.write_text("not a directory")
+    with patch("run_backtest.DIAGNOSTICS_DIR", blocking_file / "nested" / ".diagnostics"), \
+         patch("run_backtest._call_hermes", side_effect=[(bad_raw1, usage), (bad_raw2, usage)]):
+        try:
+            ask_hermes("irrelevant prompt", {}, is_reflection_day=False,
+                      run_id="run-z", day_index=1)
+            raise AssertionError("expected the original parse failure to still propagate")
+        except (ValueError, json.JSONDecodeError):
+            pass
+    print("  ok  a diagnostic-write failure never masks the real exception reaching cycle halt")
+
+
 def test_evidence_write_failure_then_replay_does_not_call_hermes_twice():
     """Item 6 -- an essential evidence-write failure halts the cycle,
     retains the checkpoint (now including prompt_text/input_payload/
@@ -2459,7 +2594,7 @@ def test_evidence_write_failure_then_replay_does_not_call_hermes_twice():
 
     hermes_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
         hermes_calls.append(1)
         return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualified"},
                             attempt_count=1, retry_diagnostics=[])
@@ -2544,7 +2679,7 @@ def test_checkpoint_replay_derives_candidate_status_from_the_checkpoint_not_a_fr
     # dropped) -- must have zero effect on the recorded evidence.
     only_olin_technicals = {"OLN": both_technicals["OLN"]}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualified"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -2624,7 +2759,7 @@ def test_checkpoint_replay_reuses_fundamentals_provenance_never_refetches():
     original_fundamentals = {"OLN": {"ok": True, "snapshot": _FakeSnapshot("0000073952")}}
     replay_fundamentals = {"OLN": {"ok": True, "snapshot": _FakeSnapshot("DIFFERENT-CIK")}}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "n/a"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -2684,7 +2819,7 @@ def test_active_limits_reflects_a_non_default_risklimits_instance():
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
                                "support": [95.0], "resistance": [110.0]}}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "n/a"},
                             attempt_count=1, retry_diagnostics=[])
 

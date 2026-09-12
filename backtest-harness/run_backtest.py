@@ -2675,8 +2675,98 @@ def _call_hermes(prompt: str) -> str:
     return result.stdout, usage
 
 
+# --------------------------------------------------------------------------
+# ask_hermes failure-only diagnostic seam (correction pass) -- local-only,
+# gitignored, never sent to Neon/dashboard/strategy_notes/agent prompts.
+# Fires ONLY when ask_hermes exhausts its existing two-attempt retry path
+# (both the original reply and the corrective retry failed to parse/
+# validate) -- a successful cycle, or one that recovers on the retry,
+# writes nothing here at all. Exists to let a real schema-mismatch failure
+# (like the one this correction pass responds to) be diagnosed from what
+# Hermes actually sent, without guessing from a bare exception message.
+# --------------------------------------------------------------------------
+
+DIAGNOSTICS_DIR = Path(__file__).resolve().parent / ".diagnostics"
+DIAGNOSTIC_EXCERPT_CHARS = 2000
+
+# Generic, provider-agnostic patterns -- not tied to any one credential
+# shape, since a malformed reply could in principle echo back nearly
+# anything the prompt or environment ever touched (SEC_EDGAR_USER_AGENT,
+# a Postgres connection string, an Authorization header, a bearer token).
+_DIAGNOSTIC_REDACT_PATTERNS = [
+    # Authorization/User-Agent header-shaped lines: redact the ENTIRE
+    # rest-of-line value, not just its first whitespace-delimited token
+    # (a "Bearer <token>" or "<name> <contact-email>" value is more than
+    # one token, and a first-token-only match would leave the remainder
+    # exposed).
+    (re.compile(r'(?i)(authorization["\']?\s*[:=]\s*["\']?).+'), r'\1[REDACTED]'),
+    (re.compile(r'(?i)(user-?agent["\']?\s*[:=]\s*["\']?).+'), r'\1[REDACTED]'),
+    (re.compile(r'(?i)(bearer\s+)[A-Za-z0-9._-]+'), r'\1[REDACTED]'),
+    (re.compile(r'(?i)((?:api[_-]?key|secret|token)["\']?\s*[:=]\s*["\']?)[^\s"\']+'), r'\1[REDACTED]'),
+    (re.compile(r'(?i)((?:postgres(?:ql)?|mysql|mongodb)(?:\+\w+)?://)\S+'), r'\1[REDACTED]'),
+]
+
+
+def _redact_diagnostic_text(text: str) -> str:
+    """Best-effort scrub of anything credential/identity-shaped before a
+    diagnostic ever touches disk. Deliberately generic (header names,
+    key=/token= assignments, connection-string schemes) rather than
+    matching one specific secret's exact value -- the raw reply this runs
+    against is untrusted model output, not a known-shape config file."""
+    for pattern, replacement in _DIAGNOSTIC_REDACT_PATTERNS:
+        text = pattern.sub(replacement, text)
+    return text
+
+
+def _build_diagnostic_record(raw: str, exc: Exception) -> dict:
+    """Pure -- exactly the fields requested for diagnosing a schema
+    mismatch, nothing more: no prompt text, no unbounded raw reply, no
+    run metadata beyond what the caller names the FILE with (never put
+    inside the record itself, so nothing here can drift from the
+    filename)."""
+    record = {
+        "reply_length": len(raw),
+        "json_parse_ok": False,
+        "top_level_type": None,
+        "top_level_keys": None,
+        # Redacted too, not just raw_excerpt -- json_from's own ValueError
+        # embeds a slice of the raw text in its message (see its "no JSON
+        # found in:\n{text[:500]}"), so an unredacted exception message is
+        # an equally real leak path.
+        "validation_error": _redact_diagnostic_text(str(exc)[:1000]),
+        "raw_excerpt": _redact_diagnostic_text(raw[:DIAGNOSTIC_EXCERPT_CHARS]),
+    }
+    try:
+        parsed = json_from(raw)
+        record["json_parse_ok"] = True
+        record["top_level_type"] = type(parsed).__name__
+        if isinstance(parsed, dict):
+            record["top_level_keys"] = sorted(str(k) for k in parsed.keys())
+    except (ValueError, json.JSONDecodeError):
+        pass  # json_parse_ok stays False -- exactly what it means
+    return record
+
+
+def _write_diagnostic(run_id: str | None, day_index: int | None, attempt: int, record: dict) -> None:
+    """Local-only, gitignored (see .gitignore), best-effort -- a failure
+    writing this diagnostic must NEVER mask, replace, or block the real
+    exception the cycle is about to halt on; see ask_hermes's own
+    try/except around this call. Named by (run_id, day_index, attempt) so
+    it's unambiguous which cycle/attempt a file belongs to even with
+    several failed cycles on disk at once."""
+    try:
+        DIAGNOSTICS_DIR.mkdir(parents=True, exist_ok=True)
+        run_label = run_id or "unknown-run"
+        day_label = day_index if day_index is not None else "unknown-day"
+        path = DIAGNOSTICS_DIR / f"{run_label}_day{day_label}_attempt{attempt}.json"
+        _atomic_write_json(path, record)
+    except Exception:
+        pass
+
+
 def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
-               fundamentals_enabled: bool = False) -> HermesResult:
+               fundamentals_enabled: bool = False, run_id: str | None = None,
+               day_index: int | None = None) -> HermesResult:
     """One retry on a malformed OR semantically invalid reply — a real
     failure mode, seen on the very first live cycle (an unescaped quote
     inside the reasoning text broke the whole object and cost the cycle).
@@ -2707,6 +2797,13 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
     retry_diagnostics -- purely additive observability. Retry count (still
     capped at one), validation rules, and model invocation behavior are
     completely unchanged; this only makes what already happened visible.
+
+    Correction pass (diagnostic seam): run_id/day_index are used ONLY to
+    name a local, gitignored diagnostic file if BOTH attempts fail (see
+    _write_diagnostic) -- optional and unused otherwise. Retry count,
+    fail-closed behavior, and the exact exception that reaches the caller
+    are completely unchanged; this only preserves what Hermes actually
+    sent when the retry path is genuinely exhausted.
     """
     def _accumulate(usage: dict) -> None:
         # usage.get(key, 0) only substitutes 0 for a MISSING key -- a real
@@ -2769,8 +2866,21 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
         # fail closed, exactly like the pre-existing JSON-only contract.
         # (No cycle evidence is ever written for a cycle that ends this
         # way -- evidence is recorded only for a successful cycle.)
-        response2 = json_from(raw2)
-        validate_hermes_response(response2, is_reflection_day, fundamentals_enabled=fundamentals_enabled)
+        try:
+            response2 = json_from(raw2)
+            validate_hermes_response(response2, is_reflection_day, fundamentals_enabled=fundamentals_enabled)
+        except (ValueError, json.JSONDecodeError) as exc2:
+            # Correction pass (diagnostic seam): the retry path is now
+            # genuinely exhausted -- BOTH replies were invalid. Preserve a
+            # bounded, redacted, LOCAL-ONLY record of each before the SAME
+            # exception (exc2, unmodified -- `raise` with no argument)
+            # propagates uncaught to the cycle-halt path exactly as before
+            # this seam existed. A diagnostic-write failure is swallowed
+            # inside _write_diagnostic itself and can never suppress or
+            # replace exc2.
+            _write_diagnostic(run_id, day_index, 1, _build_diagnostic_record(raw, exc))
+            _write_diagnostic(run_id, day_index, 2, _build_diagnostic_record(raw2, exc2))
+            raise
         return HermesResult(response=response2, attempt_count=2, retry_diagnostics=retry_diagnostics)
 
 
@@ -3361,7 +3471,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     else:
         try:
             hermes_result = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day,
-                                       fundamentals_enabled=fundamentals_enabled)
+                                       fundamentals_enabled=fundamentals_enabled,
+                                       run_id=run_key, day_index=day_index)
         except Exception as exc:
             # Tag with whatever real usage ask_hermes accumulated before
             # failing (a validation-retry exhaustion still burns 1-2 real

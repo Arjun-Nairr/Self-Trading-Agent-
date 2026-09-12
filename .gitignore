@@ -14,6 +14,11 @@ quota_pacer_state.json
 backtest_state.json
 cycle_checkpoint.json
 
+# ask_hermes's failure-only diagnostic seam (correction pass): bounded,
+# redacted local records of a response that exhausted the two-attempt
+# retry path -- diagnosis aid only, never Neon/dashboard/committed source.
+backtest-harness/.diagnostics/
+
 # Machine-readable raw output of the human-only offline diagnostics
 # (geometry_scan.py / counterfactual.py / benchmark_sensitivity.py) --
 # regenerate by re-running the script, never the source of truth itself
