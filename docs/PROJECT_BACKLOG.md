@@ -130,14 +130,23 @@ replay reuses the checkpointed provenance verbatim, never a fresh
 re-fetch. (3) **Technical primacy is now enforced**, not just policy
 text: when the profile is on, a BUY's `primary_signal` must be
 `technical` or `both` (`other` is rejected) — a disabled-profile response
-is completely unaffected. **Still NOT done:** (1) live mode — no tool
-design, freshness policy, or failure handling exists there yet, a
-separate future milestone; (2) any actual fundamentals-enabled backtest
-cycle — a real (even smoke) run needs Docker, unavailable in the
-implementing environment, so only pure/mocked tests ran; (3) any
-training-evaluation run using this capability — the frozen Round 2
-baseline is untouched and no new run has been started, awaiting explicit
-user approval per this milestone's own instructions.
+is completely unaffected.
+
+**Operational validation block (2026-09-12):** migration applied and
+verified live on Neon — `backtest_cycle_evidence.fundamentals_provenance`
+(JSONB, nullable) exists; the `anonymous` role has zero grants on that
+table (confirmed via `information_schema.role_table_grants`), unchanged
+protection boundary. **Smoke run NOT executed — blocked before any cycle
+ran**, per this block's own "stop, don't improvise" instruction:
+`SEC_EDGAR_USER_AGENT` is not set anywhere in this environment (checked
+shell env and `.env` — absent from both). Docker/the journal were
+otherwise fully available (all 5 required containers running,
+`execution-sim` started for this check). No smoke `run_id` was created;
+nothing was journaled. **Still NOT done:** (1) live mode; (2) any actual
+fundamentals-enabled backtest cycle, smoke or training — needs
+`SEC_EDGAR_USER_AGENT` set before this can be attempted again; (3) any
+training-evaluation run — the frozen Round 2 baseline remains untouched,
+awaiting both the blocker above and explicit user approval.
 
 - **Now:** none — fundamental-data *agent live-integration and any new
   training run* remain frozen/unapproved.

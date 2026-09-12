@@ -222,10 +222,20 @@ restatement of every threshold.
   (`backtest_cycle_evidence.fundamentals_provenance`, narrow nullable
   schema addition, reused from checkpoint on replay); enforced technical
   primacy (a fundamentals-enabled BUY must declare `primary_signal`
-  technical/both, `other` rejected); (4) **still not done:** live-mode
-  integration (separate milestone) and any actual fundamentals-enabled
-  run, smoke or training (implementation + correction pass only — no
-  cycle executed, Docker unavailable to verify; needs explicit approval).
+  technical/both, `other` rejected). **Operational validation block
+  (2026-09-12):** the migration above is now APPLIED and verified live
+  on Neon (column exists; `anonymous` role still has zero grants on
+  `backtest_cycle_evidence` — checked directly against
+  `information_schema.role_table_grants`, protection boundary intact).
+  The 3-cycle smoke run itself was **NOT executed** — blocked before any
+  cycle ran: `SEC_EDGAR_USER_AGENT` is unset in this environment (shell
+  env and `.env` both checked, absent from both); Docker/the journal
+  were otherwise fully available. No smoke `run_id` exists; nothing was
+  journaled; Round 2 was never touched (no state swap was even needed).
+  (4) **still not done:** live-mode integration (separate milestone) and
+  any actual fundamentals-enabled run, smoke or training — needs
+  `SEC_EDGAR_USER_AGENT` set before a smoke attempt can run again, then
+  explicit approval for training.
 
 ---
 
