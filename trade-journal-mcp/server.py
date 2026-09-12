@@ -395,7 +395,7 @@ def _cycle_evidence_mismatches(
     candidate_status: list[Any], attempt_count: int, retry_diagnostics: list[Any],
     prompt_schema_version: int, rules_md_sha256: str, agents_md_sha256: str,
     soul_md_sha256: str, model: str | None, provider: str | None,
-    reasoning_effort: str | None,
+    reasoning_effort: str | None, fundamentals_provenance: Any | None,
 ) -> list[str]:
     """Same discipline as _decision_field_mismatches -- every field that
     defines this cycle's evidence, so a genuine retry (identical payload)
@@ -417,6 +417,7 @@ def _cycle_evidence_mismatches(
         ("model", row["model"] == model),
         ("provider", row["provider"] == provider),
         ("reasoning_effort", row["reasoning_effort"] == reasoning_effort),
+        ("fundamentals_provenance", _json_equal(row["fundamentals_provenance"], fundamentals_provenance)),
     ]
     return [name for name, ok in checks if not ok]
 
@@ -427,7 +428,7 @@ async def _record_cycle_evidence(
     candidate_status: list[Any], attempt_count: int, retry_diagnostics: list[Any],
     prompt_schema_version: int, rules_md_sha256: str, agents_md_sha256: str,
     soul_md_sha256: str, model: str | None = None, provider: str | None = None,
-    reasoning_effort: str | None = None,
+    reasoning_effort: str | None = None, fundamentals_provenance: Any | None = None,
 ) -> dict[str, Any]:
     """One exact evidence record per successful backtest cycle -- the
     precise masked inputs Hermes was shown, the exact rendered prompt, and
@@ -447,7 +448,15 @@ async def _record_cycle_evidence(
     mapping -- prompt_text/input_payload/validated_response must already be
     masked by the caller (run_backtest.py's masking.assert_clean gate runs
     BEFORE this is ever reached); this function does not itself know or
-    check the real mapping."""
+    check the real mapping.
+
+    fundamentals_provenance is the ONE deliberate exception to that rule
+    (correction pass, requirement 2): it MAY carry the real ticker/CIK/
+    filing URL/accession number -- it is the private, non-agent-facing raw
+    SEC audit trail, not agent input, and this table is already un-granted
+    to the `anonymous` role and not RLS-enabled (see schema.sql), exactly
+    the protection this data needs. None whenever the fundamentals profile
+    is off, matching every prior row."""
     pool = await get_pool()
     row = await pool.fetchrow(
         """
@@ -455,8 +464,8 @@ async def _record_cycle_evidence(
             cycle_id, run_id, day_label, prompt_text, input_payload,
             validated_response, candidate_status, attempt_count, retry_diagnostics,
             prompt_schema_version, rules_md_sha256, agents_md_sha256, soul_md_sha256,
-            model, provider, reasoning_effort
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            model, provider, reasoning_effort, fundamentals_provenance
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
         ON CONFLICT (cycle_id) DO NOTHING
         RETURNING *
         """,
@@ -464,6 +473,7 @@ async def _record_cycle_evidence(
         json.dumps(validated_response), json.dumps(candidate_status), attempt_count,
         json.dumps(retry_diagnostics), prompt_schema_version,
         rules_md_sha256, agents_md_sha256, soul_md_sha256, model, provider, reasoning_effort,
+        json.dumps(fundamentals_provenance) if fundamentals_provenance is not None else None,
     )
     if row is None:
         row = await pool.fetchrow(
@@ -480,7 +490,7 @@ async def _record_cycle_evidence(
             retry_diagnostics=retry_diagnostics, prompt_schema_version=prompt_schema_version,
             rules_md_sha256=rules_md_sha256, agents_md_sha256=agents_md_sha256,
             soul_md_sha256=soul_md_sha256, model=model, provider=provider,
-            reasoning_effort=reasoning_effort,
+            reasoning_effort=reasoning_effort, fundamentals_provenance=fundamentals_provenance,
         )
         if mismatches:
             raise ValueError(

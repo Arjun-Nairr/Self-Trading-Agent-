@@ -19,16 +19,17 @@ fundamentals_v1_acceptance.md's follow-up integration milestone:
 Run: python test_fundamentals_integration.py
 """
 import sys
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_backtest import (                                            # noqa: E402
-    FUNDAMENTALS_METRIC_ORDER, _fundamentals_assessment_for_decision,
+    FUNDAMENTALS_METRIC_ORDER, ResponseValidationError,
+    _fundamentals_assessment_for_decision, _validate_decision_shape,
     _tag_strategy_notes, build_prompt, fetch_fundamentals,
-    fundamentals_prompt_lines, mask_fundamentals,
+    fundamentals_prompt_lines, fundamentals_provenance, mask_fundamentals,
 )
 
 FUNDAMENTALS_DIR = str(Path(__file__).resolve().parent.parent / "fundamentals")
@@ -45,6 +46,8 @@ class FakeObservation:
     period_end: str
     filed_at: str
     period_start: str | None = None
+    accession_number: str = "0000320193-26-000006"
+    source_url: str = "https://www.sec.gov/Archives/edgar/data/320193/index.htm"
 
 
 @dataclass
@@ -64,6 +67,9 @@ class FakeSnapshot:
     reason: str | None = None
     cik: str | None = "0000320193"
     entity_name: str | None = "Real Company Inc."
+
+    def to_dict(self) -> dict:
+        return asdict(self)
 
 
 def available_metric(value, period_end="2026-01-15", filed_at="2026-01-20"):
@@ -364,6 +370,96 @@ def test_build_prompt_with_fundamentals_key_present_but_disabled_still_omits_it(
                "fundamentals" not in prompt.lower())
 
 
+# ===========================================================================
+# 8. Correction pass, requirement 2 -- private per-cycle SEC provenance
+# ===========================================================================
+
+def test_fundamentals_provenance_available_retains_raw_identity_and_source():
+    snap = FakeSnapshot(
+        ticker="AAPL", as_of_date="2026-04-29", status="available",
+        metrics={"revenue": available_metric(1_000_000)},
+    )
+    prov = fundamentals_provenance("AAPL", "ALPHA", {"ok": True, "snapshot": snap})
+    check_true("the private payload keeps the real ticker", prov["ticker"] == "AAPL")
+    check_true("the private payload keeps the masked alias for correlation",
+               prov["alias"] == "ALPHA")
+    check("available is True for a genuinely available snapshot", prov["available"], True)
+    blob = repr(prov)
+    for identifying in FORBIDDEN_STRINGS:
+        check_true(f"the PRIVATE audit payload, unlike the masked prompt, DOES retain {identifying!r}",
+                   identifying in blob)
+
+
+def test_fundamentals_provenance_fetch_failure_is_explicitly_unavailable():
+    prov = fundamentals_provenance("AAPL", "ALPHA", {"ok": False, "error": "RuntimeError: boom"})
+    check("a fetch failure is explicitly represented, not silently omitted", prov["available"], False)
+    check_true("the raw fetch error is retained for audit", "boom" in prov["reason"])
+
+
+def test_fundamentals_provenance_snapshot_level_unavailable_is_explicit():
+    snap = FakeSnapshot(ticker="AAPL", as_of_date="2026-04-29", status="unavailable",
+                        reason="could not fetch SEC filing data")
+    prov = fundamentals_provenance("AAPL", "ALPHA", {"ok": True, "snapshot": snap})
+    check("a resolved-but-unavailable snapshot is explicitly represented", prov["available"], False)
+    check("the raw snapshot status is retained for audit", prov["status"], "unavailable")
+
+
+def test_fundamentals_provenance_never_reaches_mask_fundamentals_or_the_prompt():
+    # The masked block build_prompt renders comes from mask_fundamentals
+    # ONLY -- fundamentals_provenance's real-identity output must never be
+    # substitutable for it. Structural proof: mask_fundamentals's own
+    # no-identity-leak test (above) already covers its actual output; here
+    # we prove the two functions' outputs are simply different shapes, so
+    # a caller cannot pass one where the other belongs.
+    snap = FakeSnapshot(ticker="AAPL", as_of_date="2026-04-29", status="available",
+                        metrics={"revenue": available_metric(1_000_000)})
+    fetch_result = {"ok": True, "snapshot": snap}
+    masked = mask_fundamentals(fetch_result)
+    raw = fundamentals_provenance("AAPL", "ALPHA", fetch_result)
+    check_true("masked (prompt-facing) and raw (audit-only) payloads are distinct shapes",
+               set(masked) != set(raw))
+    check_true("only the raw/audit payload carries a real ticker key", "ticker" in raw and "ticker" not in masked)
+
+
+# ===========================================================================
+# 9. Correction pass, requirement 3 -- technical primacy for a
+#    fundamentals-enabled BUY
+# ===========================================================================
+
+def _buy_decision(**overrides) -> dict:
+    return {
+        "alias": "ALPHA", "action": "BUY", "quantity": 10, "entry_price": 100.0,
+        "stop_price": 95.0, "target_price": 115.0, "confidence": 3,
+        "primary_signal": "technical", "technical_basis": "rsi",
+        "invalidation_condition": "if it closes below $95", "reasoning": "clean setup",
+        "expected_reward_risk": 3.0,
+        **overrides,
+    }
+
+
+def test_fundamentals_enabled_buy_accepts_technical_or_both():
+    for signal in ("technical", "both"):
+        _validate_decision_shape(_buy_decision(primary_signal=signal), 0, fundamentals_enabled=True)
+    print("  ok  a fundamentals-enabled BUY with primary_signal technical/both is accepted")
+
+
+def test_fundamentals_enabled_buy_rejects_other():
+    try:
+        _validate_decision_shape(_buy_decision(primary_signal="other"), 0, fundamentals_enabled=True)
+        raise AssertionError("expected primary_signal='other' to be rejected when fundamentals are enabled")
+    except ResponseValidationError as exc:
+        check_true("the rejection names the technical-primacy requirement", "technical" in str(exc))
+
+
+def test_fundamentals_disabled_buy_still_accepts_other_byte_for_byte():
+    # Existing (pre-correction-pass) behavior must be completely unchanged
+    # when the profile is off -- 'other' is a legitimate answer there.
+    _validate_decision_shape(
+        _buy_decision(primary_signal="other", technical_basis=None), 0, fundamentals_enabled=False,
+    )
+    print("  ok  a disabled-profile BUY with primary_signal='other' is still accepted, unchanged")
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
@@ -372,7 +468,8 @@ def main():
     print(f"PASS: {checks} assertions -- fundamentals V1 backtest integration "
           "(as-of gating, no-identity-leak, approved-metrics-only, technical-only "
           "fallback, structural buy-requires-technicals, structured assessment "
-          "tagging, and zero-behavior-change when disabled)")
+          "tagging, zero-behavior-change when disabled, private SEC provenance, "
+          "and fundamentals-enabled technical-primacy enforcement)")
 
 
 if __name__ == "__main__":

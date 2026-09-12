@@ -471,6 +471,21 @@ CREATE TABLE IF NOT EXISTS backtest_cycle_evidence (
 CREATE INDEX IF NOT EXISTS idx_backtest_cycle_evidence_run_id ON backtest_cycle_evidence(run_id);
 
 -- ---------------------------------------------------------------------------
+-- Migration (2026-09-12) -- fundamentals V1 backtest-integration correction
+-- pass, requirement 2: a durable, non-agent-facing per-cycle audit payload
+-- linking the exact masked fundamentals block each candidate was shown to
+-- its FULL raw SEC provenance (source observations, filed dates/forms/
+-- accession numbers/URLs/CIK where present, source as_of date) -- NULL for
+-- every cycle where the fundamentals profile is off (unaffected, every
+-- prior row keeps this column NULL forever) or fundamentals-disabled runs
+-- going forward. Lives on backtest_cycle_evidence specifically because that
+-- table is ALREADY not granted to the `anonymous` role and NOT RLS-enabled
+-- (see the table's own comment above) -- the exact protection boundary this
+-- raw, unmasked data needs, reused rather than duplicated into a new table.
+-- ---------------------------------------------------------------------------
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS fundamentals_provenance JSONB;
+
+-- ---------------------------------------------------------------------------
 -- Migration (2026-09-01) -- action-aware expected_reward_risk constraint.
 --
 -- Contract mismatch found live on Round 2 tranche 2, cycle 9 (day_index=49):

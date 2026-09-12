@@ -29,6 +29,7 @@ from run_backtest import (
     _expected_session_bar_times,
     _file_sha256, _limits_for_profile,
     _load_checkpoint, _maybe_advance_activity_block, _record_trade_completion,
+    _resolve_fundamentals_enabled,
     _resolve_seed, _resolve_window, _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
     build_decision_time_context, build_prompt,
     evaluate_bar_stop_target, evaluate_opening_gap, make_decision_id,
@@ -398,7 +399,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
 
     hermes_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
         hermes_calls.append(1)
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
         return HermesResult(response={
@@ -869,6 +870,66 @@ def test_resolve_seed_resume_and_mismatch():
     print("  ok  a fresh/--reset run may establish a new seed with nothing to conflict with")
 
 
+def test_resolve_fundamentals_enabled_fresh_run():
+    """Correction pass, requirement 1 -- a fresh/--reset run has nothing
+    stored yet to conflict with; the requested flag becomes the run's
+    setting going forward."""
+    assert _resolve_fundamentals_enabled(is_resume=False, stored=None, requested=True) is True
+    assert _resolve_fundamentals_enabled(is_resume=False, stored=None, requested=None) is False
+    print("  ok  a fresh run establishes fundamentals_enabled from the requested "
+          "flag (True if passed, False -- the safe default -- if omitted)")
+
+
+def test_resolve_fundamentals_enabled_legacy_state_is_disabled():
+    """A resumed run with NO stored fundamentals_enabled key at all (a
+    legacy state file, e.g. Round 2) must behave as disabled -- an omitted
+    flag reuses that safe default, and an explicit request to enable it
+    is a conflict, not a silent upgrade."""
+    assert _resolve_fundamentals_enabled(is_resume=True, stored=None, requested=None) is False
+    print("  ok  a legacy resumed state file (no stored key) with an omitted "
+          "flag safely resolves to disabled, preserving Round 2 and every "
+          "other pre-existing run")
+    try:
+        _resolve_fundamentals_enabled(is_resume=True, stored=None, requested=True)
+        raise AssertionError("expected --enable-fundamentals on a legacy resume to fail closed")
+    except SystemExit as exc:
+        assert "conflicts" in str(exc)
+    print("  ok  --enable-fundamentals on a legacy (no stored key) resume fails "
+          "closed instead of silently turning fundamentals on mid-run")
+
+
+def test_resolve_fundamentals_enabled_matching_resume():
+    """Passing back the SAME value the run already has stored (enabled or
+    disabled) is a no-op, not a conflict."""
+    assert _resolve_fundamentals_enabled(is_resume=True, stored=True, requested=True) is True
+    assert _resolve_fundamentals_enabled(is_resume=True, stored=False, requested=None) is False
+    print("  ok  a resume whose requested flag matches the stored setting "
+          "(or omits it) reuses that setting without error")
+
+
+def test_resolve_fundamentals_enabled_omitted_flag_resume():
+    """Support an omitted flag on resume by reusing the stored setting --
+    both directions (previously enabled, previously disabled)."""
+    assert _resolve_fundamentals_enabled(is_resume=True, stored=True, requested=None) is True
+    assert _resolve_fundamentals_enabled(is_resume=True, stored=False, requested=None) is False
+    print("  ok  an omitted --enable-fundamentals on resume reuses the stored "
+          "setting exactly, whichever it is")
+
+
+def test_resolve_fundamentals_enabled_conflicting_resume_fails_closed():
+    """A resumed run whose stored setting is DISABLED but the caller
+    explicitly requests enabling it must fail BEFORE any fetch, prompt,
+    journal write, or state mutation -- never silently flip what Hermes is
+    shown for a run already in progress."""
+    try:
+        _resolve_fundamentals_enabled(is_resume=True, stored=False, requested=True)
+        raise AssertionError("expected a conflicting resume request to fail closed")
+    except SystemExit as exc:
+        assert "conflicts" in str(exc) and "disabled" in str(exc)
+    print("  ok  requesting --enable-fundamentals on a resume stored as "
+          "disabled fails loudly, naming the stored setting")
+
+
 def test_missing_required_intraday_data_fails_closed():
     """A ticker that's held or has a pending order but has NO intraday
     bars at all -- or is missing a required boundary bar -- must raise,
@@ -1287,7 +1348,7 @@ def test_stopped_out_today_resets_unconditionally_even_on_a_quiet_day():
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
                                "support": [95.0], "resistance": [110.0]}}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
         return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualifies today"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -2083,7 +2144,7 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
     captured_prompts = []
     queued_decision_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
         captured_prompts.append(prompt)
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
         return HermesResult(
@@ -2258,7 +2319,7 @@ def _evidence_scenario(decisions_to_propose, tmp_dir):
                            "support": [95.0], "resistance": [110.0]} for t in ("OLN", "DINO")}
     fake_news = {"OLN": [], "DINO": []}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
         return HermesResult(
             response={"decisions": decisions_to_propose,
                      "no_action_reason": "n/a" if decisions_to_propose else "nothing qualified"},
@@ -2398,7 +2459,7 @@ def test_evidence_write_failure_then_replay_does_not_call_hermes_twice():
 
     hermes_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
         hermes_calls.append(1)
         return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualified"},
                             attempt_count=1, retry_diagnostics=[])
@@ -2483,7 +2544,7 @@ def test_checkpoint_replay_derives_candidate_status_from_the_checkpoint_not_a_fr
     # dropped) -- must have zero effect on the recorded evidence.
     only_olin_technicals = {"OLN": both_technicals["OLN"]}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
         return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualified"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -2532,6 +2593,80 @@ def test_checkpoint_replay_derives_candidate_status_from_the_checkpoint_not_a_fr
           "and the fresh vs. replayed evidence payloads are byte-identical")
 
 
+def test_checkpoint_replay_reuses_fundamentals_provenance_never_refetches():
+    """Correction pass, requirement 2 -- a checkpoint replay's private
+    per-cycle SEC audit payload must come from the CHECKPOINTED
+    provenance, never a freshly re-fetched (and potentially different)
+    snapshot. Mirrors test_checkpoint_replay_derives_candidate_status_
+    from_the_checkpoint_not_a_fresh_fetch's own pattern (deliberately
+    different replay-time fetch results, proving the replay is immune)."""
+    tmp_dir = Path(tempfile.mkdtemp())
+    run_start = date(2026, 2, 17)
+    run_key = str(uuid.uuid4())
+    watchlist = [{"symbol": "OLN", "sector": "Chemicals"}]
+    masking = RunMasking({"OLN": ["Olin Corporation", "Olin"]}, run_start=run_start,
+                         seed=DEFAULT_MASKING_SEED)
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
+    fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
+    fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
+                               "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
+                               "support": [95.0], "resistance": [110.0]}}
+
+    class _FakeSnapshot:
+        def __init__(self, cik):
+            self.status = "available"
+            self.metrics = {}
+            self._cik = cik
+
+        def to_dict(self):
+            return {"cik": self._cik}
+
+    original_fundamentals = {"OLN": {"ok": True, "snapshot": _FakeSnapshot("0000073952")}}
+    replay_fundamentals = {"OLN": {"ok": True, "snapshot": _FakeSnapshot("DIFFERENT-CIK")}}
+
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
+        return HermesResult(response={"decisions": [], "no_action_reason": "n/a"},
+                            attempt_count=1, retry_diagnostics=[])
+
+    evidence_calls = []
+
+    def fake_record_cycle_evidence(**kwargs):
+        evidence_calls.append(kwargs)
+        if len(evidence_calls) == 1:
+            raise RuntimeError("simulated evidence-write failure")
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
+         patch("run_backtest.fetch_news", return_value={"OLN": []}), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.fetch_fundamentals", return_value=original_fundamentals), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_cycle_evidence", side_effect=fake_record_cycle_evidence):
+        try:
+            run_day(run_start, 0, portfolio, masking, watchlist, {}, run_key, fundamentals_enabled=True)
+            raise AssertionError("expected the simulated evidence-write failure to propagate")
+        except RuntimeError:
+            pass
+
+        # Replay -- now with a DIFFERENTLY-mocked fetch_fundamentals result.
+        with patch("run_backtest.fetch_fundamentals", return_value=replay_fundamentals):
+            run_day(run_start, 0, portfolio, masking, watchlist, {}, run_key, fundamentals_enabled=True)
+
+    assert len(evidence_calls) == 2
+    original, replay = evidence_calls
+    assert original["fundamentals_provenance"] is not None
+    assert replay["fundamentals_provenance"] == original["fundamentals_provenance"], (
+        "the replay's private audit payload must be byte-identical to the original "
+        "attempt's -- reused from the checkpoint, never recomputed from a fresh fetch"
+    )
+    assert replay["fundamentals_provenance"][0]["snapshot"]["cik"] == "0000073952", (
+        "the replay must NOT pick up the differently-mocked replay-time fetch"
+    )
+    print("  ok  checkpoint replay reuses the checkpointed fundamentals provenance "
+          "verbatim, never a freshly (and differently) re-fetched SEC snapshot")
+
+
 def test_active_limits_reflects_a_non_default_risklimits_instance():
     """Gap fix 2 -- input_payload["active_limits"] must reflect the ACTUAL
     RiskLimits instance passed to build_prompt, not a hard-coded default --
@@ -2549,7 +2684,7 @@ def test_active_limits_reflects_a_non_default_risklimits_instance():
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
                                "support": [95.0], "resistance": [110.0]}}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False):
         return HermesResult(response={"decisions": [], "no_action_reason": "n/a"},
                             attempt_count=1, retry_diagnostics=[])
 

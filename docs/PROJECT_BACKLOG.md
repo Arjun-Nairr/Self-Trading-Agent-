@@ -109,14 +109,35 @@ technical-only) is embedded as a fixed, harness-controlled
 `[fundamentals:...]` prefix on the existing `trades.strategy_notes`
 column — no Neon schema change this milestone. Full masked
 prompt/input/response evidence is preserved via the existing
-`backtest_cycle_evidence` path, unchanged. **Still NOT done:** (1) live
-mode — no tool design, freshness policy, or failure handling exists
-there yet, a separate future milestone; (2) any actual
-fundamentals-enabled backtest cycle — a real (even smoke) run needs
-Docker, unavailable in the implementing environment, so only pure/mocked
-tests ran; (3) any training-evaluation run using this capability — the
-frozen Round 2 baseline is untouched and no new run has been started,
-awaiting explicit user approval per this milestone's own instructions.
+`backtest_cycle_evidence` path, unchanged.
+
+**Correction pass** (2026-09-12, same file): three experiment-integrity
+gaps closed before any real cycle runs. (1) The fundamentals profile is
+now a **durable per-run invariant**, persisted in `backtest_state.json`
+(`fundamentals_enabled`) and enforced by `_resolve_fundamentals_enabled` —
+a resume reuses its stored setting, a legacy state file with no stored
+key (Round 2 included) safely resolves to disabled, and a conflicting
+`--enable-fundamentals` on resume fails closed before any fetch/prompt/
+journal write. (2) A new **private, non-agent-facing audit column**
+(`backtest_cycle_evidence.fundamentals_provenance`, narrow schema change —
+`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, nullable, no data migrated)
+retains the full raw SEC provenance (CIK, entity name, per-metric
+filed_at/form/accession_number/source_url) per candidate per cycle,
+linked by alias to the masked candidate — that table is already
+un-granted to the `anonymous` role and not RLS-enabled, so this reuses
+its existing protection boundary rather than a new one; a checkpoint
+replay reuses the checkpointed provenance verbatim, never a fresh
+re-fetch. (3) **Technical primacy is now enforced**, not just policy
+text: when the profile is on, a BUY's `primary_signal` must be
+`technical` or `both` (`other` is rejected) — a disabled-profile response
+is completely unaffected. **Still NOT done:** (1) live mode — no tool
+design, freshness policy, or failure handling exists there yet, a
+separate future milestone; (2) any actual fundamentals-enabled backtest
+cycle — a real (even smoke) run needs Docker, unavailable in the
+implementing environment, so only pure/mocked tests ran; (3) any
+training-evaluation run using this capability — the frozen Round 2
+baseline is untouched and no new run has been started, awaiting explicit
+user approval per this milestone's own instructions.
 
 - **Now:** none — fundamental-data *agent live-integration and any new
   training run* remain frozen/unapproved.

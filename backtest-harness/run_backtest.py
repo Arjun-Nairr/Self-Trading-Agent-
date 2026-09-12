@@ -1085,6 +1085,49 @@ def _resolve_window(
     return stored_start, stored_end
 
 
+def _resolve_fundamentals_enabled(is_resume: bool, stored: bool | None, requested: bool | None) -> bool:
+    """Correction pass, requirement 1 -- durable per-run fundamentals
+    invariant, mirroring _resolve_seed/_resolve_window's own style and
+    fail-closed discipline (never a fetch, prompt, journal write, or state
+    mutation before this decides).
+
+    `stored` is whatever backtest_state.json currently has under
+    "fundamentals_enabled" (None if the key/file is absent). `requested` is
+    args.enable_fundamentals -- None when the flag was omitted, True when
+    passed (argparse's own store_true default is overridden to None in
+    build_arg_parser specifically so "omitted" can be told apart from "the
+    stored value happens to be False").
+
+      - Fresh run (not a resume, including --reset): nothing stored yet to
+        conflict with -- the requested flag (None/omitted == off, the safe
+        default) becomes this run's fundamentals setting going forward.
+      - Resumed run, no stored value at all (a legacy state file written
+        before this field existed): MUST behave as fundamentals-disabled --
+        this is what keeps Round 2 (and every other pre-existing run)
+        byte-identical on resume even if --enable-fundamentals is passed by
+        mistake, hence the conflict check below rather than silently
+        reusing whatever was requested.
+      - Resumed run, omitted flag (requested is None): reuse the stored
+        (possibly legacy-defaulted-False) setting exactly.
+      - Resumed run, requested value differs from the effective stored
+        value: fail loudly, BEFORE any fetch/prompt/journal write/state
+        mutation -- never silently flip what Hermes is shown mid-run."""
+    if not is_resume:
+        return bool(requested)
+    effective_stored = bool(stored) if stored is not None else False
+    if requested is None or requested == effective_stored:
+        return effective_stored
+    raise SystemExit(
+        f"--enable-fundamentals conflicts with this run's stored fundamentals "
+        f"profile ({'enabled' if effective_stored else 'disabled'}"
+        f"{' -- legacy state, no stored setting' if stored is None else ''}) in "
+        f"{STATE_PATH.name} -- a resumed run must reuse its stored fundamentals "
+        "setting; changing it mid-run would silently alter what Hermes is shown "
+        "for decisions already journaled under the old setting. Use --reset to "
+        "start a genuinely new run instead."
+    )
+
+
 def _atomic_write_json(path: Path, data: dict) -> None:
     """Write-to-temp-then-atomic-rename. A process killed mid-write (exactly
     the failure mode this whole repair is about) must never leave
@@ -1146,7 +1189,8 @@ def _load_checkpoint(run_id: str, day_index: int) -> dict | None:
 def _save_checkpoint(run_id: str, day_index: int, response: dict, usage: dict,
                      prompt_text: str | None = None, input_payload: dict | None = None,
                      attempt_count: int | None = None,
-                     retry_diagnostics: list | None = None) -> None:
+                     retry_diagnostics: list | None = None,
+                     fundamentals_provenance: list | None = None) -> None:
     """Atomic (see _atomic_write_json) -- a crash mid-write must never
     leave a half-written checkpoint that a retry could partially trust.
 
@@ -1168,6 +1212,8 @@ def _save_checkpoint(run_id: str, day_index: int, response: dict, usage: dict,
         data["attempt_count"] = attempt_count
     if retry_diagnostics is not None:
         data["retry_diagnostics"] = retry_diagnostics
+    if fundamentals_provenance is not None:
+        data["fundamentals_provenance"] = fundamentals_provenance
     _atomic_write_json(CHECKPOINT_PATH, data)
 
 
@@ -1432,6 +1478,30 @@ def mask_fundamentals(fetch_result: dict) -> dict:
     return {"available": True, "reason": None, "filing_age_days": filing_age_days, "metrics": metrics}
 
 
+def fundamentals_provenance(ticker: str, alias: str, fetch_result: dict) -> dict:
+    """Correction pass, requirement 2 -- the FULL, unmasked SEC provenance
+    for one candidate's fundamentals fetch this cycle: real ticker, alias
+    (for correlation with the masked candidate), and -- when available --
+    the exact snapshot get_fundamentals_snapshot returned (CIK, entity
+    name, and every metric's raw Observation: filed_at/form/
+    accession_number/source_url), via the snapshot's own to_dict().
+
+    PRIVATE AUDIT PAYLOAD ONLY (see record_cycle_evidence's
+    fundamentals_provenance column, backtest_cycle_evidence -- deliberately
+    NOT granted to the `anonymous` role and NOT RLS-enabled, same as the
+    rest of that table; see schema.sql). Never passed to build_prompt,
+    mask_fundamentals, or anything else agent-facing -- mask_fundamentals
+    remains the ONLY thing Hermes' prompt is built from. No secrets: SEC
+    EDGAR data is public filing metadata, not a credential."""
+    if not fetch_result.get("ok"):
+        return {"ticker": ticker, "alias": alias, "available": False, "reason": fetch_result.get("error")}
+    snap = fetch_result["snapshot"]
+    if snap.status != "available":
+        return {"ticker": ticker, "alias": alias, "available": False, "reason": snap.reason,
+                "status": snap.status}
+    return {"ticker": ticker, "alias": alias, "available": True, "snapshot": snap.to_dict()}
+
+
 def _fundamentals_assessment_for_decision(decision: dict, fundamentals_block: dict | None,
                                           fundamentals_enabled: bool) -> str | None:
     """The deterministic fundamentals-use value for one decision --
@@ -1651,7 +1721,8 @@ def record_cycle_evidence(cycle_id: str, run_id: str, day_label: str, prompt_tex
                           retry_diagnostics: list, rules_md_sha256: str,
                           agents_md_sha256: str, soul_md_sha256: str,
                           model: str | None = None, provider: str | None = None,
-                          reasoning_effort: str | None = None) -> None:
+                          reasoning_effort: str | None = None,
+                          fundamentals_provenance: list | None = None) -> None:
     """One exact evidence record per successful backtest cycle -- see
     _record_cycle_evidence's own docstring in trade-journal-mcp/server.py
     for the full idempotency/collision contract (same discipline as
@@ -1663,7 +1734,16 @@ def record_cycle_evidence(cycle_id: str, run_id: str, day_label: str, prompt_tex
     failure here propagates uncaught -- the cycle halts, the checkpoint
     (which by then already holds prompt_text/input_payload/response/
     attempt_count/retry_diagnostics) survives, and a rerun replays this
-    exact evidence write without calling Hermes again."""
+    exact evidence write without calling Hermes again.
+
+    fundamentals_provenance (correction pass, requirement 2): the FULL,
+    unmasked per-candidate SEC provenance for this cycle (see
+    fundamentals_provenance()'s own docstring) -- None whenever the
+    fundamentals profile is off (unaffected, matching every prior run).
+    Reused verbatim from the checkpoint on a replay, exactly like
+    prompt_text/input_payload, so a rerun's private audit trail is never
+    recomputed from a freshly re-fetched (and potentially different)
+    SEC snapshot."""
     script = f'''
 import asyncio
 from server import _record_cycle_evidence
@@ -1678,6 +1758,7 @@ async def main():
         rules_md_sha256={rules_md_sha256!r}, agents_md_sha256={agents_md_sha256!r},
         soul_md_sha256={soul_md_sha256!r}, model={model!r}, provider={provider!r},
         reasoning_effort={reasoning_effort!r},
+        fundamentals_provenance={fundamentals_provenance!r},
     )
 
 asyncio.run(main())
@@ -2170,7 +2251,7 @@ _VALID_PRIMARY_SIGNALS = {"technical", "sentiment", "both", "other"}
 _VALID_TECHNICAL_BASES = {"rsi", "macd", "support_resistance", "trend", "multiple", "other"}
 
 
-def _validate_decision_shape(d: dict, i: int) -> None:
+def _validate_decision_shape(d: dict, i: int, fundamentals_enabled: bool = False) -> None:
     """One decision object from the 'decisions' list. Mirrors trade-
     journal-mcp's own _validate_decision_fields (same rules -- BUY can
     never be primary_signal='sentiment', 'other' needs an explanation) plus
@@ -2178,7 +2259,20 @@ def _validate_decision_shape(d: dict, i: int) -> None:
     pipeline that ever sees Hermes' own proposed stop/target/entry
     together with its self-reported expected_reward_risk, so this is the
     only place that can catch a self-report that doesn't match its own
-    trade's math."""
+    trade's math.
+
+    fundamentals_enabled (correction pass, requirement 3): False (the
+    default) reproduces every prior rule byte-for-byte -- old technical/
+    news-only responses are never retroactively rejected. When True, a BUY
+    additionally must declare primary_signal 'technical' or 'both' --
+    'other' (and 'sentiment', already rejected above unconditionally) are
+    no longer acceptable for a BUY. The "technicals did not error" gate
+    that already decides candidate eligibility (run_day's candidate-
+    construction loop) proves a valid setup EXISTED; it says nothing about
+    what Hermes actually based ITS decision on, which is exactly what this
+    closes -- RULES.md's locked policy that technical evidence remains the
+    primary entry basis and fundamentals can never independently justify a
+    BUY, enforced structurally rather than trusted from reasoning prose."""
     prefix = f"decision[{i}]"
     if not isinstance(d, dict):
         raise ResponseValidationError(f"{prefix}: not a JSON object")
@@ -2224,6 +2318,20 @@ def _validate_decision_shape(d: dict, i: int) -> None:
     if needs_basis and technical_basis not in _VALID_TECHNICAL_BASES:
         raise ResponseValidationError(
             f"{tag}: technical_basis required when primary_signal={primary_signal!r}, got {technical_basis!r}"
+        )
+
+    # Correction pass, requirement 3: technical primacy for a fundamentals-
+    # enabled BUY. Only reachable for action=="BUY" (SELL never even builds
+    # a fundamentals block -- fundamentals never drive an exit); a no-op
+    # when the profile is off, so every existing disabled-profile response
+    # stays byte-for-byte accepted.
+    if fundamentals_enabled and action == "BUY" and primary_signal not in ("technical", "both"):
+        raise ResponseValidationError(
+            f"{tag}: fundamentals profile is enabled -- a BUY must declare "
+            f"primary_signal 'technical' or 'both' with a valid technical_basis "
+            f"(technical evidence remains the primary entry basis; fundamentals "
+            f"are contextual only and can never independently justify a BUY), "
+            f"got primary_signal={primary_signal!r}"
         )
 
     invalidation = d.get("invalidation_condition")
@@ -2280,10 +2388,12 @@ def _validate_decision_shape(d: dict, i: int) -> None:
         )
 
 
-def validate_hermes_response(response, is_reflection_day: bool) -> None:
+def validate_hermes_response(response, is_reflection_day: bool, fundamentals_enabled: bool = False) -> None:
     """Raises ResponseValidationError naming exactly what's wrong; callers
     (ask_hermes) get one corrective retry, then fail closed -- same
-    contract as a JSON parse failure."""
+    contract as a JSON parse failure. fundamentals_enabled: see
+    _validate_decision_shape -- default False keeps every existing caller
+    (and every disabled-profile response) unaffected."""
     if not isinstance(response, dict):
         raise ResponseValidationError("response is not a JSON object")
 
@@ -2299,7 +2409,7 @@ def validate_hermes_response(response, is_reflection_day: bool) -> None:
             )
 
     for i, d in enumerate(decisions):
-        _validate_decision_shape(d, i)
+        _validate_decision_shape(d, i, fundamentals_enabled=fundamentals_enabled)
 
     if is_reflection_day:
         reflection = response.get("reflection")
@@ -2565,7 +2675,8 @@ def _call_hermes(prompt: str) -> str:
     return result.stdout, usage
 
 
-def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False) -> HermesResult:
+def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
+               fundamentals_enabled: bool = False) -> HermesResult:
     """One retry on a malformed OR semantically invalid reply — a real
     failure mode, seen on the very first live cycle (an unescaped quote
     inside the reasoning text broke the whole object and cost the cycle).
@@ -2634,7 +2745,7 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False)
     _accumulate(usage)
     try:
         response = json_from(raw)
-        validate_hermes_response(response, is_reflection_day)
+        validate_hermes_response(response, is_reflection_day, fundamentals_enabled=fundamentals_enabled)
         return HermesResult(response=response, attempt_count=1, retry_diagnostics=[])
     except (ValueError, json.JSONDecodeError) as exc:
         # error_message bounded to 500 chars -- the same message a raised
@@ -2659,7 +2770,7 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False)
         # (No cycle evidence is ever written for a cycle that ends this
         # way -- evidence is recorded only for a successful cycle.)
         response2 = json_from(raw2)
-        validate_hermes_response(response2, is_reflection_day)
+        validate_hermes_response(response2, is_reflection_day, fundamentals_enabled=fundamentals_enabled)
         return HermesResult(response=response2, attempt_count=2, retry_diagnostics=retry_diagnostics)
 
 
@@ -3126,6 +3237,18 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             candidate["fundamentals"] = mask_fundamentals(fundamentals_raw[ticker])
         candidates.append(candidate)
 
+    # Correction pass, requirement 2: the FULL, unmasked per-candidate SEC
+    # provenance for this cycle's private audit trail -- see
+    # fundamentals_provenance()'s own docstring. None (unaffected) when the
+    # profile is off, matching every prior run. Computed from the SAME
+    # fundamentals_raw/masking.alias the candidates above used, so it's
+    # trivially linkable to a masked candidate by alias -- never a second,
+    # independently-fetched source.
+    fundamentals_provenance_payload = (
+        [fundamentals_provenance(t, masking.alias(t), fundamentals_raw[t]) for t in fundamentals_raw]
+        if fundamentals_enabled else None
+    )
+
     positions_view = [{
         "alias": masking.alias(t),
         "quantity": h.quantity, "entry_price": h.entry_price,
@@ -3226,11 +3349,19 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         input_payload = checkpoint.get("input_payload", input_payload)
         attempt_count = checkpoint.get("attempt_count", 1)
         retry_diagnostics = checkpoint.get("retry_diagnostics", [])
+        # Requirement 2: reuse the checkpointed private audit payload too --
+        # a replay must never write freshly re-fetched SEC provenance (this
+        # attempt's own `fundamentals_provenance_payload` above is fetched
+        # again for other reasons but discarded here, same treatment
+        # prompt/input_payload already get).
+        fundamentals_provenance_payload = checkpoint.get(
+            "fundamentals_provenance", fundamentals_provenance_payload)
         print(f"  REPLAYING checkpointed response for day_index={day_index} "
               "-- no new Hermes call")
     else:
         try:
-            hermes_result = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day)
+            hermes_result = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day,
+                                       fundamentals_enabled=fundamentals_enabled)
         except Exception as exc:
             # Tag with whatever real usage ask_hermes accumulated before
             # failing (a validation-retry exhaustion still burns 1-2 real
@@ -3254,7 +3385,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         # or recompute anything to reproduce it exactly.
         _save_checkpoint(run_key, day_index, response, summary["usage"],
                          prompt_text=prompt, input_payload=input_payload,
-                         attempt_count=attempt_count, retry_diagnostics=retry_diagnostics)
+                         attempt_count=attempt_count, retry_diagnostics=retry_diagnostics,
+                         fundamentals_provenance=fundamentals_provenance_payload)
 
     # -- ESSENTIAL: persist this cycle's exact evidence (2026-08-31) ------
     # Structural only -- an eligible candidate is 'proposed' iff its alias
@@ -3287,6 +3419,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         model=usage_for_evidence.get("model"),
         provider=usage_for_evidence.get("provider"),
         reasoning_effort=usage_for_evidence.get("reasoning_effort"),
+        fundamentals_provenance=fundamentals_provenance_payload,
     )
 
     summary["no_action_reason"] = response.get("no_action_reason", "")
@@ -3581,11 +3714,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # to before this flag existed. See run_day/build_prompt's own
     # fundamentals_enabled docstrings for the full contextual-evidence-
     # only policy this flag turns on.
-    parser.add_argument("--enable-fundamentals", action="store_true",
+    # default=None (not the usual store_true False) -- same reasoning as
+    # --seed above: a resumed run must be able to tell "the flag was
+    # omitted" apart from "the stored setting happens to be False", so an
+    # omitted flag can safely reuse the stored fundamentals profile instead
+    # of always reading as an explicit "off" request. See
+    # _resolve_fundamentals_enabled (correction pass, requirement 1).
+    parser.add_argument("--enable-fundamentals", action="store_true", default=None,
                         help="Backtest-only V1 milestone: attach a compact, masked "
                              "SEC EDGAR fundamentals summary to each entry candidate "
                              "as contextual evidence (never a hard veto, never an "
-                             "independent buy trigger). Default off.")
+                             "independent buy trigger). Default off. A RESUMED run "
+                             "must reuse its stored fundamentals profile (see "
+                             "backtest_state.json's 'fundamentals_enabled' field) -- "
+                             "passing a conflicting value fails closed instead of "
+                             "silently changing what Hermes is shown mid-run.")
     return parser
 
 
@@ -3686,7 +3829,14 @@ def main() -> None:
         start_str, end_str = _resolve_window(
             state.get("start"), state.get("end"), args.start, args.end,
         )
-        print(f"resuming from {cursor} (run_id={run_id}, seed={seed})")
+        # Correction pass, requirement 1: the fundamentals profile is a
+        # durable per-run invariant, same discipline as seed/window --
+        # resolved here, BEFORE any fetch/prompt/journal write/state
+        # mutation below. See _resolve_fundamentals_enabled.
+        fundamentals_enabled = _resolve_fundamentals_enabled(
+            True, state.get("fundamentals_enabled"), args.enable_fundamentals)
+        print(f"resuming from {cursor} (run_id={run_id}, seed={seed}, "
+              f"fundamentals={'enabled' if fundamentals_enabled else 'disabled'})")
     else:
         # A reset (or a genuinely fresh state file) may establish a new
         # window/seed -- there is nothing stored yet to conflict with.
@@ -3694,6 +3844,7 @@ def main() -> None:
         portfolio, cursor = Portfolio(), date.fromisoformat(start_str)
         run_id = None  # generated below
         seed = _resolve_seed(None, args.seed)
+        fundamentals_enabled = _resolve_fundamentals_enabled(False, None, args.enable_fundamentals)
 
     start = date.fromisoformat(start_str)
     names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
@@ -3763,7 +3914,7 @@ def main() -> None:
         todays_limits_ctx = _limits_for_profile(portfolio.profile_level)
         result, halted = _run_cycle_or_halt(
             lambda: run_day(cursor, day_index, portfolio, masking, watchlist, todays_limits_ctx, run_key,
-                            fundamentals_enabled=args.enable_fundamentals),
+                            fundamentals_enabled=fundamentals_enabled),
             day_label=masking.day_index(cursor),
             run_id=run_id,
         )
@@ -3803,7 +3954,8 @@ def main() -> None:
         _atomic_write_json(
             STATE_PATH,
             {"portfolio": portfolio.to_dict(), "cursor": str(cursor + timedelta(days=1)),
-             "run_id": run_id, "seed": seed, "start": start_str, "end": end_str},
+             "run_id": run_id, "seed": seed, "start": start_str, "end": end_str,
+             "fundamentals_enabled": fundamentals_enabled},
         )
         # Only NOW -- the atomic local-state commit for this exact cycle
         # has actually succeeded -- is this cycle's checkpoint (if any) no

@@ -196,34 +196,14 @@ restatement of every threshold.
 
 ## 6. What is implemented
 
-- **Full backtest harness**: chronological intraday simulation (opening
-  gap → time-stops → queued SELLs at 09:30 → first-bar stop/target →
-  queued BUYs at 09:45, re-validated against 09:45-known marks only →
-  bar-by-bar walk for the rest of the session), real 15-minute Alpaca
-  bars, real 5bps `execution-sim-mcp` slippage, deterministic
-  `decision_id`/`cycle_id` (safe retry, no double-journaling), a durable
-  per-cycle checkpoint, essential-vs-best-effort write ordering.
-- **Deterministic activity-escalation mechanism** (`run_backtest.py`):
-  20-trading-day blocks, ≥5 completed trades keeps the base tier,
-  otherwise the next block escalates to 1.25:1 — permanent once
-  triggered, harness-controlled, never a trade count shown to the trading agent.
-- **Risk checker** (`risk-checker/risk_checker.py`): pure, deterministic,
-  fail-closed enforcement of every `RULES.md` numeric rule, shared by live
-  and backtest.
-- **Point-in-time masking** (`backtest-harness/anonymize.py`): reshuffled
-  ticker/company aliases per run, verified leak-free against real
-  headline text (`test_anonymize.py`).
-- **Trade journal** (`trade-journal-mcp/`): idempotent decision/execution
-  recording with full field-mismatch detection on any `decision_id`
-  collision; run/mode isolation enforced at both write and read boundaries.
-- **Per-cycle evidence instrumentation** (`backtest_cycle_evidence` table,
-  added `bfb16fe`, hardened `af0921d`) — see §7.
-- **Dashboard**: local-only, read-only against Neon's Data API, real
-  token/retry/rejection counts, per-run scoping, mobile-responsive.
-- **Offline diagnostics** (not drafts, executable, human-only, never
-  wired into the live path): `geometry_scan.py` / `counterfactual.py`
-  (justified the Round-1→Round-2 rule changes) and
-  `benchmark_sensitivity.py` (§7's benchmark/sensitivity report).
+- **Full backtest harness**: chronological intraday simulation (opening gap → time-stops → queued SELLs at 09:30 → first-bar stop/target → queued BUYs at 09:45, re-validated against 09:45-known marks only → bar-by-bar walk for the rest of the session), real 15-minute Alpaca bars, real 5bps `execution-sim-mcp` slippage, deterministic `decision_id`/`cycle_id` (safe retry, no double-journaling), a durable per-cycle checkpoint, essential-vs-best-effort write ordering.
+- **Deterministic activity-escalation mechanism** (`run_backtest.py`): 20-trading-day blocks, ≥5 completed trades keeps the base tier, otherwise the next block escalates to 1.25:1 — permanent once triggered, harness-controlled, never a trade count shown to the trading agent.
+- **Risk checker** (`risk-checker/risk_checker.py`): pure, deterministic, fail-closed enforcement of every `RULES.md` numeric rule, shared by live and backtest.
+- **Point-in-time masking** (`backtest-harness/anonymize.py`): reshuffled ticker/company aliases per run, verified leak-free against real headline text (`test_anonymize.py`).
+- **Trade journal** (`trade-journal-mcp/`): idempotent decision/execution recording with full field-mismatch detection on any `decision_id` collision; run/mode isolation enforced at both write and read boundaries.
+- **Per-cycle evidence instrumentation** (`backtest_cycle_evidence` table, added `bfb16fe`, hardened `af0921d`) — see §7.
+- **Dashboard**: local-only, read-only against Neon's Data API, real token/retry/rejection counts, per-run scoping, mobile-responsive.
+- **Offline diagnostics** (not drafts, executable, human-only, never wired into the live path): `geometry_scan.py` / `counterfactual.py` (justified the Round-1→Round-2 rule changes) and `benchmark_sensitivity.py` (§7's benchmark/sensitivity report).
 - **SEC EDGAR Fundamentals V1** (`fundamentals/`, 2026-09-12) — four
   distinct states, do not conflate: (1) **data foundation** —
   `get_fundamentals_snapshot(ticker, as_of_date)`, CIK resolution,
@@ -231,14 +211,21 @@ restatement of every threshold.
   normalization, full provenance; (2) **accepted** for integration
   design (`docs/evaluations/fundamentals_v1_acceptance.md`: WMG/AAPL/JPM/BABA
   live, 0 provenance/as-of violations); (3) **backtest-only integration
-  implemented** — `run_backtest.py --enable-fundamentals` (opt-in,
-  default off, zero effect on any existing/default run including
-  preserved Round 2), contextual evidence only, never an independent
-  buy trigger or a mandatory veto (`AGENTS.md`); (4) **still not done:**
-  live-mode integration (separate future milestone) and any actual
-  fundamentals-enabled run, smoke or training (implementation only —
-  no cycle executed, Docker unavailable to verify; needs explicit
-  approval to start).
+  implemented, then correction-pass hardened (2026-09-12)** —
+  `run_backtest.py --enable-fundamentals` (opt-in, default off, zero
+  effect on any existing/default run incl. preserved Round 2), contextual
+  evidence only, never an independent buy trigger or mandatory veto
+  (`AGENTS.md`). Correction pass added: a durable per-run invariant
+  (`_resolve_fundamentals_enabled`, persisted in `backtest_state.json`,
+  fails closed on a resume conflict, legacy state defaults disabled); a
+  private non-agent-facing raw-SEC-provenance audit column
+  (`backtest_cycle_evidence.fundamentals_provenance`, narrow nullable
+  schema addition, reused from checkpoint on replay); enforced technical
+  primacy (a fundamentals-enabled BUY must declare `primary_signal`
+  technical/both, `other` rejected); (4) **still not done:** live-mode
+  integration (separate milestone) and any actual fundamentals-enabled
+  run, smoke or training (implementation + correction pass only — no
+  cycle executed, Docker unavailable to verify; needs explicit approval).
 
 ---
 
