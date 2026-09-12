@@ -60,24 +60,14 @@ Two rounds so far:
 **Active run:** `run_id e68525f9-ce89-4588-a57e-866f28cd99fd`, window
 2026-02-17 → 2026-08-14, seed 42.
 
-- **50 completed trading cycles** (`trading_days_elapsed` = 50). Cursor
-  now `2026-04-29`.
+- **50 completed trading cycles** (`trading_days_elapsed` = 50). Cursor now `2026-04-29`.
 - **Equity: $103,696.08 — total return +3.70%.** Cash $83,111.53.
-- **16 closed trades total** across the run — full evaluation (all 50
-  cycles, tranche comparison, data-adequacy verdict) is in
-  `docs/evaluations/round2_50cycle_evaluation_extract.md`, the active
-  compact evaluation brief — see §10.
-- **1 open position: WMG**, 721 shares @ $28.20, stop $27.00 / target
-  $31.54, entered trading-day 50.
+- **16 closed trades total** across the run — full evaluation (all 50 cycles, tranche comparison, data-adequacy verdict) is in `docs/evaluations/round2_50cycle_evaluation_extract.md`, the active compact evaluation brief — see §10.
+- **1 open position: WMG**, 721 shares @ $28.20, stop $27.00 / target $31.54, entered trading-day 50.
 - **0 pending orders.**
-- **No `cycle_checkpoint.json` present** — every cycle through 50 is
-  durably committed to `backtest_state.json` and Neon.
-- **Activity-escalation profile: still `aggressive_v1_base`** (min
-  reward:risk 1.5:1) — never escalated. Current block started trading-day
-  40 with 4 completions so far (boundary at day 60, not yet reached).
-- **Locked model: `openai-codex` / `gpt-5.4-mini` / medium reasoning** —
-  unchanged since Round 1; no commit since has touched gateway model
-  config. Do not change without an explicit new decision.
+- **No `cycle_checkpoint.json` present** — every cycle through 50 is durably committed to `backtest_state.json` and Neon.
+- **Activity-escalation profile: still `aggressive_v1_base`** (min reward:risk 1.5:1) — never escalated. Current block started trading-day 40 with 4 completions so far (boundary at day 60, not yet reached).
+- **Locked model: `openai-codex` / `gpt-5.4-mini` / medium reasoning** — unchanged since Round 1; no commit since has touched gateway model config. Do not change without an explicit new decision.
 
 **Verified via real, run-scoped Neon queries:** no duplicate `cycle_id` or
 `decision_id` anywhere in this run; exactly one `cycle_failed` activity
@@ -223,19 +213,28 @@ restatement of every threshold.
   schema addition, reused from checkpoint on replay); enforced technical
   primacy (a fundamentals-enabled BUY must declare `primary_signal`
   technical/both, `other` rejected). **Operational validation block
-  (2026-09-12):** the migration above is now APPLIED and verified live
-  on Neon (column exists; `anonymous` role still has zero grants on
-  `backtest_cycle_evidence` — checked directly against
-  `information_schema.role_table_grants`, protection boundary intact).
-  The 3-cycle smoke run itself was **NOT executed** — blocked before any
-  cycle ran: `SEC_EDGAR_USER_AGENT` is unset in this environment (shell
-  env and `.env` both checked, absent from both); Docker/the journal
-  were otherwise fully available. No smoke `run_id` exists; nothing was
-  journaled; Round 2 was never touched (no state swap was even needed).
-  (4) **still not done:** live-mode integration (separate milestone) and
-  any actual fundamentals-enabled run, smoke or training — needs
-  `SEC_EDGAR_USER_AGENT` set before a smoke attempt can run again, then
-  explicit approval for training.
+  (2026-09-12):** migration APPLIED, verified twice live on Neon (column
+  exists; `anonymous` has zero grants on `backtest_cycle_evidence`,
+  boundary intact). First attempt blocked: `SEC_EDGAR_USER_AGENT` unset
+  anywhere. Second attempt same day: variable supplied for that session
+  only (shell env, never written to `.env`). Fixed one infra defect along
+  the way (not a fundamentals edit) — `trade-journal`'s image predated
+  the `backtest_run_registry` migration (`ImportError: '_register_run'`),
+  rebuilt via `docker compose build`/`up -d` (already-committed code);
+  would've blocked any fresh run, not just fundamentals. Smoke run
+  `c5987cda-71f1-4585-85c7-c885817fe187`, classified `smoke`, then
+  **Day 1 of 3 failed and halted**: `ResponseValidationError: response
+  missing a 'decisions' list` — Hermes' real reply didn't match the
+  schema, original attempt and its one retry both. Clean fail-closed
+  confirmed: no state/checkpoint written, zero `trades`/
+  `backtest_cycle_evidence`/`portfolio_snapshots` rows for that run_id
+  (only its registry row + one `cycle_failed` activity row). Not a
+  fundamentals-code defect (`decisions` predates this milestone). Round
+  2's local state restored, sha256-verified identical to its pre-run
+  backup; Neon Round 2 counts (`trades` 64, `backtest_cycle_evidence` 25,
+  `portfolio_snapshots` 50) unchanged. (4) **still not done:** live mode;
+  a fundamentals-enabled cycle actually completing (0/3 so far); any
+  training-evaluation run — frozen, unapproved.
 
 ---
 

@@ -132,21 +132,44 @@ text: when the profile is on, a BUY's `primary_signal` must be
 `technical` or `both` (`other` is rejected) — a disabled-profile response
 is completely unaffected.
 
-**Operational validation block (2026-09-12):** migration applied and
-verified live on Neon — `backtest_cycle_evidence.fundamentals_provenance`
+**Operational validation block, part 1 (2026-09-12):** migration applied
+and verified live on Neon — `backtest_cycle_evidence.fundamentals_provenance`
 (JSONB, nullable) exists; the `anonymous` role has zero grants on that
 table (confirmed via `information_schema.role_table_grants`), unchanged
-protection boundary. **Smoke run NOT executed — blocked before any cycle
-ran**, per this block's own "stop, don't improvise" instruction:
-`SEC_EDGAR_USER_AGENT` is not set anywhere in this environment (checked
-shell env and `.env` — absent from both). Docker/the journal were
-otherwise fully available (all 5 required containers running,
-`execution-sim` started for this check). No smoke `run_id` was created;
-nothing was journaled. **Still NOT done:** (1) live mode; (2) any actual
-fundamentals-enabled backtest cycle, smoke or training — needs
-`SEC_EDGAR_USER_AGENT` set before this can be attempted again; (3) any
-training-evaluation run — the frozen Round 2 baseline remains untouched,
-awaiting both the blocker above and explicit user approval.
+protection boundary. Smoke run not executed that session — blocked by
+`SEC_EDGAR_USER_AGENT` unset anywhere in the environment.
+
+**Part 2 (2026-09-12, same day):** `SEC_EDGAR_USER_AGENT` supplied for
+this session only (shell env, never written to `.env` — confirmed via
+`git status`/grep before and after). Migration reconfirmed unchanged.
+Round 2's local state backed up (sha256-hashed) and isolated (moved, not
+deleted — no `--reset` used) before the run. **Infra defect found and
+fixed (not a fundamentals-milestone code change):** the running
+`trade-journal` container's image was built 2026-08-30, predating the
+`backtest_run_registry` migration — `register_run()` failed with
+`ImportError: cannot import name '_register_run'`. Rebuilt via
+`docker compose build trade-journal && docker compose up -d
+trade-journal` (picks up already-committed `server.py`, not a code
+edit) — this would have blocked **any** fresh backtest run, fundamentals
+or not, and stays fixed going forward. One smoke run then executed:
+`run_id c5987cda-71f1-4585-85c7-c885817fe187`, classified `smoke`.
+**Day 1 of 3 failed and the run halted** — `ResponseValidationError:
+response missing a 'decisions' list` (Hermes' real reply didn't match
+the required schema across both the original attempt and its one
+retry). Confirmed clean failure: no `backtest_state.json`/checkpoint
+written, zero `trades`/`backtest_cycle_evidence`/`portfolio_snapshots`
+rows for this run_id (only the run's registry classification and one
+`cycle_failed` activity row exist). Not a defect in the fundamentals
+integration or correction-pass code — `decisions` predates this
+milestone entirely; most likely a single bad/truncated model reply.
+Round 2's state restored immediately after and its sha256 hash verified
+identical to the pre-run backup; Neon Round 2 row counts (`trades` 64,
+`backtest_cycle_evidence` 25, `portfolio_snapshots` 50) unchanged.
+**Not green for a training decision** — the fundamentals-enabled path
+has still never completed even one full cycle end-to-end; needs a
+successful smoke run first. **Still NOT done:** (1) live mode; (2) a
+fundamentals-enabled cycle actually completing (0/3 so far); (3) any
+training-evaluation run — frozen, unapproved.
 
 - **Now:** none — fundamental-data *agent live-integration and any new
   training run* remain frozen/unapproved.
