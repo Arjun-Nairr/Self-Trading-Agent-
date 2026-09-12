@@ -34,3 +34,8 @@ scratchpad/
 # Local Obsidian vault state, created when the repository root is opened
 # as a vault -- machine-specific, not project source
 /.obsidian/
+
+# fundamentals/'s SQLite response cache -- a runtime data cache of raw
+# SEC JSON, regenerated on demand from the SEC's own public endpoints,
+# never the source of truth itself
+fundamentals/.cache/

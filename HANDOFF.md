@@ -224,6 +224,10 @@ restatement of every threshold.
   wired into the live path): `geometry_scan.py` / `counterfactual.py`
   (justified the Round-1→Round-2 rule changes) and
   `benchmark_sensitivity.py` (§7's benchmark/sensitivity report).
+- **SEC EDGAR Fundamentals V1 data foundation** (`fundamentals/`, 2026-09-12):
+  `get_fundamentals_snapshot(ticker, as_of_date)` — CIK resolution, cached/
+  rate-limited SEC fetch, point-in-time-safe US-GAAP normalization, full
+  provenance. **Not yet injected into agent reasoning or trading.**
 
 ---
 
@@ -296,16 +300,13 @@ corrects `round2_50cycle_evaluation_extract.md`'s exit-reason-mix table (was 6/2
   inside the exact backtest window.
 - **Asyncpg statement-cache fix's narrow scope** — `statement_cache_size=0`
   is only applied in `trade-journal-mcp/server.py`.
-- **No benchmark series wired into the dashboard itself** — a real,
-  offline comparison now exists (§7), but no live index-comparison line.
-- **Neon's anonymous-role exposure** — the dashboard's read role has no
-  auth beyond SELECT-only; `backtest_cycle_evidence` is excluded (verified live).
+- **No benchmark series wired into the dashboard** — an offline comparison exists (§7), no live index-comparison line.
+- **Neon's anonymous-role exposure** — read-only, SELECT-only; `backtest_cycle_evidence` excluded (verified live).
 - **Per-trade (vs. per-cycle) token attribution** remains only approximate.
-- **Cycles 1–25 have no exact evidence record** (see §7) — a real,
-  permanent, accepted gap, not an oversight to fix later.
-- **Longer-hold/stop-distance-band counterfactuals still not
-  mechanically identifiable** — §7's journey report explains actual
-  time-stop outcomes only; needs re-fetched intraday bars, not a re-read.
+- **Cycles 1–25 have no exact evidence record** (see §7) — a real, permanent, accepted gap, not an oversight to fix later.
+- **Longer-hold/stop-distance-band counterfactuals still not mechanically
+  identifiable** — §7's journey report explains actual time-stop outcomes
+  only; needs re-fetched intraday bars, not a re-read.
 
 **Ground rule:** `RULES.md`'s hard limits are not up for negotiation via
 "better performance" arguments alone. Any proposed change to a hard
@@ -327,9 +328,8 @@ number needs to go through the user explicitly.
   unresolved upstream hang). Locked model is still `openai-codex`/`gpt-5.4-mini`.
 - **Four Round-2 smoke-test `run_id`s** — superseded, before the real
   tranche started. **Never resume any of them.**
-- **Prior repair passes** (pre-tranche crashes/bugs) — no longer
-  operationally relevant. Full narrative, if ever needed:
-  `docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md`,
+- **Prior repair passes** (pre-tranche crashes/bugs) — no longer operationally
+  relevant. Full narrative: `docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md`,
   `docs/history/HANDOFF_FULL_2026-08-28.md`.
 
 ---

@@ -18,8 +18,12 @@ user decision before Claude Code changes files.
 
 - **Round 2 baseline is frozen.** No casual training runs, no
   `RULES.md`/`AGENTS.md`/`SOUL.md`/model changes, no Bayesian
-  optimization, no fundamental-data implementation — until the
-  measurement/evaluation-track decision (`HANDOFF.md` §10) is made.
+  optimization, no fundamental-data *agent integration or trading-behavior
+  change* — until the measurement/evaluation-track decision (`HANDOFF.md`
+  §10) is made. (A standalone, offline SEC EDGAR data-foundation module
+  was implemented 2026-09-12, `fundamentals/` — §2 below — explicitly
+  scoped to never touch the trading path; the freeze on injecting it
+  into agent reasoning stands.)
 - **Dashboard V2 is deployed** (Cloudflare Pages, `mobile-test` preview
   branch) for manual mobile feedback. Only real phone issues found
   during that testing should reopen dashboard work — not new features.
@@ -73,19 +77,35 @@ ever letting a new source become a disguised buy trigger.
 **Implemented:** technicals (`maverick-mcp`: RSI/MACD/trend/support-
 resistance) as entry evidence; news (`google-news-rss-mcp`/backtest
 historical) as a negative veto/exit signal only, never standalone;
-fixed 10-ticker watchlist universe.
+fixed 10-ticker watchlist universe. **SEC EDGAR Fundamentals V1 data
+foundation** (`fundamentals/`, 2026-09-12): `get_fundamentals_snapshot(ticker, as_of_date)`
+resolves ticker→CIK, fetches/caches SEC submissions + company-facts
+(SQLite cache, gitignored, standard-library HTTP client, required
+`SEC_EDGAR_USER_AGENT`, ≤5 req/s, bounded retries), and returns
+point-in-time-safe, provenance-carrying revenue/net income/operating
+cash flow/cash/total debt/current-assets-liabilities plus derived YoY
+growth/net margin/current ratio — only when comparable source periods
+exist, never a custom-tag guess. Validation CLI only
+(`python fundamentals/edgar.py --ticker X --as-of YYYY-MM-DD`); see
+`fundamentals/README.md`. **This is data-foundation only** — not yet
+called from `run_backtest.py`, not referenced in `AGENTS.md`, no
+dashboard page, no MCP tool. The frozen baseline is unaffected: no
+`RULES.md`/`AGENTS.md`/`SOUL.md` change, no run touched.
 
-- **Now:** none — fundamental-data work explicitly frozen.
+- **Now:** none — fundamental-data *agent integration* remains frozen.
 - **Soon:** none.
 - **Later:**
-  - SEC EDGAR fundamentals ingestion. Status `approved` (tool
-    direction only). Prerequisite: baseline unfreezes; point-in-time
-    filing dates, normalization, rate-limit handling still need design
-    approval.
-  - Cache-first, on-demand fundamentals router (check stored data
-    first, fetch only when missing/stale). Status `approved` (direction
-    only). Prerequisite: freshness policy + identity mapping + durable
-    storage design still needs approval.
+  - Inject SEC EDGAR fundamentals into the trading agent's own
+    reasoning (prompt evidence, veto/strengthen role per the Scope
+    boundaries in `docs/research/sec_edgar_v1_data_design.md` — never
+    an independent buy trigger). Status `approved` (direction only).
+    Prerequisite: baseline unfreezes; the V1 foundation's output is
+    reviewed against known filings first (§10 next step below).
+  - Cache-first, on-demand fundamentals router wired into a real
+    trading cycle (check stored data first, fetch only when
+    missing/stale). Status `approved` (direction only). Prerequisite:
+    freshness policy + baseline unfreezes — the V1 foundation's own
+    cache already covers "check stored data first" at the module level.
   - Fundamental observation period before entry (let the agent watch a
     company across days when urgency is low). Status `discussing`.
     Prerequisite: must not become a blanket waiting rule that
@@ -96,6 +116,15 @@ fixed 10-ticker watchlist universe.
     sentiment alone — from any source, alone or combined — can never
     create a buy. Status `deferred`. Prerequisite: a concrete proposal
     to add a new source. See `docs/DISCUSSION_QUEUE.md` #4.
+  - Candidate-level rejection provenance. Status `discussing` / `Later`.
+    Record why each evaluated candidate was not proposed, using a small
+    structured taxonomy rather than free-text-only activity. This must
+    distinguish an adverse-news veto (and the evidence it relied on) from
+    technical no-setup, invalid geometry, unavailable news, and
+    deterministic risk rejection, so source effects can be measured rather
+    than inferred from prose. Prerequisite: design it alongside the first
+    new evidence source; do not retrofit it as another isolated logging
+    feature or alter current entry behavior.
   - Reuse Maverick for broader dynamic screening. Status `discussing`.
     Prerequisite: confirm its real screener fields + point-in-time
     behavior before designing around it.
