@@ -281,7 +281,7 @@ Backs this with a durable **exit provenance** field (`trades.exit_provenance`,
 from prose; pre-migration rows read `legacy_unknown`. Reconciled Round 2
 from structural evidence, not note wording: 5/0/3 harness stop/target/time-stop,
 8 agent-requested (7 with a time-stop rationale, 1 thesis-invalidation) —
-corrects `round2_50cycle_evaluation_extract.md`'s exit-reason-mix table (was 6/2, proven 5/3).
+corrects `round2_50cycle_evaluation_extract.md`'s exit-reason-mix table (was 6/2, proven 5/3). Migration re-verified live on Neon 2026-09-12: column, constraint, and all 16 `legacy_unknown` backfill rows confirmed present, no other row touched.
 
 ---
 
