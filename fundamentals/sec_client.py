@@ -13,12 +13,14 @@ test_sec_client.py / test_edgar.py patches `urllib.request.urlopen`
 (never `_http_get` itself), so caching/rate-limiting/retry logic is
 exercised for real -- nothing here is mocked away.
 """
+import gzip
 import json
 import os
 import sqlite3
 import time
 import urllib.error
 import urllib.request
+import zlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -144,14 +146,67 @@ class SecClient:
 
     def _http_get(self, url: str) -> dict:
         """The one real network call -- tests patch urllib.request.urlopen,
-        not this method, so everything around it stays real."""
+        not this method, so everything around it stays real. We advertise
+        Accept-Encoding: gzip, deflate (SEC's own endpoints compress by
+        default), so the response body must be decoded per its own
+        Content-Encoding before it can ever reach json.loads -- passing
+        compressed bytes straight to json.loads is exactly the bug this
+        method exists to prevent (raw gzip bytes look like invalid UTF-8,
+        not invalid JSON)."""
         request = urllib.request.Request(url, headers={
             "User-Agent": self.user_agent,
             "Accept-Encoding": "gzip, deflate",
         })
         with urllib.request.urlopen(request, timeout=15) as response:
             raw = response.read()
-        return json.loads(raw)
+            content_encoding = response.headers.get("Content-Encoding", "")
+        body = self._decode_body(url, raw, content_encoding)
+        try:
+            return json.loads(body)
+        except json.JSONDecodeError as e:
+            raise SecFetchError(
+                f"SEC response for {url} was not valid JSON after decoding "
+                f"(Content-Encoding={content_encoding!r}): {e}"
+            ) from e
+
+    @staticmethod
+    def _decode_body(url: str, raw: bytes, content_encoding: str) -> bytes:
+        """Decompresses `raw` per its declared Content-Encoding. Supports
+        gzip, deflate, and uncompressed/identity (including a missing
+        header, which HTTP treats as identity). An unsupported encoding
+        or a body that fails to decompress under its declared encoding
+        raises SecFetchError naming the URL and encoding -- never a raw
+        decoding traceback (UnicodeDecodeError/OSError/zlib.error)
+        escaping to a caller."""
+        encoding = (content_encoding or "identity").strip().lower()
+        if encoding in ("", "identity"):
+            return raw
+        if encoding == "gzip":
+            try:
+                return gzip.decompress(raw)
+            except OSError as e:
+                raise SecFetchError(
+                    f"SEC response for {url} declared Content-Encoding=gzip "
+                    f"but the body could not be decompressed: {e}"
+                ) from e
+        if encoding == "deflate":
+            # HTTP's "deflate" is ambiguous in the wild: most servers send a
+            # zlib-wrapped stream (RFC 1950), some send raw DEFLATE (RFC
+            # 1951, no header). Try the standard form first, fall back to
+            # raw before giving up.
+            try:
+                return zlib.decompress(raw)
+            except zlib.error:
+                try:
+                    return zlib.decompress(raw, -zlib.MAX_WBITS)
+                except zlib.error as e:
+                    raise SecFetchError(
+                        f"SEC response for {url} declared Content-Encoding=deflate "
+                        f"but the body could not be decompressed: {e}"
+                    ) from e
+        raise SecFetchError(
+            f"SEC response for {url} used an unsupported Content-Encoding: {content_encoding!r}"
+        )
 
     def get_json(self, url: str, use_cache: bool = True) -> dict:
         """Cache-first read of one SEC JSON endpoint. Only 429/5xx/raw
