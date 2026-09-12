@@ -228,6 +228,9 @@ restatement of every threshold.
   `get_fundamentals_snapshot(ticker, as_of_date)` — CIK resolution, cached/
   rate-limited SEC fetch, point-in-time-safe US-GAAP normalization, full
   provenance. **Not yet injected into agent reasoning or trading.**
+  **Acceptance-tested 2026-09-12** (WMG/AAPL/JPM/BABA, live SEC data, 0
+  provenance/as-of violations) — **accepted for future integration
+  design only**, not for agent integration. `docs/evaluations/fundamentals_v1_acceptance.md`.
 
 ---
 
@@ -291,15 +294,11 @@ corrects `round2_50cycle_evaluation_extract.md`'s exit-reason-mix table (was 6/2
 
 ## 8. Known limitations and deferred work
 
-- **Live bracket orders** — `alpaca-mcp`'s `place_order` submits one
-  order, no OCO/bracket; nothing rests a real stop at the broker live.
+- **Live bracket orders** — `alpaca-mcp`'s `place_order` submits one order, no OCO/bracket; nothing rests a real stop at the broker live.
 - **Broker partial fills** — not modeled in either mode.
-- **Circuit-breaker latching** — breakers re-evaluate fresh every cycle
-  from live P&L, not latched for the rest of a halted period.
-- **Survivorship bias** — the watchlist was screened using data from
-  inside the exact backtest window.
-- **Asyncpg statement-cache fix's narrow scope** — `statement_cache_size=0`
-  is only applied in `trade-journal-mcp/server.py`.
+- **Circuit-breaker latching** — breakers re-evaluate fresh every cycle from live P&L, not latched for the rest of a halted period.
+- **Survivorship bias** — the watchlist was screened using data from inside the exact backtest window.
+- **Asyncpg statement-cache fix's narrow scope** — `statement_cache_size=0` is only applied in `trade-journal-mcp/server.py`.
 - **No benchmark series wired into the dashboard** — an offline comparison exists (§7), no live index-comparison line.
 - **Neon's anonymous-role exposure** — read-only, SELECT-only; `backtest_cycle_evidence` excluded (verified live).
 - **Per-trade (vs. per-cycle) token attribution** remains only approximate.

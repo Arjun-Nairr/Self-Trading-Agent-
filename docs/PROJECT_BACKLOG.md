@@ -90,7 +90,13 @@ exist, never a custom-tag guess. Validation CLI only
 `fundamentals/README.md`. **This is data-foundation only** — not yet
 called from `run_backtest.py`, not referenced in `AGENTS.md`, no
 dashboard page, no MCP tool. The frozen baseline is unaffected: no
-`RULES.md`/`AGENTS.md`/`SOUL.md` change, no run touched.
+`RULES.md`/`AGENTS.md`/`SOUL.md` change, no run touched. **Acceptance
+milestone complete** (2026-09-12, `docs/evaluations/fundamentals_v1_acceptance.md`):
+validated live against WMG/AAPL/JPM/BABA, 0 provenance/as-of/unit/form
+violations, conservative fail-closed behavior confirmed for a bank
+(JPM) and a foreign private issuer (BABA). Verdict: **accepted for
+future integration design** — this does not approve or perform agent
+integration.
 
 - **Now:** none — fundamental-data *agent integration* remains frozen.
 - **Soon:** none.
@@ -99,8 +105,11 @@ dashboard page, no MCP tool. The frozen baseline is unaffected: no
     reasoning (prompt evidence, veto/strengthen role per the Scope
     boundaries in `docs/research/sec_edgar_v1_data_design.md` — never
     an independent buy trigger). Status `approved` (direction only).
-    Prerequisite: baseline unfreezes; the V1 foundation's output is
-    reviewed against known filings first (§10 next step below).
+    Prerequisite: baseline unfreezes; the V1 foundation's acceptance
+    result (above) is the "reviewed against known filings" step this
+    item used to name as outstanding — an actual integration DESIGN
+    proposal (prompt shape, veto/strengthen role, staleness policy)
+    still needs its own explicit approval before any code changes.
   - Cache-first, on-demand fundamentals router wired into a real
     trading cycle (check stored data first, fetch only when
     missing/stale). Status `approved` (direction only). Prerequisite:
