@@ -86,7 +86,12 @@ STARTING_EQUITY = 100_000.0
 # text itself (see backtest_cycle_evidence.prompt_schema_version). Bump this
 # any time build_prompt's structure changes in a way that would matter to
 # someone auditing an old evidence row against the current prompt shape.
-PROMPT_SCHEMA_VERSION = 1
+# 2 (was 1): build_prompt gained an opt-in fundamentals_enabled parameter
+# (docs/evaluations/fundamentals_v1_acceptance.md's backtest-integration
+# milestone) -- the function's structure changed even though its output
+# is byte-identical to v1 whenever fundamentals_enabled is left at its
+# default (False).
+PROMPT_SCHEMA_VERSION = 2
 # The masking seed used when nothing is stored yet and no --seed is given
 # (a fresh or --reset run) -- was argparse's own default before item 7's
 # seed-persistence fix; unchanged in value, only in where it lives.
@@ -1309,6 +1314,184 @@ asyncio.run(main())
     return json_from(run_in("alpaca-mcp", script))["news"]
 
 
+# ---------------------------------------------------------------------
+# Fundamentals V1 backtest integration (opt-in, default OFF -- see
+# --enable-fundamentals). docs/evaluations/fundamentals_v1_acceptance.md
+# accepted the standalone fundamentals/ module as a trustworthy DATA
+# FOUNDATION; this section is the separate, explicitly-approved next
+# milestone that lets a backtest cycle actually consume it, still never
+# touching live mode. RULES.md/AGENTS.md's locked policy this section
+# enforces: technicals remain the primary entry basis, news remains the
+# only hard veto/exit trigger, and fundamentals are CONTEXTUAL evidence
+# only -- they may strengthen or temper confidence in an already-valid
+# technical setup, they can never independently create a BUY (a ticker
+# only ever becomes a candidate because it already has valid technicals,
+# see run_day's candidate-construction loop below -- fundamentals are
+# attached AFTER that gate, never a path around it), and they are never
+# a mandatory veto the way adverse news is. Missing/unavailable
+# fundamentals data is never treated as positive evidence -- it produces
+# an explicitly labeled technical-only evaluation instead.
+# ---------------------------------------------------------------------
+
+# The exact V1 metrics fundamentals/edgar.py can return -- rendered
+# verbatim, in this fixed order, never a superset (no new metric is
+# invented here; this backtest integration is a consumer of the accepted
+# module's own contract, not a second place that defines metrics).
+FUNDAMENTALS_METRIC_ORDER = [
+    "revenue", "revenue_growth_yoy", "net_income", "net_margin",
+    "operating_cash_flow", "cash_and_equivalents", "total_debt",
+    "current_assets", "current_liabilities", "current_ratio",
+]
+
+# The only values Hermes may self-report for how available fundamentals
+# affected its confidence -- deliberately NOT a numeric weight (RULES.md's
+# "no global percentage-weight score" policy). "technical_only" and
+# "available_unreported" are harness-derived, never self-reported by
+# Hermes -- see _fundamentals_assessment_for_decision.
+_FUNDAMENTALS_SELF_REPORTED_EFFECTS = {"supportive", "tempering", "no_effect"}
+
+
+def fetch_fundamentals(tickers: list[str], day: date) -> dict[str, dict]:
+    """Point-in-time SEC EDGAR fundamentals for CANDIDATE tickers only --
+    never fetched for an exit decision (fundamentals never drive an
+    exit; see the policy note above). Calls the accepted fundamentals/
+    module in-process (its own stdlib HTTP client + SQLite cache) --
+    no docker/MCP container, no second provider, no new service, per
+    the "reuse the accepted module as the sole V1 source" boundary.
+
+    `day` is the simulated cycle's real cursor date -- passed straight
+    through as `as_of_date`, exactly like fetch_technicals/fetch_news's
+    own `as_of` gate. Never date.today(): a backtest cycle for a past
+    simulated day must only ever see filings eligible as of THAT day.
+
+    Every failure (missing SEC_EDGAR_USER_AGENT, a network/SEC error, a
+    genuinely unexpected exception) is caught PER TICKER and turned into
+    an explicit unavailable entry -- a fundamentals failure must never
+    halt a cycle. See mask_fundamentals for how this becomes the
+    prompt's technical-only fallback."""
+    fundamentals_dir = REPO / "fundamentals"
+    if str(fundamentals_dir) not in sys.path:
+        sys.path.insert(0, str(fundamentals_dir))
+    from edgar import get_fundamentals_snapshot  # local import: optional, backtest-only dependency
+
+    out: dict[str, dict] = {}
+    for t in tickers:
+        try:
+            out[t] = {"ok": True, "snapshot": get_fundamentals_snapshot(t, str(day))}
+        except Exception as e:  # noqa: BLE001 -- see docstring: must never halt a cycle
+            out[t] = {"ok": False, "error": f"{type(e).__name__}: {str(e)[:200]}"}
+    return out
+
+
+def mask_fundamentals(fetch_result: dict) -> dict:
+    """Pure, testable: turns one ticker's raw fetch_fundamentals() result
+    into the compact, identity-free block build_prompt renders. NEVER
+    includes real ticker/company name, CIK, SEC source_url, accession
+    number, or a raw calendar filing date -- only the fixed V1 metric
+    values (already unit-checked/point-in-time-gated by fundamentals/
+    edgar.py itself) and a RELATIVE filing-age-in-days indicator, the
+    same masking convention mask_news already uses for headline age.
+
+    Per-metric 'unavailable' reasons from fundamentals/edgar.py are safe
+    to pass through verbatim -- they only ever name generic US-GAAP tags
+    (e.g. "no eligible fact for any of ['Revenues', ...]"), never a
+    ticker or company identity. A snapshot-LEVEL failure (fetch error,
+    ticker unresolved/ambiguous) is deliberately NOT passed through --
+    that raw text could embed a URL/CIK -- and is replaced with one
+    fixed, generic reason instead."""
+    if not fetch_result.get("ok"):
+        return {"available": False, "reason": "fundamentals fetch failed", "filing_age_days": None, "metrics": {}}
+
+    snap = fetch_result["snapshot"]
+    if snap.status != "available":
+        # ticker unresolved/ambiguous, or the whole SEC fetch failed --
+        # never the raw snapshot.reason (could embed a CIK/URL).
+        return {"available": False, "reason": "fundamentals data unavailable for this candidate",
+                "filing_age_days": None, "metrics": {}}
+
+    metrics = {}
+    filed_dates = []
+    for name in FUNDAMENTALS_METRIC_ORDER:
+        m = snap.metrics.get(name)
+        if m is None or m.status != "available":
+            continue
+        metrics[name] = {"value": m.value}
+        obs = m.observation or (m.derived_from[0] if m.derived_from else None)
+        if obs is not None and obs.filed_at:
+            filed_dates.append(obs.filed_at)
+
+    if not metrics:
+        return {"available": False, "reason": "no eligible V1 metric available for this candidate",
+                "filing_age_days": None, "metrics": {}}
+
+    latest_filed = max(filed_dates) if filed_dates else None
+    filing_age_days = (
+        (date.fromisoformat(snap.as_of_date) - date.fromisoformat(latest_filed)).days
+        if latest_filed else None
+    )
+    return {"available": True, "reason": None, "filing_age_days": filing_age_days, "metrics": metrics}
+
+
+def _fundamentals_assessment_for_decision(decision: dict, fundamentals_block: dict | None,
+                                          fundamentals_enabled: bool) -> str | None:
+    """The deterministic fundamentals-use value for one decision --
+    embedded in strategy_notes by _tag_strategy_notes below, the
+    smallest measurable record of the three questions this milestone
+    needs to answer later: was fundamentals evidence available; did it
+    support/temper/not-affect the decision; was the entry technical-only
+    because it was unavailable.
+
+    None (untouched, matching every prior run's behavior) when the
+    profile is off or this is a SELL -- fundamentals never drive an
+    exit. 'technical_only' and 'available_unreported' are HARNESS-
+    derived facts, never trusted from Hermes' own self-report (the
+    harness already knows independently whether fundamentals were
+    available for this candidate); only the supportive/tempering/
+    no_effect judgment itself is Hermes' to report, and a missing or
+    invalid self-report is recorded honestly as 'available_unreported'
+    rather than defaulted to 'no_effect' -- silently assuming "no
+    effect" would itself be treating an unreported field as if it were
+    evidence, which is exactly what this module refuses to do for
+    missing fundamentals data itself."""
+    if not fundamentals_enabled or decision.get("action", "").upper() != "BUY":
+        return None
+    if fundamentals_block is None or not fundamentals_block.get("available"):
+        return "technical_only"
+    effect = decision.get("fundamentals_effect")
+    return effect if effect in _FUNDAMENTALS_SELF_REPORTED_EFFECTS else "available_unreported"
+
+
+def _tag_strategy_notes(reasoning: str, fundamentals_assessment: str | None) -> str:
+    """A deterministic, harness-controlled prefix -- same discipline as
+    record_exit's own f"Mechanical exit: {reason}" tag on the same
+    strategy_notes column -- so the fundamentals-use value is reliably
+    machine-parseable later without depending on Hermes' own free prose
+    to mention it consistently (the vague-free-text-only record this
+    milestone must not settle for). No Neon schema change: this reuses
+    the existing TEXT column with a fixed, greppable convention, exactly
+    like the pre-existing "Mechanical exit: ..." tag already does."""
+    if fundamentals_assessment is None:
+        return reasoning
+    return f"[fundamentals:{fundamentals_assessment}] {reasoning}"
+
+
+def fundamentals_prompt_lines(fundamentals_block: dict | None) -> list[str]:
+    """Renders one candidate's fundamentals block for build_prompt.
+    Empty list when fundamentals_block is None (the profile is off, or
+    this candidate had none attached) -- the existing prompt text is
+    completely unaffected in that case."""
+    if fundamentals_block is None:
+        return []
+    if fundamentals_block["available"]:
+        bits = ", ".join(
+            f"{name} {vals['value']:,.0f}" for name, vals in fundamentals_block["metrics"].items()
+        )
+        age = fundamentals_block["filing_age_days"]
+        age_str = f"~{age}d ago" if age is not None else "age unknown"
+        return [f"      fundamentals (filed {age_str}): {bits or '(no metrics available)'}"]
+    return [f"      fundamentals: unavailable -- {fundamentals_block['reason']} (technical-only evaluation)"]
+
+
 def simulate_fill(ticker_alias: str, action: str, quantity: int,
                   reference_price: float, bar: dict) -> dict:
     """Real execution-sim tool, in historical mode — the day's true range
@@ -1328,7 +1511,8 @@ print(json.dumps(place_order(
 
 def record_trade(decision: dict, real_ticker: str, fill: dict, decision_id: str,
                  run_id: str | None = None, strategy_profile: str | None = None,
-                 min_reward_risk_used: float | None = None) -> str:
+                 min_reward_risk_used: float | None = None,
+                 fundamentals_assessment: str | None = None) -> str:
     """Journal the REAL ticker, never the alias — the mask exists to keep
     Hermes honest, not to obscure our own records.
 
@@ -1367,7 +1551,7 @@ async def main():
         # (KeyError), never silently journal a fabricated 2.0.
         expected_reward_risk={float(decision["expected_reward_risk"])},
         invalidation_condition={decision.get("invalidation_condition", "n/a")!r},
-        strategy_notes={decision.get("reasoning", "")[:900]!r},
+        strategy_notes={_tag_strategy_notes(decision.get("reasoning", ""), fundamentals_assessment)[:900]!r},
         stop_price={decision.get("stop_price")!r},
         target_price={decision.get("target_price")!r},
         run_id={run_id!r},
@@ -1394,7 +1578,8 @@ asyncio.run(main())
 def record_queued_decision(decision: dict, real_ticker: str, decision_id: str,
                            run_id: str | None = None, strategy_profile: str | None = None,
                            min_reward_risk_used: float | None = None,
-                           data_timestamps: dict | None = None) -> None:
+                           data_timestamps: dict | None = None,
+                           fundamentals_assessment: str | None = None) -> None:
     """Journal a QUEUED discretionary decision the INSTANT it is queued --
     status stays 'pending' (the trades table's own default) until the next
     trading day resolves it (resolve_trade_fill / resolve_trade_rejection).
@@ -1413,7 +1598,13 @@ def record_queued_decision(decision: dict, real_ticker: str, decision_id: str,
     same source intended_notional is computed from, never a division
     performed on the notional afterward). NULL for a discretionary SELL --
     nothing was "proposed" for an exit; see AGENTS.md's exit reasoning
-    contract."""
+    contract.
+
+    fundamentals_assessment: see _fundamentals_assessment_for_decision --
+    None on every call where the fundamentals profile is off or this is
+    a SELL (unaffected, existing strategy_notes text unchanged); embedded
+    as a fixed "[fundamentals:...]" prefix on strategy_notes otherwise,
+    via _tag_strategy_notes -- no Neon schema change for this milestone."""
     proposed_entry_price = float(decision["entry_price"]) if decision["action"] == "BUY" else None
     script = f'''
 import asyncio
@@ -1438,7 +1629,7 @@ async def main():
         # (KeyError), never silently journal a fabricated 2.0.
         expected_reward_risk={float(decision["expected_reward_risk"])},
         invalidation_condition={decision.get("invalidation_condition", "n/a")!r},
-        strategy_notes={decision.get("reasoning", "")[:900]!r},
+        strategy_notes={_tag_strategy_notes(decision.get("reasoning", ""), fundamentals_assessment)[:900]!r},
         data_timestamps={data_timestamps!r},
         stop_price={decision.get("stop_price")!r},
         target_price={decision.get("target_price")!r},
@@ -2125,7 +2316,8 @@ def validate_hermes_response(response, is_reflection_day: bool) -> None:
 def build_prompt(day_label: str, account: dict, positions: list[dict],
                  candidates: list[dict], recent_insights: list[str],
                  reflection_trades: list[dict] | None = None,
-                 limits: "RiskLimits | None" = None) -> str:
+                 limits: "RiskLimits | None" = None,
+                 fundamentals_enabled: bool = False) -> str:
     # `limits` must be the SAME RiskLimits instance the decision-time
     # checker (required_entry_quantity/check_trade) will actually enforce
     # -- see run_day's `active_limits` -- never a second, independently
@@ -2224,6 +2416,8 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         lines.append(f"      support {t['support']}  resistance {t['resistance']}")
         for a in c["news"][:3]:
             lines.append(f"      news ({a['age_days']}d ago): {a['headline'][:110]}")
+        if fundamentals_enabled:
+            lines += fundamentals_prompt_lines(c.get("fundamentals"))
     lines.append("")
 
     schema = (
@@ -2235,6 +2429,13 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         '  "reasoning": "..."}],\n'
         ' "no_action_reason": "..."'
     )
+    if fundamentals_enabled:
+        schema = schema.replace(
+            '  "reasoning": "..."}],\n',
+            '  "reasoning": "...",\n'
+            '  "fundamentals_effect": "supportive"|"tempering"|"no_effect"'
+            ' (OMIT on a candidate whose fundamentals line above says unavailable)}],\n'
+        )
 
     if reflection_trades is not None:
         lines.append("REFLECTION DUE — review your last few closed trades")
@@ -2266,7 +2467,7 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
             ' "reflection": "1-3 sentences, process not profit"'
         )
 
-    lines.append(
+    closing = (
         "Decide. Reply with ONLY a JSON object, no prose around it:\n"
         f"{schema}}}\n"
         "For each BUY, quantity must equal the required quantity from the "
@@ -2277,6 +2478,20 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         "decisions list only when nothing qualifies, and give concrete "
         "reasons."
     )
+    if fundamentals_enabled:
+        closing += (
+            "\nA candidate's FUNDAMENTALS line, when present, is CONTEXTUAL "
+            "evidence only: it may strengthen your confidence in an already-"
+            "valid technical setup, or temper it / shorten the horizon you'd "
+            "hold for. It can never by itself justify a BUY you would not "
+            "otherwise make on technicals, and it is never a mandatory veto "
+            "the way adverse news is (RULES.md §5a) -- do not invent a "
+            "numeric weighting between technicals, news, and fundamentals. "
+            "When a candidate's fundamentals are unavailable, evaluate it on "
+            "technicals and news alone -- that is a complete, valid "
+            "evaluation, not a reason to skip the name."
+        )
+    lines.append(closing)
     return "\n".join(lines)
 
 
@@ -2540,7 +2755,7 @@ def required_entry_quantity(trade: ProposedTrade, ctx: Context) -> int | None:
 
 def run_day(day: date, day_index: int, portfolio: Portfolio,
             masking: RunMasking, watchlist: list[dict], limits_ctx: dict,
-            run_key: str) -> tuple[Portfolio, dict, "Callable[[], None]"]:
+            run_key: str, fundamentals_enabled: bool = False) -> tuple[Portfolio, dict, "Callable[[], None]"]:
     """Run one simulated trading day. Returns (new_portfolio, summary,
     do_observability).
 
@@ -2886,17 +3101,30 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     technicals = {t: all_technicals[t] for t in unheld_tickers if t in all_technicals}
     held_technicals = {t: all_technicals[t] for t in held_tickers if t in all_technicals}
 
+    # Fundamentals V1 (opt-in, default off): CANDIDATES only, never held
+    # positions -- exits stay technical/news-only, unaffected. Fetched
+    # AFTER the technicals/news above and attached inside the same
+    # "already has valid technicals" loop below, so a ticker can never
+    # become a candidate -- let alone a BUY -- on fundamentals alone.
+    fundamentals_raw = (
+        fetch_fundamentals([t for t in unheld_tickers if t in technicals and "error" not in technicals[t]], day)
+        if fundamentals_enabled else {}
+    )
+
     candidates = []
     for ticker, tech in technicals.items():
         if "error" in tech:
             continue
         entry = next(w for w in watchlist if w["symbol"] == ticker)
-        candidates.append({
+        candidate = {
             "alias": masking.alias(ticker),
             "sector": entry["sector"],
             "tech": masking.mask_technicals({**tech, "ticker": ticker}, day),
             "news": masking.mask_news(news.get(ticker, []), day),
-        })
+        }
+        if fundamentals_enabled:
+            candidate["fundamentals"] = mask_fundamentals(fundamentals_raw[ticker])
+        candidates.append(candidate)
 
     positions_view = [{
         "alias": masking.alias(t),
@@ -2975,7 +3203,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     }
     prompt = build_prompt(masking.day_index(day), account_view,
                           positions_view, candidates, recent_insights,
-                          reflection_trades, limits=active_limits)
+                          reflection_trades, limits=active_limits,
+                          fundamentals_enabled=fundamentals_enabled)
 
     # -- checkpoint gate (2026-08-28 correctness pass, item 2) ------------
     # A retry of this EXACT (run_key, day_index) reuses the response
@@ -3214,6 +3443,14 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                 continue
 
         decision_id = make_decision_id(run_key, day_index, real_ticker, action, f"queued_proposal[{i}]")
+        # Fundamentals V1: None (unaffected) when the profile is off or
+        # this is a SELL -- see _fundamentals_assessment_for_decision.
+        fundamentals_block = next(
+            (c.get("fundamentals") for c in candidates if c["alias"] == decision.get("alias")), None
+        )
+        fundamentals_assessment = _fundamentals_assessment_for_decision(
+            decision, fundamentals_block, fundamentals_enabled
+        )
         record_queued_decision(
             decision, real_ticker, decision_id, run_id=run_key,
             strategy_profile=working.profile_level, min_reward_risk_used=active_min_rr,
@@ -3225,6 +3462,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                     default=None,
                 ),
             },
+            fundamentals_assessment=fundamentals_assessment,
         )
         order = QueuedOrder(
             ticker=real_ticker, alias=decision["alias"], action=action, quantity=quantity,
@@ -3336,6 +3574,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "stored classification; a conflicting value "
                              "fails closed instead of silently relabeling "
                              "the run.")
+    # Fundamentals V1 backtest integration (docs/evaluations/
+    # fundamentals_v1_acceptance.md), a SEPARATE opt-in capability --
+    # default False, so every existing/default invocation (including any
+    # resume of the completed, preserved Round 2 run) is byte-identical
+    # to before this flag existed. See run_day/build_prompt's own
+    # fundamentals_enabled docstrings for the full contextual-evidence-
+    # only policy this flag turns on.
+    parser.add_argument("--enable-fundamentals", action="store_true",
+                        help="Backtest-only V1 milestone: attach a compact, masked "
+                             "SEC EDGAR fundamentals summary to each entry candidate "
+                             "as contextual evidence (never a hard veto, never an "
+                             "independent buy trigger). Default off.")
     return parser
 
 
@@ -3512,7 +3762,8 @@ def main() -> None:
         # persisted state, never cached across cycles.
         todays_limits_ctx = _limits_for_profile(portfolio.profile_level)
         result, halted = _run_cycle_or_halt(
-            lambda: run_day(cursor, day_index, portfolio, masking, watchlist, todays_limits_ctx, run_key),
+            lambda: run_day(cursor, day_index, portfolio, masking, watchlist, todays_limits_ctx, run_key,
+                            fundamentals_enabled=args.enable_fundamentals),
             day_label=masking.day_index(cursor),
             run_id=run_id,
         )

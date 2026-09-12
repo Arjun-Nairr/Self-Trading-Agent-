@@ -87,34 +87,55 @@ cash flow/cash/total debt/current-assets-liabilities plus derived YoY
 growth/net margin/current ratio — only when comparable source periods
 exist, never a custom-tag guess. Validation CLI only
 (`python fundamentals/edgar.py --ticker X --as-of YYYY-MM-DD`); see
-`fundamentals/README.md`. **This is data-foundation only** — not yet
-called from `run_backtest.py`, not referenced in `AGENTS.md`, no
-dashboard page, no MCP tool. The frozen baseline is unaffected: no
-`RULES.md`/`AGENTS.md`/`SOUL.md` change, no run touched. **Acceptance
-milestone complete** (2026-09-12, `docs/evaluations/fundamentals_v1_acceptance.md`):
-validated live against WMG/AAPL/JPM/BABA, 0 provenance/as-of/unit/form
-violations, conservative fail-closed behavior confirmed for a bank
-(JPM) and a foreign private issuer (BABA). Verdict: **accepted for
-future integration design** — this does not approve or perform agent
-integration.
+`fundamentals/README.md`. **Acceptance milestone complete** (2026-09-12,
+`docs/evaluations/fundamentals_v1_acceptance.md`): validated live
+against WMG/AAPL/JPM/BABA, 0 provenance/as-of/unit/form violations,
+conservative fail-closed behavior confirmed for a bank (JPM) and a
+foreign private issuer (BABA). Verdict: **accepted for future
+integration design.**
 
-- **Now:** none — fundamental-data *agent integration* remains frozen.
+**SEC EDGAR Fundamentals V1 — backtest-only integration** (2026-09-12,
+`run_backtest.py`): the harness now CAN attach a compact, masked
+fundamentals summary to each entry candidate, opt-in via
+`--enable-fundamentals` (default off — every existing/default backtest
+invocation, including the preserved Round 2 run, is byte-identical
+without it). Fundamentals stay contextual evidence only — may
+strengthen or temper confidence in an already-valid technical setup,
+never independently create a BUY, never a mandatory veto like news
+(`AGENTS.md`'s new fundamentals paragraph states this to the trading
+agent). Structured per-decision recording (was fundamentals evidence
+available; did it support/temper/not-affect the decision; was the entry
+technical-only) is embedded as a fixed, harness-controlled
+`[fundamentals:...]` prefix on the existing `trades.strategy_notes`
+column — no Neon schema change this milestone. Full masked
+prompt/input/response evidence is preserved via the existing
+`backtest_cycle_evidence` path, unchanged. **Still NOT done:** (1) live
+mode — no tool design, freshness policy, or failure handling exists
+there yet, a separate future milestone; (2) any actual
+fundamentals-enabled backtest cycle — a real (even smoke) run needs
+Docker, unavailable in the implementing environment, so only pure/mocked
+tests ran; (3) any training-evaluation run using this capability — the
+frozen Round 2 baseline is untouched and no new run has been started,
+awaiting explicit user approval per this milestone's own instructions.
+
+- **Now:** none — fundamental-data *agent live-integration and any new
+  training run* remain frozen/unapproved.
 - **Soon:** none.
 - **Later:**
-  - Inject SEC EDGAR fundamentals into the trading agent's own
-    reasoning (prompt evidence, veto/strengthen role per the Scope
-    boundaries in `docs/research/sec_edgar_v1_data_design.md` — never
-    an independent buy trigger). Status `approved` (direction only).
-    Prerequisite: baseline unfreezes; the V1 foundation's acceptance
-    result (above) is the "reviewed against known filings" step this
-    item used to name as outstanding — an actual integration DESIGN
-    proposal (prompt shape, veto/strengthen role, staleness policy)
-    still needs its own explicit approval before any code changes.
-  - Cache-first, on-demand fundamentals router wired into a real
+  - Live mode fundamentals integration (tool design, freshness policy,
+    failure handling). Status `approved` (direction only). Prerequisite:
+    baseline unfreezes; a separate explicit design approval — the
+    backtest-only integration above is not itself that approval.
+  - The first fundamentals-enabled backtest run (smoke, then training).
+    Status: implementation complete, **run not yet started** — needs
+    explicit user go-ahead per this milestone's own instructions, plus
+    a working Docker environment to actually execute a cycle.
+  - Cache-first, on-demand fundamentals router wired into a real live
     trading cycle (check stored data first, fetch only when
     missing/stale). Status `approved` (direction only). Prerequisite:
     freshness policy + baseline unfreezes — the V1 foundation's own
-    cache already covers "check stored data first" at the module level.
+    cache already covers "check stored data first" at the module level,
+    and the backtest-only integration above reuses that cache directly.
   - Fundamental observation period before entry (let the agent watch a
     company across days when urgency is low). Status `discussing`.
     Prerequisite: must not become a blanket waiting rule that

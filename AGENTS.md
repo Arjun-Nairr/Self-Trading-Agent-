@@ -122,6 +122,18 @@ For each such name:
    reason to enter — it can only fail to block you. If the headline feed
    errors or is unavailable, the veto cannot be evaluated: skip the entry
    rather than treating missing evidence as "no adverse news."
+
+   **If a candidate carries a FUNDAMENTALS line** (backtest-only, not
+   every run): weigh it as contextual evidence, not a gate. It may
+   strengthen your confidence in an already-valid technical setup, or
+   temper it / shorten how long you'd hold — it can never by itself
+   create a BUY you would not otherwise make on technicals, and unlike
+   news it is never a mandatory veto. When it says unavailable, evaluate
+   the candidate on technicals and news alone; that is a complete, valid
+   evaluation, not a reason to skip the name. When the schema asks for
+   `fundamentals_effect`, answer `supportive`, `tempering`, or
+   `no_effect` honestly — never invent a numeric weighting between
+   technicals, news, and fundamentals.
 5. Size the position per §2 — compute BOTH the stop-based size (§2a) and
    the concentration-cap size (§2b) explicitly, state both numbers in your
    reasoning, and take whichever is smaller. Do not eyeball this or skip

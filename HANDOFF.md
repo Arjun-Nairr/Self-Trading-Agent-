@@ -224,13 +224,21 @@ restatement of every threshold.
   wired into the live path): `geometry_scan.py` / `counterfactual.py`
   (justified the Round-1→Round-2 rule changes) and
   `benchmark_sensitivity.py` (§7's benchmark/sensitivity report).
-- **SEC EDGAR Fundamentals V1 data foundation** (`fundamentals/`, 2026-09-12):
-  `get_fundamentals_snapshot(ticker, as_of_date)` — CIK resolution, cached/
-  rate-limited SEC fetch, point-in-time-safe US-GAAP normalization, full
-  provenance. **Not yet injected into agent reasoning or trading.**
-  **Acceptance-tested 2026-09-12** (WMG/AAPL/JPM/BABA, live SEC data, 0
-  provenance/as-of violations) — **accepted for future integration
-  design only**, not for agent integration. `docs/evaluations/fundamentals_v1_acceptance.md`.
+- **SEC EDGAR Fundamentals V1** (`fundamentals/`, 2026-09-12) — four
+  distinct states, do not conflate: (1) **data foundation** —
+  `get_fundamentals_snapshot(ticker, as_of_date)`, CIK resolution,
+  cached/rate-limited SEC fetch, point-in-time-safe US-GAAP
+  normalization, full provenance; (2) **accepted** for integration
+  design (`docs/evaluations/fundamentals_v1_acceptance.md`: WMG/AAPL/JPM/BABA
+  live, 0 provenance/as-of violations); (3) **backtest-only integration
+  implemented** — `run_backtest.py --enable-fundamentals` (opt-in,
+  default off, zero effect on any existing/default run including
+  preserved Round 2), contextual evidence only, never an independent
+  buy trigger or a mandatory veto (`AGENTS.md`); (4) **still not done:**
+  live-mode integration (separate future milestone) and any actual
+  fundamentals-enabled run, smoke or training (implementation only —
+  no cycle executed, Docker unavailable to verify; needs explicit
+  approval to start).
 
 ---
 
@@ -271,8 +279,7 @@ trading system (+3.696% full portfolio, −2.46% drawdown, 20.0% exposure)
 beat the watchlist (−2.66%) and technical baseline (+0.39%, flat, double
 the volatility) on return-per-volatility, though SPY (+4.20%) edged it on
 raw return at far higher exposure and a one-day timing head start. The
-concentration cap remains the more consequential lever
-(`chronological_cash_constrained_approximation`, never "fully replayable").
+concentration cap remains the more consequential lever (`chronological_cash_constrained_approximation`, never "fully replayable").
 **Verdict unchanged: improve measurement first** — not sufficient for Bayesian optimization, still unapproved.
 
 **Per-trade journey report** (offline, read-only, human-evaluation-only,
@@ -282,13 +289,7 @@ data the harness already writes (no new capture). Round 2: 14/16 closed
 trades have a complete daily journey, the other 2 genuine same-session
 stop-outs. Explains actual five-day time-stop outcomes only — **not** a
 longer-hold or stop-distance-band counterfactual (needs re-fetched bars).
-Backs this with a durable **exit provenance** field (`trades.exit_provenance`,
-`schema.sql`) — deterministic harness exit (`harness_stop`/`harness_target`/
-`harness_time_stop`) or agent-requested, set server-side, never inferred
-from prose; pre-migration rows read `legacy_unknown`. Reconciled Round 2
-from structural evidence, not note wording: 5/0/3 harness stop/target/time-stop,
-8 agent-requested (7 with a time-stop rationale, 1 thesis-invalidation) —
-corrects `round2_50cycle_evaluation_extract.md`'s exit-reason-mix table (was 6/2, proven 5/3). Migration re-verified live on Neon 2026-09-12: column, constraint, and all 16 `legacy_unknown` backfill rows confirmed present, no other row touched.
+Backs this with a durable **exit provenance** field (`trades.exit_provenance`, `schema.sql`) — deterministic harness exit (`harness_stop`/`harness_target`/`harness_time_stop`) or agent-requested, set server-side, never inferred from prose; pre-migration rows read `legacy_unknown`. Reconciled Round 2 from structural evidence, not note wording: 5/0/3 harness stop/target/time-stop, 8 agent-requested (7 with a time-stop rationale, 1 thesis-invalidation) — corrects `round2_50cycle_evaluation_extract.md`'s exit-reason-mix table (was 6/2, proven 5/3). Migration re-verified live on Neon 2026-09-12: column, constraint, and all 16 `legacy_unknown` backfill rows confirmed present, no other row touched.
 
 ---
 

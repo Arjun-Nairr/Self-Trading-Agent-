@@ -423,7 +423,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
 
     def fake_record_queued_decision(decision, real_ticker, decision_id, run_id=None,
                                     strategy_profile=None, min_reward_risk_used=None,
-                                    data_timestamps=None):
+                                    data_timestamps=None, fundamentals_assessment=None):
         journal_calls.append(decision_id)
         if remaining_failures["n"] > 0:
             remaining_failures["n"] -= 1
@@ -2094,7 +2094,7 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
 
     def fake_record_queued_decision(decision, real_ticker, decision_id, run_id=None,
                                     strategy_profile=None, min_reward_risk_used=None,
-                                    data_timestamps=None):
+                                    data_timestamps=None, fundamentals_assessment=None):
         queued_decision_calls.append({
             "ticker": real_ticker, "strategy_profile": strategy_profile,
             "min_reward_risk_used": min_reward_risk_used,
