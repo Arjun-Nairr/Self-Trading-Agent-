@@ -159,17 +159,50 @@ the required schema across both the original attempt and its one
 retry). Confirmed clean failure: no `backtest_state.json`/checkpoint
 written, zero `trades`/`backtest_cycle_evidence`/`portfolio_snapshots`
 rows for this run_id (only the run's registry classification and one
-`cycle_failed` activity row exist). Not a defect in the fundamentals
-integration or correction-pass code — `decisions` predates this
-milestone entirely; most likely a single bad/truncated model reply.
-Round 2's state restored immediately after and its sha256 hash verified
-identical to the pre-run backup; Neon Round 2 row counts (`trades` 64,
-`backtest_cycle_evidence` 25, `portfolio_snapshots` 50) unchanged.
+`cycle_failed` activity row exist). Round 2's state restored immediately
+after and its sha256 hash verified identical to the pre-run backup; Neon
+Round 2 row counts (`trades` 64, `backtest_cycle_evidence` 25,
+`portfolio_snapshots` 50) unchanged.
+
+**Part 3 (2026-09-12, same day) — diagnosed, not a fundamentals defect:**
+per instruction, treated the failure as an undiagnosed response-contract
+issue rather than assuming fundamentals caused it; made no trading-logic/
+rules/prompt/model change. Added a **failure-only diagnostic seam**
+(`ask_hermes` in `backtest-harness/run_backtest.py`): fires ONLY when
+both the original reply and its one corrective retry fail to parse/
+validate; writes one bounded, redacted record per attempt to local,
+gitignored `backtest-harness/.diagnostics/{run_id}_day{N}_attempt{n}.json`
+(reply length, JSON-parse success, top-level type/keys, validation error,
+a 2000-char redacted raw excerpt) — never Neon, dashboard, `strategy_notes`,
+or agent prompts. Fail-closed behavior, retry count, and the exact
+exception reaching the cycle-halt path are all unchanged; 6 new pure
+tests added and passing. Committed separately
+(`a8897c4`) before the retry.
+
+Retried the identical protected smoke procedure once more (same backup/
+hash/isolate/restore discipline). **Same failure, now root-caused**: the
+diagnostic's redacted excerpt for both attempts was identical —
+`HTTP 400: {"detail":"The 'gpt-5.4-mini' model is not supported when
+using Codex with a ChatGPT account."}` — the raw text this project's own
+`json_from` happily parses as a dict (`{"detail": "..."}`, hence
+`json_parse_ok: true`) and then correctly rejects for lacking
+`decisions`. This is a **Codex/model-account configuration issue**
+upstream of Hermes' own reasoning entirely, **not** a fundamentals or
+response-schema defect (`decisions` predates this milestone). Run_id
+`917cc076-85b7-4bc8-800e-811c0f47c35f`, classified `smoke`, same clean
+fail-closed outcome (0 trades/evidence/snapshot rows), Round 2 restored
+and sha256-verified identical again.
+
 **Not green for a training decision** — the fundamentals-enabled path
-has still never completed even one full cycle end-to-end; needs a
-successful smoke run first. **Still NOT done:** (1) live mode; (2) a
-fundamentals-enabled cycle actually completing (0/3 so far); (3) any
-training-evaluation run — frozen, unapproved.
+has still never completed one full cycle end-to-end, now for a reason
+entirely outside this milestone's own code: `RULES.md`/§3's locked model
+(`openai-codex` / `gpt-5.4-mini`) appears incompatible with the current
+Codex/ChatGPT-account auth configuration in this environment. That is a
+separate, pre-existing infrastructure/account issue for the user to
+resolve — not something this validation block's scope authorized fixing.
+**Still NOT done:** (1) live mode; (2) a fundamentals-enabled cycle
+actually completing (0/3 so far, blocked on the model/account issue
+above); (3) any training-evaluation run — frozen, unapproved.
 
 - **Now:** none — fundamental-data *agent live-integration and any new
   training run* remain frozen/unapproved.

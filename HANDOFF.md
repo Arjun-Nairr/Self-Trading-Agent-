@@ -213,28 +213,31 @@ restatement of every threshold.
   schema addition, reused from checkpoint on replay); enforced technical
   primacy (a fundamentals-enabled BUY must declare `primary_signal`
   technical/both, `other` rejected). **Operational validation block
-  (2026-09-12):** migration APPLIED, verified twice live on Neon (column
-  exists; `anonymous` has zero grants on `backtest_cycle_evidence`,
-  boundary intact). First attempt blocked: `SEC_EDGAR_USER_AGENT` unset
-  anywhere. Second attempt same day: variable supplied for that session
-  only (shell env, never written to `.env`). Fixed one infra defect along
-  the way (not a fundamentals edit) — `trade-journal`'s image predated
-  the `backtest_run_registry` migration (`ImportError: '_register_run'`),
-  rebuilt via `docker compose build`/`up -d` (already-committed code);
-  would've blocked any fresh run, not just fundamentals. Smoke run
-  `c5987cda-71f1-4585-85c7-c885817fe187`, classified `smoke`, then
-  **Day 1 of 3 failed and halted**: `ResponseValidationError: response
-  missing a 'decisions' list` — Hermes' real reply didn't match the
-  schema, original attempt and its one retry both. Clean fail-closed
-  confirmed: no state/checkpoint written, zero `trades`/
-  `backtest_cycle_evidence`/`portfolio_snapshots` rows for that run_id
-  (only its registry row + one `cycle_failed` activity row). Not a
-  fundamentals-code defect (`decisions` predates this milestone). Round
-  2's local state restored, sha256-verified identical to its pre-run
-  backup; Neon Round 2 counts (`trades` 64, `backtest_cycle_evidence` 25,
-  `portfolio_snapshots` 50) unchanged. (4) **still not done:** live mode;
-  a fundamentals-enabled cycle actually completing (0/3 so far); any
-  training-evaluation run — frozen, unapproved.
+  (2026-09-12, 3 attempts):** migration APPLIED, verified live on Neon
+  each time (`fundamentals_provenance` column exists; `anonymous` has
+  zero grants, boundary intact). Attempt 1 blocked: `SEC_EDGAR_USER_AGENT`
+  unset anywhere. Attempt 2 (var supplied session-only, never written to
+  `.env`; also fixed a stale `trade-journal` image predating
+  `backtest_run_registry` — rebuild, not a code edit) reached and failed
+  Day 1: `ResponseValidationError: response missing a 'decisions' list`.
+  Added a **failure-only diagnostic seam** (`ask_hermes`, local/gitignored
+  `.diagnostics/`, redacted, fires only when both attempts are exhausted —
+  see `test_execution_semantics.py`) and retried (attempt 3, `run_id
+  917cc076-85b7-4bc8-800e-811c0f47c35f`, `smoke`) — same failure, now
+  **root-caused**: the raw reply both times was `HTTP 400:
+  {"detail":"The 'gpt-5.4-mini' model is not supported when using Codex
+  with a ChatGPT account."}` — a Codex/model-account incompatibility
+  upstream of Hermes' own reasoning, **not** a fundamentals or response-
+  schema defect (`decisions` predates this milestone; the harness
+  correctly parsed and correctly rejected this reply). Every attempt
+  confirmed clean fail-closed (no state/checkpoint written, zero
+  `trades`/`backtest_cycle_evidence`/`portfolio_snapshots` rows) and
+  Round 2's local state restored + sha256-verified identical each time;
+  Neon Round 2 counts (`trades` 64, `backtest_cycle_evidence` 25,
+  `portfolio_snapshots` 50) unchanged throughout. (4) **still not done:**
+  live mode; a fundamentals-enabled cycle completing (0/3 so far —
+  blocked on the model/account issue above, unrelated to this milestone's
+  code); any training-evaluation run — frozen, unapproved.
 
 ---
 
