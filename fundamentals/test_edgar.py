@@ -52,6 +52,21 @@ def us_gaap_node(*facts):
     return {"units": {"USD": list(facts)}}
 
 
+def raw_fact(val, start, end, filed, form="10-Q", accn="0000320193-24-000001"):
+    """A fact exactly as SEC's own JSON stores it under one units[unit]
+    key -- no 'unit' field of its own (real data's unit comes from the
+    OUTER units dict key; _facts_for_tag is what attaches 'unit' to the
+    entries it returns)."""
+    return {"val": val, "start": start, "end": end, "filed": filed, "form": form,
+            "accn": accn, "fy": 2024, "fp": "Q1"}
+
+
+def multi_unit_node(**units):
+    """A us-gaap tag node with more than one unit key, e.g.
+    multi_unit_node(USD=[...], JPY=[...])."""
+    return {"units": units}
+
+
 class FakeClient:
     """Drop-in for SecClient: get_json reads from a fixed dict of
     url -> body, never touches the network."""
@@ -209,6 +224,62 @@ mismatched_dates_debt = {
 }
 result = resolve_total_debt(mismatched_dates_debt, AS_OF)
 check_true("total_debt with mismatched balance-sheet dates stays unavailable", result is None)
+
+# -- explicit unit compatibility: only USD is ever eligible -----------------
+mixed_units = {
+    "Revenues": multi_unit_node(
+        JPY=[raw_fact(999_000_000, "2026-01-01", "2026-03-31", filed="2026-04-25", accn="0001-26-000009")],
+        USD=[raw_fact(1_200_000, "2026-01-01", "2026-03-31", filed="2026-04-20", accn="0001-26-000001")],
+    ),
+}
+tag, f = resolve_metric(mixed_units, edgar.REVENUE_TAGS, AS_OF)
+check_true("a USD fact is found even though a later-filed non-USD fact exists for the same tag", f is not None)
+check("the USD fact is selected, never the non-USD one merely because it's 'latest'", f["val"], 1_200_000)
+check("the selected fact's unit is USD", f["unit"], "USD")
+
+only_non_usd = {
+    "Revenues": multi_unit_node(JPY=[raw_fact(999_000_000, "2026-01-01", "2026-03-31", filed="2026-04-20")]),
+}
+tag, f = resolve_metric(only_non_usd, edgar.REVENUE_TAGS, AS_OF)
+check_true("a tag with ONLY a non-USD unit resolves to no fact at all (no unit substitution)", f is None)
+snap = get_fundamentals_snapshot("AAPL", "2026-04-29", client=client_for(only_non_usd))
+check("a metric with only incompatible units is explicitly unavailable", snap.metrics["revenue"].status, "unavailable")
+
+# -- total_debt requires matching USD units on both legs --------------------
+debt_wrong_unit_leg = {
+    "LongTermDebtNoncurrent": us_gaap_node(instant_fact(400_000, "2026-03-31", filed="2026-04-01")),
+    "LongTermDebtCurrent": multi_unit_node(
+        JPY=[raw_fact(50_000, None, "2026-03-31", filed="2026-04-01")]),
+}
+result = resolve_total_debt(debt_wrong_unit_leg, AS_OF)
+check_true("total_debt unavailable when one leg exists only in a non-USD unit -- never a mixed-currency sum",
+           result is None)
+
+# -- deterministic reporting-period selection: quarter-only vs YTD ---------
+AS_OF_Q3 = date(2026, 12, 31)
+quarter_only = raw_fact(400_000, "2026-07-01", "2026-09-30", filed="2026-10-20", accn="0001-26-000003")
+year_to_date = raw_fact(1_100_000, "2026-01-01", "2026-09-30", filed="2026-10-20", accn="0001-26-000004")
+# Same period end AND same filed date on both -- only the documented
+# "longest reported duration wins" tiebreak can distinguish them.
+tied_facts_node = us_gaap_node(quarter_only, year_to_date)
+tag, f = resolve_metric({"Revenues": tied_facts_node}, edgar.REVENUE_TAGS, AS_OF_Q3)
+check("tied on end+filed: the longer (year-to-date) duration wins, per the documented policy",
+      f["val"], 1_100_000)
+
+# -- reversing SEC source-row order must not change the selected result ----
+reversed_node = us_gaap_node(year_to_date, quarter_only)  # exact same facts, reversed order
+tag, f_reversed = resolve_metric({"Revenues": reversed_node}, edgar.REVENUE_TAGS, AS_OF_Q3)
+check("reversing source-list order selects the identical fact (same accession)",
+      f_reversed["accn"], f["accn"])
+check("reversing source-list order selects the identical value", f_reversed["val"], f["val"])
+
+# -- full tie (even duration) still resolves deterministically via accn ---
+tie_a = raw_fact(500_000, "2026-07-01", "2026-09-30", filed="2026-10-20", accn="0001-26-0000AA")
+tie_b = raw_fact(500_000, "2026-07-01", "2026-09-30", filed="2026-10-20", accn="0001-26-0000BB")
+forward = resolve_metric({"Revenues": us_gaap_node(tie_a, tie_b)}, edgar.REVENUE_TAGS, AS_OF_Q3)[1]
+backward = resolve_metric({"Revenues": us_gaap_node(tie_b, tie_a)}, edgar.REVENUE_TAGS, AS_OF_Q3)[1]
+check("a fully-tied pair resolves to the same accession regardless of source order",
+      forward["accn"], backward["accn"])
 
 # -- revenue_growth_yoy: unavailable without a comparable prior period -----
 single_period_revenue = {

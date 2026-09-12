@@ -158,14 +158,16 @@ def resolve_cik(ticker_map: dict, ticker: str) -> tuple[str | None, str | None]:
 # ---------------------------------------------------------------------
 
 def _facts_for_tag(us_gaap: dict, tag: str) -> list[dict]:
+    """Only USD facts -- every V1 metric is a monetary quantity. A tag's
+    `units` dict can carry other unit keys (shares, per-share, a foreign
+    currency); those are never eligible here regardless of date, so a
+    non-USD entry can never be selected "because it's latest" -- a tag
+    with no USD-unit facts at all behaves exactly like a tag with no
+    facts, i.e. unavailable, never a substituted unit."""
     node = us_gaap.get(tag)
     if not node:
         return []
-    out = []
-    for unit, entries in (node.get("units") or {}).items():
-        for e in entries:
-            out.append({**e, "unit": unit})
-    return out
+    return [{**e, "unit": "USD"} for e in (node.get("units") or {}).get("USD") or []]
 
 
 def _select_eligible(entries: list[dict], as_of: date) -> list[dict]:
@@ -183,12 +185,42 @@ def _select_eligible(entries: list[dict], as_of: date) -> list[dict]:
     return out
 
 
+def _duration_days(e: dict) -> int:
+    """0 for an instant/balance-sheet fact (no `start`) -- a flow-metric
+    tiebreaker only; an instant fact is never assigned an invented
+    duration."""
+    if not e.get("start"):
+        return 0
+    return (date.fromisoformat(e["end"]) - date.fromisoformat(e["start"])).days
+
+
+def _selection_key(e: dict) -> tuple:
+    """Deterministic reporting-period selection, independent of source-
+    list order (SEC's own JSON can carry more than one valid fact for
+    the same tag with the same period end and filing date -- e.g. a
+    10-Q's quarter-only flow next to its year-to-date flow):
+
+      1. Latest eligible period end wins.
+      2. Then latest eligible filing date wins.
+      3. Then, for a FLOW fact only (duration > 0), the LONGEST reported
+         duration wins -- so a 10-Q's own year-to-date fact is preferred
+         over its quarter-only fact when both tie on end+filed, and a
+         10-K's full-year fact wins the same way. An instant/balance-
+         sheet fact's duration is always 0 here; this step never invents
+         one and never lets a flow fact outrank an instant fact through
+         it (instant vs. flow are never compared for the same metric).
+      4. Final stable tiebreak: the accession number itself -- unique,
+         and never affected by dict/list iteration order, unlike relying
+         on Python's max() alone over an unordered tie.
+    """
+    return (e["end"], e["filed"], _duration_days(e), e["accn"])
+
+
 def _latest(entries: list[dict]) -> dict | None:
-    """'Latest eligible' = latest period end, tied broken by latest
-    filed date."""
+    """'Latest eligible' per the deterministic policy in _selection_key."""
     if not entries:
         return None
-    return max(entries, key=lambda e: (e["end"], e["filed"]))
+    return max(entries, key=_selection_key)
 
 
 def resolve_metric(us_gaap: dict, tags: list[str], as_of: date) -> tuple[str, dict] | tuple[None, None]:
@@ -202,16 +234,23 @@ def resolve_metric(us_gaap: dict, tags: list[str], as_of: date) -> tuple[str, di
 
 
 def resolve_total_debt(us_gaap: dict, as_of: date) -> tuple[dict, dict] | None:
-    """Both TOTAL_DEBT_COMPONENT_TAGS must resolve to eligible facts
+    """Both TOTAL_DEBT_COMPONENT_TAGS must resolve to eligible USD facts
     for the SAME balance-sheet date (period end) -- otherwise this
-    returns None (unavailable), never a partial or zero-filled sum."""
+    returns None (unavailable), never a partial or zero-filled sum.
+    `_facts_for_tag` already restricts both legs to unit=="USD" before
+    this ever runs, so the explicit equality check below is a second,
+    independent guarantee that a future change to that filter can't
+    silently reintroduce a mixed-unit sum."""
     noncurrent_tag, current_tag = TOTAL_DEBT_COMPONENT_TAGS
     noncurrent_entries = _select_eligible(_facts_for_tag(us_gaap, noncurrent_tag), as_of)
     current_entries = _select_eligible(_facts_for_tag(us_gaap, current_tag), as_of)
     if not noncurrent_entries or not current_entries:
         return None
     noncurrent = _latest(noncurrent_entries)
-    matching_current = [e for e in current_entries if e["end"] == noncurrent["end"]]
+    matching_current = [
+        e for e in current_entries
+        if e["end"] == noncurrent["end"] and e["unit"] == noncurrent["unit"]
+    ]
     current = _latest(matching_current)
     if current is None:
         return None
@@ -219,20 +258,22 @@ def resolve_total_debt(us_gaap: dict, as_of: date) -> tuple[dict, dict] | None:
 
 
 def find_comparable_prior_period(us_gaap: dict, tag: str, latest: dict, as_of: date) -> dict | None:
-    """A prior-period fact under the SAME tag whose duration matches
-    latest's (within DURATION_TOLERANCE_DAYS) and whose end date falls
-    ~1 year before latest's end (within YOY_WINDOW_DAYS) -- and which is
-    itself as-of-eligible, so growth never leaks a future-known prior-
-    period restatement. None if no such period exists."""
+    """A prior-period fact under the SAME tag (already USD-only via
+    _facts_for_tag) whose duration matches latest's (within
+    DURATION_TOLERANCE_DAYS) and whose end date falls ~1 year before
+    latest's end (within YOY_WINDOW_DAYS) -- and which is itself
+    as-of-eligible, so growth never leaks a future-known prior-period
+    restatement. Among qualifying candidates, the SAME deterministic
+    _selection_key ranking used everywhere else picks the winner --
+    never dependent on source-list order. None if no such period exists."""
     if not latest.get("start"):
         return None
     latest_end = date.fromisoformat(latest["end"])
     latest_start = date.fromisoformat(latest["start"])
     latest_duration = (latest_end - latest_start).days
 
-    candidates = _select_eligible(_facts_for_tag(us_gaap, tag), as_of)
-    best = None
-    for c in candidates:
+    candidates = []
+    for c in _select_eligible(_facts_for_tag(us_gaap, tag), as_of):
         if not c.get("start") or c["end"] == latest["end"]:
             continue
         c_end = date.fromisoformat(c["end"])
@@ -242,9 +283,8 @@ def find_comparable_prior_period(us_gaap: dict, tag: str, latest: dict, as_of: d
             continue
         if abs((c_end - c_start).days - latest_duration) > DURATION_TOLERANCE_DAYS:
             continue
-        if best is None or c_end > date.fromisoformat(best["end"]):
-            best = c
-    return best
+        candidates.append(c)
+    return _latest(candidates)
 
 
 def _observation(ticker: str, cik: str, metric: str, tag_fact: tuple[str, dict], cik_int: str) -> Observation:
