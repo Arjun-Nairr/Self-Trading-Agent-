@@ -90,9 +90,19 @@ TICKER_MAP = {
 
 
 def client_for(us_gaap: dict, entity_name="Apple Inc.", cik10="0000320193") -> FakeClient:
+    # "name" is SEC's real submissions field -- see the entity_name
+    # regression tests below for the "entityName" compatibility fallback.
     return FakeClient({
         SecClient.TICKER_MAP_URL: TICKER_MAP,
-        SecClient.SUBMISSIONS_URL.format(cik10=cik10): {"entityName": entity_name},
+        SecClient.SUBMISSIONS_URL.format(cik10=cik10): {"name": entity_name},
+        SecClient.COMPANYFACTS_URL.format(cik10=cik10): {"facts": {"us-gaap": us_gaap}},
+    })
+
+
+def client_with_submissions(us_gaap: dict, submissions: dict, cik10="0000320193") -> FakeClient:
+    return FakeClient({
+        SecClient.TICKER_MAP_URL: TICKER_MAP,
+        SecClient.SUBMISSIONS_URL.format(cik10=cik10): submissions,
         SecClient.COMPANYFACTS_URL.format(cik10=cik10): {"facts": {"us-gaap": us_gaap}},
     })
 
@@ -317,6 +327,71 @@ mismatched_balance_dates = {
 snap = get_fundamentals_snapshot("AAPL", "2026-04-29", client=client_for(mismatched_balance_dates))
 check("current_ratio unavailable when balance-sheet dates mismatch", snap.metrics["current_ratio"].status,
       "unavailable")
+
+# -- REGRESSION: resolve_metric must pick the NEWEST fact across ALL
+# allowed tags, not the first tag with any eligible fact -- the real WMG
+# --as-of 2026-04-29 bug (a 2020 `Revenues` fact won even though a newer
+# `RevenueFromContractWithCustomerExcludingAssessedTax` fact existed). ---
+old_revenues_fact = fact(1_000_000, "2020-01-01", "2020-03-31", filed="2020-04-20", accn="0001-20-000001")
+new_asc606_fact = fact(5_000_000, "2026-01-01", "2026-03-31", filed="2026-04-20", accn="0001-26-000001")
+
+stale_tag_order = {
+    "Revenues": us_gaap_node(old_revenues_fact),
+    "RevenueFromContractWithCustomerExcludingAssessedTax": us_gaap_node(new_asc606_fact),
+}
+tag, f = resolve_metric(stale_tag_order, edgar.REVENUE_TAGS, AS_OF)
+check("the newer fact under the SECOND allowed tag wins over an older fact under the first",
+      f["val"], 5_000_000)
+check("the winning tag is the one the newer fact actually came from",
+      tag, "RevenueFromContractWithCustomerExcludingAssessedTax")
+
+# Same facts, dict keys inserted in the OPPOSITE order -- the result must
+# not depend on fixture/dict ordering, only on which fact is actually newer.
+reversed_tag_order = {
+    "RevenueFromContractWithCustomerExcludingAssessedTax": us_gaap_node(new_asc606_fact),
+    "Revenues": us_gaap_node(old_revenues_fact),
+}
+tag2, f2 = resolve_metric(reversed_tag_order, edgar.REVENUE_TAGS, AS_OF)
+check("reversing which tag is inserted first in the us-gaap dict does not change the result",
+      f2["val"], f["val"])
+check("...nor which tag is reported as the winner", tag2, tag)
+
+# End-to-end: the snapshot's revenue observation reflects the newer tag,
+# and YoY growth (if computed) is derived from that SAME tag's own history
+# -- never mixed with the older tag's facts.
+snap = get_fundamentals_snapshot("AAPL", "2026-04-29", client=client_for(stale_tag_order))
+check("snapshot-level revenue is the newer, non-stale value", snap.metrics["revenue"].value, 5_000_000)
+check("snapshot-level revenue observation is filed on or before as_of",
+      snap.metrics["revenue"].observation.filed_at <= "2026-04-29", True)
+
+# A genuine tie (identical end/filed/duration across two different tags)
+# falls back to declared tag-list order, exactly as documented.
+tie_a = fact(1_000_000, "2026-01-01", "2026-03-31", filed="2026-04-20", accn="0001-26-0000AA")
+tie_b = fact(1_000_000, "2026-01-01", "2026-03-31", filed="2026-04-20", accn="0001-26-0000BB")
+tied_across_tags = {
+    "Revenues": us_gaap_node(tie_a),
+    "RevenueFromContractWithCustomerExcludingAssessedTax": us_gaap_node(tie_b),
+}
+tag3, f3 = resolve_metric(tied_across_tags, edgar.REVENUE_TAGS, AS_OF)
+check("an exact cross-tag tie falls back to declared tag-list order (earlier tag wins)",
+      tag3, "Revenues")
+
+# -- REGRESSION: entity_name reads SEC's real 'name' field -------------
+snap = get_fundamentals_snapshot(
+    "AAPL", "2026-04-29",
+    client=client_with_submissions(full_us_gaap, {"name": "Apple Inc. (real field)"}))
+check("entity_name is read from SEC's real 'name' field", snap.entity_name, "Apple Inc. (real field)")
+
+snap = get_fundamentals_snapshot(
+    "AAPL", "2026-04-29",
+    client=client_with_submissions(full_us_gaap, {"entityName": "Apple Inc. (fallback field)"}))
+check("entity_name falls back to 'entityName' only when 'name' is absent",
+      snap.entity_name, "Apple Inc. (fallback field)")
+
+snap = get_fundamentals_snapshot(
+    "AAPL", "2026-04-29",
+    client=client_with_submissions(full_us_gaap, {"name": "Preferred", "entityName": "Ignored"}))
+check("'name' is preferred over 'entityName' when both are present", snap.entity_name, "Preferred")
 
 # -- CLI never prints credentials ------------------------------------------
 os.environ["SEC_EDGAR_USER_AGENT"] = "secret-looking-agent-string contact@example.com"

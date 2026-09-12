@@ -224,13 +224,37 @@ def _latest(entries: list[dict]) -> dict | None:
 
 
 def resolve_metric(us_gaap: dict, tags: list[str], as_of: date) -> tuple[str, dict] | tuple[None, None]:
-    """First tag (in fixed fallback order) with an eligible fact wins --
-    no cross-tag mixing within one metric, no custom tag ever tried."""
-    for tag in tags:
-        latest = _latest(_select_eligible(_facts_for_tag(us_gaap, tag), as_of))
-        if latest is not None:
-            return tag, latest
-    return None, None
+    """Picks the single newest eligible fact across ALL of this metric's
+    allowed tags -- never the first tag that happens to have any
+    eligible fact, which could silently pin a metric to a stale tag a
+    filer has since moved on from (e.g. an old `Revenues` fact even
+    though a newer `RevenueFromContractWithCustomerExcludingAssessedTax`
+    fact exists). Still only ever reads these fixed tags -- no cross-tag
+    mixing of VALUES, no custom tag ever tried.
+
+    Ranking across tags uses the exact same semantic policy as within
+    one tag (_selection_key: latest period end, then latest filing date,
+    then -- for a flow fact -- the longest reported duration). The
+    DECLARED TAG-LIST ORDER is used only as the final tiebreak, and only
+    when two different tags' best candidates are otherwise exactly
+    tied -- it is never itself a ranking signal."""
+    candidates = []  # (tag_priority, tag, fact) -- one best-per-tag
+    for priority, tag in enumerate(tags):
+        best = _latest(_select_eligible(_facts_for_tag(us_gaap, tag), as_of))
+        if best is not None:
+            candidates.append((priority, tag, best))
+    if not candidates:
+        return None, None
+
+    def cross_tag_key(item: tuple) -> tuple:
+        priority, _tag, fact = item
+        end, filed, duration, _accn = _selection_key(fact)
+        # -priority: an EARLIER tag-list position must win a tie, and this
+        # key feeds max(), so the smallest priority needs the largest key.
+        return (end, filed, duration, -priority)
+
+    _priority, tag, fact = max(candidates, key=cross_tag_key)
+    return tag, fact
 
 
 def resolve_total_debt(us_gaap: dict, as_of: date) -> tuple[dict, dict] | None:
@@ -431,7 +455,10 @@ def get_fundamentals_snapshot(ticker: str, as_of_date: str, client: SecClient | 
     except SecFetchError as e:
         return _snapshot(ticker, as_of_date, "unavailable", f"could not fetch SEC filing data: {e}", cik=cik10)
 
-    entity_name = submissions.get("entityName")
+    # SEC's real submissions JSON uses "name" -- "entityName" is kept only
+    # as a compatibility fallback (it isn't the live field, but costs
+    # nothing to also accept if SEC's schema ever changes back).
+    entity_name = submissions.get("name") or submissions.get("entityName")
     us_gaap = (companyfacts.get("facts") or {}).get("us-gaap") or {}
     if not us_gaap:
         return _snapshot(ticker, as_of_date, "unavailable", "no us-gaap facts available for this company",
