@@ -14,7 +14,7 @@ import {
 } from "../js/calc.js";
 import { STRATEGY_PROFILE, CIRCUIT_BREAKER_NOTE } from "../js/strategy-profile.js";
 import { REFLECTION_LIMIT } from "../js/data.js";
-import { ROADMAP_SECTORS } from "../js/roadmap-data.js";
+import { ROADMAP_SECTORS, STATUS_MARKS, STATUS_LABELS } from "../js/roadmap-data.js";
 
 let n = 0;
 function test(name, fn) { fn(); n++; console.log(`ok - ${name}`); }
@@ -339,21 +339,26 @@ test("decisionSummary: newest N rows + run-wide status counts, bounded slice", (
 
 /* ----------------------------------------------------------- roadmap data */
 
-test("roadmap data: exactly six sectors, all four groups, public-safe text", () => {
+test("roadmap data: exactly six sectors, one short label per item, public-safe, valid status", () => {
   assert.equal(ROADMAP_SECTORS.length, 6);
+  assert.deepEqual(Object.keys(STATUS_MARKS).sort(), ["active", "done", "later", "next"]);
+  assert.deepEqual(Object.keys(STATUS_LABELS).sort(), ["active", "done", "later", "next"]);
+  const validStatuses = new Set(Object.keys(STATUS_MARKS));
   // no URLs, UUIDs, credentials, or endpoints in any user-visible string
   const forbidden = /(https?:\/\/|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-|password|secret|bearer\s|api[_-]?key|neon\.tech)/i;
-  const seenNumbers = new Set();
+  const seenNames = new Set();
   for (const s of ROADMAP_SECTORS) {
-    assert.ok(s.name && s.mission, `sector ${s.n} has a name and a mission`);
-    assert.ok(!seenNumbers.has(s.n), `sector number ${s.n} is unique`);
-    seenNumbers.add(s.n);
-    for (const key of ["completed", "active", "next", "deferred"]) {
-      assert.ok(Array.isArray(s[key]), `sector ${s.n} .${key} is an array`);
-      for (const item of s[key]) {
-        assert.equal(typeof item, "string");
-        assert.ok(!forbidden.test(item), `sector ${s.n} .${key} item stays public-safe: ${item}`);
-      }
+    assert.ok(s.name, "sector has a name");
+    assert.ok(!seenNames.has(s.name), `sector name ${s.name} is unique`);
+    seenNames.add(s.name);
+    assert.ok(Array.isArray(s.items) && s.items.length > 0, `sector ${s.name} has at least one item`);
+    for (const it of s.items) {
+      assert.ok(validStatuses.has(it.status), `sector ${s.name} item has a known status: ${it.status}`);
+      assert.equal(typeof it.text, "string");
+      assert.ok(it.text.length > 0 && it.text.length < 60, `sector ${s.name} item is one short label: ${it.text}`);
+      assert.ok(!forbidden.test(it.text), `sector ${s.name} item stays public-safe: ${it.text}`);
+      // one short label only -- never a "<what> — <why>" sentence like the old deferred-lane items
+      assert.ok(!it.text.includes(" — "), `sector ${s.name} item carries no embedded reasoning: ${it.text}`);
     }
   }
 });

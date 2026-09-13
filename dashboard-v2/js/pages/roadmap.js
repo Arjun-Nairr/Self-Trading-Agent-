@@ -1,84 +1,38 @@
 import { esc } from "../calc.js";
-import { ROADMAP_INTRO, ROADMAP_NOTE, ROADMAP_SECTORS } from "../roadmap-data.js";
+import { ROADMAP_SECTORS, STATUS_MARKS, STATUS_LABELS } from "../roadmap-data.js";
 
-// Read-only visual projection of docs/PROJECT_BACKLOG.md. Makes ZERO
-// Neon / Data API calls — its only import is the static roadmap module.
-// Status marks are decorative <span>s (never form inputs) and nothing
-// here is collapsed by default — this is a showcase, so the actual
-// implementation story (what's done, not just what's planned) stays
-// visible without a click.
+// Fast visual checklist -- not documentation. Detailed reasoning for any
+// item here stays in docs/PROJECT_BACKLOG.md / HANDOFF.md, never
+// duplicated on this page. Makes ZERO Neon / Data API calls -- its only
+// import is the static roadmap module. No counts, percentages, tooltips,
+// or accordions; every item is one line, always visible.
 
-// data key -> display lane. Renamed for the page only; roadmap-data.js
-// keeps the same four keys (completed/active/next/deferred) so its
-// shape — and the test that checks it — is unaffected.
-const LANES = [
-  { key: "completed", label: "Completed", cls: "done", mark: "✓" },
-  { key: "active", label: "In discussion now", cls: "active", mark: "●" },
-  { key: "next", label: "Queued next", cls: "next", mark: "○" },
-  { key: "deferred", label: "Later / gated", cls: "later", mark: "–" },
-];
+const STATUSES = ["done", "active", "next", "later"];
 
-const LEGEND = [
-  { cls: "done", mark: "✓", label: "Completed", text: "shipped and verified" },
-  { cls: "active", mark: "●", label: "In discussion now", text: "being actively decided" },
-  { cls: "next", mark: "○", label: "Queued next", text: "ready to start, not yet begun" },
-  { cls: "later", mark: "–", label: "Later / gated", text: "paused on a stated prerequisite" },
-];
-
-// "Later / gated" items are authored as "<what it is> — <why it's paused>"
-// (see roadmap-data.js's own comment) — split that off to show the
-// reason as its own short line rather than burying it in one sentence.
-function splitReason(text) {
-  const i = text.indexOf(" — ");
-  return i === -1 ? { text, reason: null } : { text: text.slice(0, i), reason: text.slice(i + 3) };
+function legend() {
+  return `<div class="rm-legend" role="note" aria-label="What each mark means">
+    ${STATUSES.map(s => `<span class="rm-legend-item"><span class="rm-mark ${s}" aria-hidden="true">${STATUS_MARKS[s]}</span>${esc(STATUS_LABELS[s])}</span>`).join("")}
+  </div>`;
 }
 
-function item(l, text) {
-  if (l.cls !== "later") {
-    return `<li class="rm-item"><span class="rm-mark ${l.cls}" aria-hidden="true">${l.mark}</span><span class="rm-text">${esc(text)}</span></li>`;
-  }
-  const { text: main, reason } = splitReason(text);
+function item(it) {
   return `<li class="rm-item">
-    <span class="rm-mark ${l.cls}" aria-hidden="true">${l.mark}</span>
-    <span class="rm-text">${esc(main)}${reason ? `<span class="rm-reason">${esc(reason)}</span>` : ""}</span>
+    <span class="rm-mark ${it.status}" aria-hidden="true">${STATUS_MARKS[it.status]}</span>
+    <span class="rm-text"><span class="sr-only">${esc(STATUS_LABELS[it.status])}: </span>${esc(it.text)}</span>
   </li>`;
 }
 
-function lane(l, items) {
-  const body = items.length
-    ? `<ul class="rm-list">${items.map(it => item(l, it)).join("")}</ul>`
-    : `<p class="rm-none">Nothing in this lane right now.</p>`;
-  return `
-    <div class="rm-lane" data-state="${l.cls}">
-      <div class="rm-lane-head"><span class="rm-mark ${l.cls}" aria-hidden="true">${l.mark}</span>${l.label}<span class="rm-count">${items.length}</span></div>
-      ${body}
-    </div>`;
-}
-
-function legend() {
-  return `
-    <div class="rm-legend" role="note" aria-label="What the four roadmap states mean">
-      ${LEGEND.map(g => `
-        <span class="rm-legend-item">
-          <span class="rm-mark ${g.cls}" aria-hidden="true">${g.mark}</span>
-          <strong>${esc(g.label)}</strong> — ${esc(g.text)}
-        </span>`).join("")}
-    </div>`;
+function sector(s) {
+  return `<section class="rm-sector">
+    <h3 class="rm-sector-title">${esc(s.name)}</h3>
+    <ul class="rm-list">${s.items.map(item).join("")}</ul>
+  </section>`;
 }
 
 export function render(el) {
-  const chapters = ROADMAP_SECTORS.map(s => `
-    <section class="rm-chapter">
-      <h3 class="rm-chapter-title"><span class="rm-num">${s.n}</span>${esc(s.name)}</h3>
-      <p class="rm-mission">${esc(s.mission)}</p>
-      <div class="rm-lanes">${LANES.map(l => lane(l, s[l.key])).join("")}</div>
-    </section>`).join("");
-
   el.innerHTML = `
-    <div class="section-title">Project roadmap</div>
-    <p class="rm-intro">${esc(ROADMAP_INTRO)}</p>
-    <p class="rm-note">${esc(ROADMAP_NOTE)}</p>
+    <div class="section-title">Roadmap</div>
     ${legend()}
-    <div class="rm-chapters">${chapters}</div>
+    <div class="rm-sectors">${ROADMAP_SECTORS.map(sector).join("")}</div>
   `;
 }
