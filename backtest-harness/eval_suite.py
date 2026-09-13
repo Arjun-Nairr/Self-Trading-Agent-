@@ -24,6 +24,22 @@ experiment. Implements two DELIBERATELY SEPARATE capabilities:
    -- there is nothing here *capable* of looking at agent decisions or
    P&L when choosing months, by construction, not by convention.
 
+   FIXED-WATCHLIST VIABILITY AUDIT (2026-09-13 correction pass, part 2):
+   SPY only proves the BROAD market is a genuine example of a regime --
+   it says nothing about whether the actual fixed 10-name watchlist
+   (`watchlist/watchlist.json`) has enough real historical data to be
+   evaluated normally in a given month. Every selected episode is
+   audited read-only, through the SAME existing production paths the
+   harness already uses (`run_backtest.fetch_technicals` for technical-
+   analysis data availability, `fetch_daily_closes` for a purely
+   descriptive movement/volatility summary) -- never the trading agent,
+   never Neon, never a new run, never the watchlist itself, never a
+   trade outcome. See `audit_episode_watchlist_viability` /
+   `WATCHLIST_AUDIT_METHOD`. A month failing the audit is never included
+   in the manifest -- `propose_manifest` fails clearly and names the
+   ticker/month instead. Low movement is explicitly NOT a failure --
+   only missing/insufficient point-in-time data is.
+
 2. FUTURE RUNNER -- run_configuration(): given an APPROVED, untampered
    manifest and an explicit configuration (e.g. fundamentals on/off, or a
    future approved rule variant), runs run_backtest.py's REAL, UNCHANGED
@@ -37,8 +53,13 @@ experiment. Implements two DELIBERATELY SEPARATE capabilities:
    episode -- the actual per-episode executor (_run_episode, leading
    underscore) is internal precisely so approval cannot be bypassed by
    calling a lower-level function directly; run_configuration verifies
-   the manifest (require_approved) BEFORE any register_run, journal
-   access, market-data call, checkpoint creation, or state mutation.
+   the manifest (require_approved) AND its per-episode watchlist
+   viability audit (_require_valid_watchlist_viability) BEFORE any
+   register_run, journal access, market-data call, checkpoint creation,
+   or state mutation. A hash-valid, genuinely-approved manifest whose
+   audit is missing/malformed/failing is refused just as hard as an
+   unapproved one -- approval alone was never proof the fixed watchlist
+   is actually testable in every episode.
    NEITHER this module's own top-level code NOR its tests ever call
    run_configuration/_run_episode against real Docker/Neon/Hermes -- see
    test_eval_suite.py's fakes. It exists to be called later, by a human/
@@ -99,12 +120,24 @@ SELLOFF_THRESHOLD_PCT = -5.0
 # points -- an ordinary SPY month runs well under 1%; 1.5 marks a
 # genuinely turbulent one.
 HIGH_VOLATILITY_THRESHOLD_PCT = 1.5
+# Correction pass (2026-09-13), part 1: "sideways" used to be a residual
+# bucket -- any month that simply missed the rally/selloff cutoffs, even
+# one that drifted materially. Now it requires BOTH a small net move AND
+# low daily variance -- a genuinely quiet month, not merely an
+# unremarkable one.
+SIDEWAYS_RETURN_BAND_PCT = (-2.0, 2.0)
+SIDEWAYS_VOL_THRESHOLD_PCT = 1.0
 CLASSIFICATION_METHOD = (
-    "month regime = 'high_volatility' if stdev(daily %% returns within the "
-    "month) >= %.1f pct pts; elif monthly_return_pct >= %.1f: 'rally'; elif "
-    "monthly_return_pct <= %.1f: 'selloff'; else 'sideways' -- checked in "
-    "that fixed priority order, so a month gets exactly one label."
-) % (HIGH_VOLATILITY_THRESHOLD_PCT, RALLY_THRESHOLD_PCT, SELLOFF_THRESHOLD_PCT)
+    "month regime, checked in this exact priority order so a month gets exactly one "
+    "label: 'high_volatility' if stdev(daily %% returns within the month) >= %.1f pct "
+    "pts; elif monthly_return_pct >= %.1f: 'rally'; elif monthly_return_pct <= %.1f: "
+    "'selloff'; elif %.1f <= monthly_return_pct <= %.1f AND stdev < %.1f pct pts: "
+    "'sideways' (genuinely quiet -- small net move AND low daily variance, never just "
+    "a month that missed the rally/selloff cutoffs); else 'unclassified' -- excluded "
+    "from both the comparison and holdout pools, never sampled, never silently forced "
+    "into 'sideways' or any other label."
+) % (HIGH_VOLATILITY_THRESHOLD_PCT, RALLY_THRESHOLD_PCT, SELLOFF_THRESHOLD_PCT,
+     SIDEWAYS_RETURN_BAND_PCT[0], SIDEWAYS_RETURN_BAND_PCT[1], SIDEWAYS_VOL_THRESHOLD_PCT)
 
 # The most recent HOLDOUT_MONTHS_COUNT eligible months are the DEFAULT
 # holdout pool -- expanded backward (never touched forward) only as much
@@ -116,11 +149,14 @@ HOLDOUT_EPISODES_PER_REGIME = 1
 # Correction pass (2026-09-13): a valid holdout (and comparison) set must
 # cover every one of these regimes -- see select_holdout_pool.
 REQUIRED_REGIMES = frozenset({"rally", "selloff", "high_volatility", "sideways"})
-# v2 (was 1): holdout selection is now a deterministic expand-until-covered
-# search rather than a fixed trailing window, and the manifest records
-# "holdout_pool" (start/size/initial_size/expansion_rule) instead of the
-# old flat "holdout_months_count" -- see propose_manifest.
-MANIFEST_VERSION = 2
+# v3 (was 2): classify_regime now requires "sideways" to be genuinely
+# quiet (see SIDEWAYS_RETURN_BAND_PCT/SIDEWAYS_VOL_THRESHOLD_PCT above);
+# a month satisfying none of the 4 required regimes is "unclassified"
+# and excluded from sampling instead of being forced into "sideways".
+# The manifest also gained watchlist_tickers/watchlist_audit_method/
+# watchlist_audit_version, and each episode gained a watchlist_viability
+# section -- see audit_episode_watchlist_viability / propose_manifest.
+MANIFEST_VERSION = 3
 MANIFEST_DIR = Path(__file__).resolve().parent / "eval_suites"
 
 
@@ -153,6 +189,18 @@ def _nth_month_from_end(end: date, n: int) -> tuple[int, int]:
     return total // 12, total % 12 + 1
 
 
+def _first_weekday_on_or_after(d: date) -> date:
+    while d.weekday() >= 5:
+        d += timedelta(days=1)
+    return d
+
+
+def _last_weekday_on_or_before(d: date) -> date:
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
 # ---------------------------------------------------------------------
 # 1b. regime classification -- pure, market-regime data only
 # ---------------------------------------------------------------------
@@ -179,14 +227,21 @@ class MonthMetrics:
 
 def classify_regime(monthly_return_pct: float, realized_vol_pct: float) -> str:
     """Fixed priority order -- see CLASSIFICATION_METHOD. Pure, no I/O:
-    takes only the two numbers a month's classification depends on."""
+    takes only the two numbers a month's classification depends on.
+    'unclassified' (correction pass, part 1) is a real, valid outcome --
+    a month that neither rallied/sold off/turned volatile NOR stayed
+    genuinely quiet. Callers must exclude it from sampling, never treat
+    it as sideways by default."""
     if realized_vol_pct >= HIGH_VOLATILITY_THRESHOLD_PCT:
         return "high_volatility"
     if monthly_return_pct >= RALLY_THRESHOLD_PCT:
         return "rally"
     if monthly_return_pct <= SELLOFF_THRESHOLD_PCT:
         return "selloff"
-    return "sideways"
+    if (SIDEWAYS_RETURN_BAND_PCT[0] <= monthly_return_pct <= SIDEWAYS_RETURN_BAND_PCT[1]
+            and realized_vol_pct < SIDEWAYS_VOL_THRESHOLD_PCT):
+        return "sideways"
+    return "unclassified"
 
 
 def compute_month_metrics(closes: dict[str, float], year: int, month: int) -> MonthMetrics | None:
@@ -252,12 +307,25 @@ def select_holdout_pool(
          already lost -- so this is reported immediately, not searched
          around.
 
+    `size` counts CALENDAR months back from eligible_end (what
+    _nth_month_from_end consumes), never the number of entries in
+    `all_months` -- since the correction pass (part 1) excludes
+    "unclassified" months, `all_months` is generally a SPARSE subset of
+    the calendar range, not one entry per calendar month, so the loop
+    must keep expanding until the calendar boundary itself reaches the
+    earliest eligible month, not until `size` reaches len(all_months)
+    (that bound would stop expanding far too early whenever unclassified
+    months are interspersed -- exactly the bug this fixes).
+
     Returns (holdout_start_month, holdout_pool sorted chronologically,
     final_size actually used) -- all three recorded in the manifest so
     the selection is auditable."""
     months_sorted = sorted(all_months, key=lambda m: (m.year, m.month))
+    if not months_sorted:
+        raise ManifestGenerationError("no eligible (classified, non-'unclassified') months at all")
+    earliest = (months_sorted[0].year, months_sorted[0].month)
     size = initial_size
-    while size <= len(months_sorted):
+    while True:
         holdout_start = _nth_month_from_end(eligible_end, size)
         pool = [m for m in months_sorted if (m.year, m.month) >= holdout_start]
         pool_regimes = {m.regime for m in pool}
@@ -275,12 +343,14 @@ def select_holdout_pool(
                     "lower HOLDOUT_MONTHS_COUNT and regenerate. Not fabricating coverage."
                 )
             return holdout_start, pool, size
+        if holdout_start <= earliest:
+            raise ManifestGenerationError(
+                f"even the entire eligible range ({len(months_sorted)} classified months, "
+                f"earliest {earliest[0]}-{earliest[1]:02d}) does not contain all 4 required "
+                f"regimes {sorted(REQUIRED_REGIMES)} -- cannot build a valid holdout pool "
+                "without fabricating coverage. Widen the eligible range and regenerate."
+            )
         size += 1
-    raise ManifestGenerationError(
-        f"even the entire eligible range ({len(months_sorted)} classified months) does not "
-        f"contain all 4 required regimes {sorted(REQUIRED_REGIMES)} -- cannot build a valid "
-        "holdout pool without fabricating coverage. Widen the eligible range and regenerate."
-    )
 
 
 # ---------------------------------------------------------------------
@@ -307,9 +377,132 @@ class ManifestGenerationError(RuntimeError):
     hand-picked months (see this module's own docstring)."""
 
 
+def _load_default_watchlist() -> list[dict]:
+    """The SAME file/shape run_backtest.main() itself loads -- the
+    current fixed 10-name universe, never chosen or filtered here."""
+    return json.loads((REPO / "watchlist" / "watchlist.json").read_text())["tickers"]
+
+
+def _fetch_watchlist_closes(tickers: list[str], start: date, end: date,
+                            fetch_closes=fetch_daily_closes) -> dict[str, dict[str, float]]:
+    """{"TICKER": {"YYYY-MM-DD": close}}, one fetch_daily_closes call per
+    ticker -- reuses the SAME existing maverick-mcp/yfinance path as the
+    SPY fetch above, not a new one. Injectable for tests."""
+    return {t: fetch_closes(t, start, end) for t in tickers}
+
+
+# ---------------------------------------------------------------------
+# 1d. fixed-watchlist viability audit -- read-only (correction pass,
+# part 2). Proves the ACTUAL fixed watchlist (not just the SPY proxy)
+# has enough real historical data to be evaluated normally in a given
+# episode, through the SAME existing production paths run_backtest.py
+# itself uses. Never calls the trading agent, writes Neon, creates a
+# run, alters the watchlist, or inspects a trade outcome.
+# ---------------------------------------------------------------------
+
+WATCHLIST_AUDIT_VERSION = 1
+WATCHLIST_AUDIT_METHOD = (
+    "data-availability only, never a tradability/movement judgement: for each "
+    "fixed-watchlist ticker, call the EXISTING production technical-analysis path "
+    "(run_backtest.fetch_technicals -> maverick's TechnicalService.get_full_analysis) "
+    "at the episode's first and last real (weekday) trading day -- the two extremes "
+    "of the technical service's own trailing-lookback window, which only grows with "
+    "time, so a pass at both ends implies at least as much history on every day "
+    "between (not independently re-checked). A ticker erroring at either end is "
+    "'unavailable' for that episode (insufficient/missing listing history, "
+    "delisting, or a ticker-identity failure). A separate, purely descriptive "
+    "monthly return/volatility range for the full watchlist (the same "
+    "compute_month_metrics used for SPY, applied per ticker) is recorded alongside "
+    "for visibility only -- it never affects validity; a quiet, low-movement name is "
+    "valid evidence, especially in a sideways regime, never a reason to fail an "
+    "episode."
+)
+
+
+def audit_episode_watchlist_viability(episode: dict, watchlist: list[dict],
+                                      fetch_tech=None, fetch_closes=None) -> dict:
+    """Read-only per-episode audit -- see WATCHLIST_AUDIT_METHOD. Both
+    fetchers are injectable (tests always inject a fixture, never a real
+    network/Docker call); `fetch_tech` defaults to run_backtest's own
+    real fetch_technicals (imported as `rb` at module load)."""
+    fetch_tech = fetch_tech or rb.fetch_technicals
+    fetch_closes = fetch_closes or _fetch_watchlist_closes
+    tickers = sorted(t["symbol"] for t in watchlist)
+
+    check_start = _first_weekday_on_or_after(date.fromisoformat(episode["start"]))
+    check_end = _last_weekday_on_or_before(date.fromisoformat(episode["end"]))
+    start_tech = fetch_tech(tickers, check_start)
+    end_tech = fetch_tech(tickers, check_end)
+
+    per_ticker: dict[str, dict] = {}
+    unavailable: list[str] = []
+    for sym in tickers:
+        start_error = (start_tech.get(sym) or {}).get("error")
+        end_error = (end_tech.get(sym) or {}).get("error")
+        usable = start_error is None and end_error is None
+        per_ticker[sym] = {"usable": usable, "start_error": start_error, "end_error": end_error}
+        if not usable:
+            unavailable.append(sym)
+
+    year, month = episode["year"], episode["month"]
+    month_start, month_end = month_bounds(year, month)
+    closes = fetch_closes(tickers, month_start, month_end)
+    movement_per_ticker: dict[str, dict | None] = {}
+    returns, vols = [], []
+    for sym in tickers:
+        m = compute_month_metrics(closes.get(sym, {}), year, month)
+        if m is None:
+            movement_per_ticker[sym] = None
+            continue
+        movement_per_ticker[sym] = {"return_pct": m.monthly_return_pct, "vol_pct": m.realized_vol_pct}
+        returns.append(m.monthly_return_pct)
+        vols.append(m.realized_vol_pct)
+
+    return {
+        "checked_dates": {"start": check_start.isoformat(), "end": check_end.isoformat()},
+        "usable_count": len(tickers) - len(unavailable),
+        "unavailable_count": len(unavailable),
+        "unavailable_tickers": unavailable,
+        "per_ticker": per_ticker,
+        "movement": {
+            "per_ticker": movement_per_ticker,
+            "return_pct_range": [min(returns), max(returns)] if returns else None,
+            "vol_pct_range": [min(vols), max(vols)] if vols else None,
+        },
+        "valid": len(unavailable) == 0,
+    }
+
+
+def _episodes_with_viability(episodes: list[MonthMetrics], watchlist: list[dict],
+                             fetch_tech, fetch_closes) -> list[dict]:
+    """MonthMetrics -> episode dict, each carrying its own
+    watchlist_viability. Fails clearly and NAMES the ticker/month --
+    never silently drops or fabricates coverage for an episode whose
+    watchlist data isn't actually there (correction pass, part 2)."""
+    out = []
+    for m in episodes:
+        ep = m.to_dict()
+        wv = audit_episode_watchlist_viability(ep, watchlist, fetch_tech, fetch_closes)
+        if not wv["valid"]:
+            raise ManifestGenerationError(
+                f"watchlist viability audit failed for {ep['year']}-{ep['month']:02d} "
+                f"({ep['regime']}): ticker(s) {wv['unavailable_tickers']} lack enough "
+                "point-in-time data for the existing technical-analysis path over this "
+                "episode -- cannot include this month in the manifest; widen "
+                "ELIGIBLE_RANGE_START, fix the underlying data source, or accept a "
+                "smaller/adjusted watchlist and regenerate. Not fabricating coverage."
+            )
+        ep["watchlist_viability"] = wv
+        out.append(ep)
+    return out
+
+
 def propose_manifest(seed: int, eligible_start: date = ELIGIBLE_RANGE_START,
                      eligible_end: date = ELIGIBLE_RANGE_END,
-                     fetch_closes=fetch_daily_closes) -> dict:
+                     fetch_closes=fetch_daily_closes,
+                     watchlist: list[dict] | None = None,
+                     fetch_tech=None,
+                     fetch_watchlist_closes=None) -> dict:
     """The one function that does real I/O. `fetch_closes` is injectable
     (tests always inject a fixture, never a real network/Docker call).
 
@@ -344,9 +537,22 @@ def propose_manifest(seed: int, eligible_start: date = ELIGIBLE_RANGE_START,
             f"[{eligible_start}, {eligible_end}] had >=2 trading days to classify"
         )
 
+    # Correction pass, part 1: "unclassified" months are excluded from
+    # BOTH pools here, at the single point every downstream selection
+    # (select_holdout_pool, stratified_sample) reads from -- they never
+    # see an "unclassified" regime bucket at all. Still recorded in
+    # all_classified_months below, for a complete, honest audit trail.
+    eligible_months = [m for m in all_months if m.regime != "unclassified"]
+    if not eligible_months:
+        raise ManifestGenerationError(
+            f"every classified month in [{eligible_start}, {eligible_end}] is "
+            "'unclassified' under the current thresholds -- nothing eligible to "
+            "sample from"
+        )
+
     holdout_start, holdout_pool, holdout_pool_size = select_holdout_pool(
-        all_months, eligible_end, HOLDOUT_MONTHS_COUNT)
-    comparison_pool = [m for m in all_months if (m.year, m.month) < holdout_start]
+        eligible_months, eligible_end, HOLDOUT_MONTHS_COUNT)
+    comparison_pool = [m for m in eligible_months if (m.year, m.month) < holdout_start]
 
     episodes = stratified_sample(comparison_pool, EPISODES_PER_REGIME, seed)
     # seed + 1: independent of the comparison draw but still fully
@@ -373,6 +579,10 @@ def propose_manifest(seed: int, eligible_start: date = ELIGIBLE_RANGE_START,
             "an incomplete manifest"
         )
 
+    watchlist = watchlist if watchlist is not None else _load_default_watchlist()
+    episode_dicts = _episodes_with_viability(episodes, watchlist, fetch_tech, fetch_watchlist_closes)
+    holdout_episode_dicts = _episodes_with_viability(holdout_episodes, watchlist, fetch_tech, fetch_watchlist_closes)
+
     manifest = {
         "manifest_version": MANIFEST_VERSION,
         "status": "proposed",
@@ -384,6 +594,8 @@ def propose_manifest(seed: int, eligible_start: date = ELIGIBLE_RANGE_START,
             "rally_pct": RALLY_THRESHOLD_PCT,
             "selloff_pct": SELLOFF_THRESHOLD_PCT,
             "high_volatility_pct": HIGH_VOLATILITY_THRESHOLD_PCT,
+            "sideways_return_band_pct": list(SIDEWAYS_RETURN_BAND_PCT),
+            "sideways_max_vol_pct": SIDEWAYS_VOL_THRESHOLD_PCT,
         },
         "required_regimes": sorted(REQUIRED_REGIMES),
         "selection_seed": seed,
@@ -400,8 +612,11 @@ def propose_manifest(seed: int, eligible_start: date = ELIGIBLE_RANGE_START,
                 "the comparison pool missing one"
             ),
         },
-        "episodes": [m.to_dict() for m in episodes],
-        "holdout_episodes": [m.to_dict() for m in holdout_episodes],
+        "watchlist_tickers": sorted(t["symbol"] for t in watchlist),
+        "watchlist_audit_method": WATCHLIST_AUDIT_METHOD,
+        "watchlist_audit_version": WATCHLIST_AUDIT_VERSION,
+        "episodes": episode_dicts,
+        "holdout_episodes": holdout_episode_dicts,
         "all_classified_months": [m.to_dict() for m in sorted(all_months, key=lambda m: (m.year, m.month))],
     }
     manifest["content_hash"] = compute_content_hash(manifest)
@@ -443,6 +658,15 @@ class ManifestNotApprovedError(ValueError):
     """The manifest's status is not exactly 'approved'."""
 
 
+class ManifestWatchlistViabilityError(ValueError):
+    """An episode's watchlist_viability audit is missing, malformed, or
+    reports a failing ticker (correction pass, part 2). Distinct from
+    ManifestTamperedError: this can fire on a manifest that is perfectly
+    hash-consistent and genuinely approved -- approval and an intact
+    hash only prove nothing was edited since generation, never that a
+    valid audit was ever attached or that it passed."""
+
+
 def verify_manifest(manifest: dict) -> None:
     """Raises ManifestTamperedError on any mismatch -- the one check that
     proves every substantive field is exactly what propose_manifest
@@ -472,6 +696,28 @@ def require_approved(manifest: dict) -> None:
             "a proposed manifest requires explicit human review (edit its "
             "'status' field on the saved JSON file) before any episode may run"
         )
+
+
+def _require_valid_watchlist_viability(manifest: dict, episode_set: str) -> None:
+    """Correction pass, part 2's integration requirement: refuse to run
+    ANY episode in `episode_set` unless every one of them carries a
+    well-formed, passing watchlist_viability section. Called from
+    run_configuration AFTER require_approved but still BEFORE any
+    register_run/run_day/journal/market-data/checkpoint call."""
+    for ep in manifest.get(episode_set) or []:
+        label = f"{ep.get('year')}-{ep.get('month', 0):02d}"
+        wv = ep.get("watchlist_viability")
+        if not isinstance(wv, dict) or "valid" not in wv or "unavailable_tickers" not in wv:
+            raise ManifestWatchlistViabilityError(
+                f"episode {label} has no well-formed watchlist_viability audit -- "
+                "refusing to execute without proof the fixed watchlist has enough "
+                "point-in-time data for this episode"
+            )
+        if not wv["valid"] or wv["unavailable_tickers"]:
+            raise ManifestWatchlistViabilityError(
+                f"episode {label} failed its watchlist viability audit -- unavailable "
+                f"ticker(s) {wv['unavailable_tickers']} -- refusing to execute"
+            )
 
 
 # =======================================================================
@@ -670,11 +916,13 @@ def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
     """THE public comparison entry point -- the only function in this
     module allowed to execute an episode (correction pass, requirement 1:
     _run_episode is internal and must never be called directly). Requires
-    an APPROVED, untampered manifest: require_approved runs FIRST, before
-    any register_run, journal access, market-data call, checkpoint
-    creation, or state mutation for even the first episode -- a
-    'proposed' or tampered manifest causes zero calls into any of that
-    (see test_eval_suite.py's dedicated public-API test).
+    an APPROVED, untampered manifest AND a passing watchlist_viability
+    audit on every episode about to run: require_approved, then
+    _require_valid_watchlist_viability, both run BEFORE any register_run,
+    journal access, market-data call, checkpoint creation, or state
+    mutation for even the first episode -- a 'proposed'/tampered manifest,
+    or one missing/failing its watchlist audit, causes zero calls into
+    any of that (see test_eval_suite.py's dedicated public-API tests).
 
     Runs `config` against every episode in manifest[episode_set]
     ('episodes', the comparison suite, by default; 'holdout_episodes' for
@@ -687,6 +935,7 @@ def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
     require_approved(manifest)
     if episode_set not in ("episodes", "holdout_episodes"):
         raise ValueError(f"episode_set must be 'episodes' or 'holdout_episodes', got {episode_set!r}")
+    _require_valid_watchlist_viability(manifest, episode_set)
     per_episode = [
         _run_episode(ep, config, run_kind, watchlist, checkpoint_dir)
         for ep in manifest[episode_set]
@@ -725,6 +974,10 @@ def main() -> None:
         hp = manifest["holdout_pool"]
         print(f"holdout pool: starts {hp['start']}, {hp['size_months']} months "
               f"(initial {hp['initial_size_months']}, expanded={hp['expanded']})")
+        n_episodes = len(manifest["episodes"]) + len(manifest["holdout_episodes"])
+        print(f"watchlist viability: {len(manifest['watchlist_tickers'])} tickers, "
+              f"all usable across all {n_episodes} selected episodes "
+              "(propose_manifest would have failed clearly otherwise)")
         print("comparison episodes:")
         for e in manifest["episodes"]:
             print(f"  {e['year']}-{e['month']:02d}  {e['regime']:<15} "

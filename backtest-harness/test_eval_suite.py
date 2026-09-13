@@ -3,7 +3,8 @@ test_eval_suite.py -- pure/fixture-only tests for eval_suite.py (no real
 Docker/Neon/Hermes calls anywhere in this file -- see each test's fake).
 
 Covers exactly what the regime-diverse evaluation-suite block requires,
-including the 2026-09-13 correction pass:
+including the 2026-09-13 correction passes (approval/fill-metric/holdout-
+coverage, then regime-model/watchlist-viability):
   1. determinism from seed (same seed + data -> same episode selection)
   2. regime coverage (rally/selloff/high_volatility/sideways all present
      in BOTH the comparison suite and the holdout set)
@@ -18,6 +19,15 @@ including the 2026-09-13 correction pass:
   7. fill_count means actual fills only, never queued proposals
   8. deterministic holdout-pool expansion, and clear failure when valid
      four-regime coverage is impossible
+  9. "sideways" requires a genuinely quiet month (not a residual bucket);
+     a moderately drifting calm month is "unclassified" and excluded
+     from both sampled sets, which still cover all 4 required regimes
+  10. fixed-watchlist viability audit: data-availability failures fail
+      manifest generation clearly (naming the ticker/month); low
+      movement never fails it; tampering with the audit is caught by
+      the existing hash check; an approved, hash-consistent manifest
+      missing/failing its audit is still refused by the public API
+      before any execution-side call
 
 Run: python test_eval_suite.py
 """
@@ -31,16 +41,51 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_suite import (                                              # noqa: E402
     EpisodeConfig, ManifestNotApprovedError, ManifestTamperedError,
-    ManifestGenerationError, MonthMetrics, compute_content_hash,
-    month_bounds, month_range, propose_manifest, require_approved,
-    run_configuration, select_holdout_pool, stratified_sample,
-    verify_manifest,
+    ManifestGenerationError, ManifestWatchlistViabilityError, MonthMetrics,
+    classify_regime, compute_content_hash, month_bounds, month_range,
+    propose_manifest, require_approved, run_configuration,
+    select_holdout_pool, stratified_sample, verify_manifest,
 )
 
 ELIGIBLE_START = date(2021, 1, 1)
 ELIGIBLE_END = date(2023, 12, 31)  # 3 years -- plenty of months, fast tests
 
 REGIME_CYCLE = ["rally", "selloff", "high_volatility", "sideways"]
+
+# A small fixture watchlist -- shape-identical to the real
+# watchlist/watchlist.json (correction pass, part 2), never the real
+# 10-name file (these tests do zero real I/O).
+FIXTURE_WATCHLIST = [
+    {"symbol": "OLN", "name": "Olin Corporation", "sector": "Chemicals"},
+    {"symbol": "WMG", "name": "Warner Music Group Corp.", "sector": "Communication Services"},
+]
+
+
+def _fake_fetch_tech(tickers: list[str], as_of_day: date) -> dict[str, dict]:
+    """Every ticker always has technical-analysis data available."""
+    return {t: {"price": 100.0} for t in tickers}
+
+
+def _fake_fetch_watchlist_closes(tickers: list[str], start: date, end: date) -> dict[str, dict[str, float]]:
+    """Reuses the same deterministic SPY-shaped generator for every
+    watchlist ticker too -- movement description only, never gates."""
+    closes = build_synthetic_closes(start, end)
+    return {t: dict(closes) for t in tickers}
+
+
+def _valid_watchlist_viability(watchlist: list[dict] = FIXTURE_WATCHLIST) -> dict:
+    """Minimal always-passing stub for tests that hand-build a one-off
+    episode dict and are exercising something OTHER than the viability
+    audit itself (that has its own dedicated tests below) -- mirrors the
+    exact shape audit_episode_watchlist_viability produces."""
+    tickers = sorted(t["symbol"] for t in watchlist)
+    return {
+        "checked_dates": {"start": "2023-01-02", "end": "2023-01-02"},
+        "usable_count": len(tickers), "unavailable_count": 0, "unavailable_tickers": [],
+        "per_ticker": {t: {"usable": True, "start_error": None, "end_error": None} for t in tickers},
+        "movement": {"per_ticker": {}, "return_pct_range": None, "vol_pct_range": None},
+        "valid": True,
+    }
 
 
 def _weekdays_in(start: date, end: date) -> list[date]:
@@ -84,9 +129,15 @@ def _fake_fetch_closes(ticker: str, start: date, end: date) -> dict[str, float]:
     return build_synthetic_closes(start, end)
 
 
-def _propose(seed: int, start: date = ELIGIBLE_START, end: date = ELIGIBLE_END) -> dict:
-    return propose_manifest(seed=seed, eligible_start=start, eligible_end=end,
-                            fetch_closes=_fake_fetch_closes)
+def _propose(seed: int, start: date = ELIGIBLE_START, end: date = ELIGIBLE_END,
+            watchlist: list[dict] | None = None, fetch_tech=None,
+            fetch_watchlist_closes=None) -> dict:
+    return propose_manifest(
+        seed=seed, eligible_start=start, eligible_end=end, fetch_closes=_fake_fetch_closes,
+        watchlist=watchlist if watchlist is not None else FIXTURE_WATCHLIST,
+        fetch_tech=fetch_tech or _fake_fetch_tech,
+        fetch_watchlist_closes=fetch_watchlist_closes or _fake_fetch_watchlist_closes,
+    )
 
 
 def _mm(year: int, month: int, regime: str) -> MonthMetrics:
@@ -262,7 +313,8 @@ def test_manifest_generation_error_on_fetch_failure():
 
 def _one_day_episode(day: date, regime: str = "rally") -> dict:
     return {"year": day.year, "month": day.month, "regime": regime,
-            "start": day.isoformat(), "end": day.isoformat()}
+            "start": day.isoformat(), "end": day.isoformat(),
+            "watchlist_viability": _valid_watchlist_viability()}
 
 
 def _approve(manifest: dict) -> dict:
@@ -449,7 +501,8 @@ def _episode_report_from_fake_summaries(summaries: list[dict], *, fundamentals_e
     monday = date(2023, 1, 2)
     manifest["episodes"] = [{"year": 2023, "month": 1, "regime": "rally",
                             "start": monday.isoformat(),
-                            "end": (monday + timedelta(days=len(summaries) - 1)).isoformat()}]
+                            "end": (monday + timedelta(days=len(summaries) - 1)).isoformat(),
+                            "watchlist_viability": _valid_watchlist_viability()}]
     from eval_suite import compute_content_hash as _hash
     manifest["content_hash"] = _hash(manifest)
 
@@ -552,7 +605,8 @@ def test_aggregate_report_uses_the_corrected_fill_field():
     manifest = _approve(_propose(seed=303))
     monday = date(2023, 1, 2)
     manifest["episodes"] = [{"year": 2023, "month": 1, "regime": "rally",
-                            "start": monday.isoformat(), "end": monday.isoformat()}]
+                            "start": monday.isoformat(), "end": monday.isoformat(),
+                            "watchlist_viability": _valid_watchlist_viability()}]
     from eval_suite import compute_content_hash as _hash
     manifest["content_hash"] = _hash(manifest)
     watchlist = [{"symbol": "OLN", "name": "Olin Corporation", "sector": "Chemicals"}]
@@ -635,15 +689,188 @@ def test_select_holdout_pool_fails_clearly_when_expansion_would_empty_the_compar
           "that the comparison pool loses a required regime")
 
 
+# ===========================================================================
+# 9. "sideways" is a genuinely quiet regime, not a residual bucket
+#    (correction pass part 1)
+# ===========================================================================
+
+def test_classify_regime_moderate_drift_becomes_unclassified():
+    check("a +3% return with low volatility is too far from flat to be "
+          "sideways, and too small to be a rally -- unclassified",
+          classify_regime(monthly_return_pct=3.0, realized_vol_pct=0.5), "unclassified")
+    check("a -3% return with low volatility is likewise unclassified, not sideways",
+          classify_regime(monthly_return_pct=-3.0, realized_vol_pct=0.5), "unclassified")
+    print("  ok  a moderately drifting, calm month is 'unclassified', never 'sideways'")
+
+
+def test_classify_regime_genuinely_flat_calm_month_is_sideways():
+    check("a +0.5% return with low volatility is genuinely quiet -- sideways",
+          classify_regime(monthly_return_pct=0.5, realized_vol_pct=0.5), "sideways")
+    check("boundary: vol exactly at the sideways threshold is excluded (>= high_vol side wins "
+          "only above 1.5; between 1.0 and 1.5 it is unclassified, not sideways)",
+          classify_regime(monthly_return_pct=0.5, realized_vol_pct=1.0), "unclassified")
+    print("  ok  a genuinely flat, calm month is 'sideways'")
+
+
+REGIME_CYCLE_WITH_UNCLASSIFIED = ["rally", "selloff", "high_volatility", "sideways", "unclassified"]
+
+
+def build_synthetic_closes_with_unclassified(start: date, end: date) -> dict[str, float]:
+    """Same construction as build_synthetic_closes, but a 5-month cycle
+    that ALSO deliberately produces a genuinely unclassified month each
+    cycle: a moderate, calm drift (~+3%/month, near-zero daily variance)
+    -- too big to be sideways, too small to be a rally, under
+    classify_regime's own real rule (not hand-labeled)."""
+    closes: dict[str, float] = {}
+    price = 100.0
+    for i, (y, m) in enumerate(month_range(start, end)):
+        regime = REGIME_CYCLE_WITH_UNCLASSIFIED[i % 5]
+        m_start, m_end = month_bounds(y, m)
+        days = _weekdays_in(max(m_start, start), min(m_end, end))
+        for j, d in enumerate(days):
+            if regime == "rally":
+                price *= 1.004
+            elif regime == "selloff":
+                price *= 0.996
+            elif regime == "high_volatility":
+                price *= 1.03 if j % 2 == 0 else 0.972
+            elif regime == "sideways":
+                price *= 1.001 if j % 2 == 0 else 0.999
+            else:  # "unclassified" -- moderate, calm drift
+                price *= 1.0015
+            closes[d.isoformat()] = round(price, 6)
+    return closes
+
+
+def test_regime_sets_exclude_unclassified_months():
+    fetch = lambda t, s, e: build_synthetic_closes_with_unclassified(s, e)  # noqa: E731
+    m = propose_manifest(seed=501, eligible_start=ELIGIBLE_START, eligible_end=ELIGIBLE_END,
+                         fetch_closes=fetch, watchlist=FIXTURE_WATCHLIST,
+                         fetch_tech=_fake_fetch_tech, fetch_watchlist_closes=_fake_fetch_watchlist_closes)
+    check_true("this fixture genuinely produces some unclassified months",
+               any(mm["regime"] == "unclassified" for mm in m["all_classified_months"]))
+    comparison_regimes = {e["regime"] for e in m["episodes"]}
+    holdout_regimes = {e["regime"] for e in m["holdout_episodes"]}
+    check_true("comparison episodes never include an unclassified month",
+               "unclassified" not in comparison_regimes)
+    check_true("holdout episodes never include an unclassified month",
+               "unclassified" not in holdout_regimes)
+    for regime in ("rally", "selloff", "high_volatility", "sideways"):
+        check_true(f"comparison suite still covers {regime!r} despite unclassified months present",
+                   regime in comparison_regimes)
+        check_true(f"holdout set still covers {regime!r} despite unclassified months present",
+                   regime in holdout_regimes)
+    print("  ok  unclassified months are recorded in all_classified_months but excluded from both "
+          "sampled sets, which still cover all 4 required regimes")
+
+
+# ===========================================================================
+# 10. Fixed-watchlist viability audit (correction pass part 2)
+# ===========================================================================
+
+def _fetch_tech_one_ticker_always_fails(tickers: list[str], as_of_day: date) -> dict[str, dict]:
+    out = {t: {"price": 100.0} for t in tickers}
+    out[FIXTURE_WATCHLIST[0]["symbol"]] = {"error": "simulated: not enough trailing history"}
+    return out
+
+
+def test_watchlist_audit_fails_manifest_generation_for_missing_ticker_data():
+    try:
+        _propose(seed=601, fetch_tech=_fetch_tech_one_ticker_always_fails)
+        raise AssertionError("expected a permanently-failing watchlist ticker to fail manifest generation")
+    except ManifestGenerationError as exc:
+        check_true("the error names the failing ticker",
+                   FIXTURE_WATCHLIST[0]["symbol"] in str(exc))
+        check_true("the error explains this is a data-availability failure, not a movement judgement",
+                   "point-in-time data" in str(exc))
+    print("  ok  propose_manifest fails clearly and names the failing ticker when the fixed "
+          "watchlist lacks enough point-in-time data for the existing technical-analysis path")
+
+
+def _fetch_watchlist_closes_quiet(tickers: list[str], start: date, end: date) -> dict[str, dict[str, float]]:
+    """Every ticker completely flat -- zero net return, zero variance.
+    Must NOT be rejected: viability is a data-availability check only."""
+    days = _weekdays_in(start, end)
+    closes = {d.isoformat(): 100.0 for d in days}
+    return {t: dict(closes) for t in tickers}
+
+
+def test_watchlist_audit_passes_for_quiet_but_complete_data():
+    m = _propose(seed=603, fetch_tech=_fake_fetch_tech,
+                fetch_watchlist_closes=_fetch_watchlist_closes_quiet)
+    for ep in m["episodes"] + m["holdout_episodes"]:
+        wv = ep["watchlist_viability"]
+        label = f"{ep['year']}-{ep['month']:02d}"
+        check_true(f"{label} watchlist_viability is valid despite zero movement", wv["valid"])
+        check(f"{label} has no unavailable tickers", wv["unavailable_tickers"], [])
+        for sym, mv in wv["movement"]["per_ticker"].items():
+            if mv is not None:
+                check_true(f"{label} {sym} movement is genuinely near zero in this fixture",
+                           abs(mv["return_pct"]) < 0.01 and mv["vol_pct"] < 0.01)
+    print("  ok  quiet-but-complete watchlist data passes viability -- low movement never "
+          "invalidates an episode")
+
+
+def test_watchlist_viability_tampering_invalidates_manifest():
+    m = _propose(seed=605)
+    tampered = copy.deepcopy(m)
+    tampered["episodes"][0]["watchlist_viability"]["unavailable_tickers"].append("FAKE")
+    try:
+        verify_manifest(tampered)
+        raise AssertionError("expected a mutated watchlist_viability field to fail verification")
+    except ManifestTamperedError:
+        pass
+    print("  ok  verify_manifest rejects a manifest whose watchlist_viability was tampered with "
+          "(content hash covers the audit results, same as every other substantive field)")
+
+
+def test_public_api_refuses_manifest_missing_valid_watchlist_viability_before_any_execution_call():
+    """Correction pass part 2's integration requirement -- a manifest can
+    be perfectly hash-consistent AND genuinely 'approved' and STILL be
+    refused if its watchlist_viability audit is missing or failing.
+    Proven through the PUBLIC API, same discipline as the approval-gate
+    tests in section 5: zero register_run/run_day/journal calls."""
+    m = _approve(_propose(seed=607))
+
+    missing = copy.deepcopy(m)
+    del missing["episodes"][0]["watchlist_viability"]
+    missing["content_hash"] = compute_content_hash(missing)  # hash-consistent -- NOT tampering
+
+    failing = copy.deepcopy(m)
+    failing["episodes"][0]["watchlist_viability"]["valid"] = False
+    failing["episodes"][0]["watchlist_viability"]["unavailable_tickers"] = ["OLN"]
+    failing["content_hash"] = compute_content_hash(failing)
+
+    for label, bad_manifest in (("missing", missing), ("failing", failing)):
+        register_calls, run_day_calls, journal_calls = [], [], []
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("eval_suite.register_run", side_effect=lambda *a: register_calls.append(a)), \
+             patch("eval_suite.run_day", side_effect=lambda *a, **k: run_day_calls.append(a)), \
+             patch("eval_suite.fetch_fundamentals_assessment_counts",
+                   side_effect=lambda rid: journal_calls.append(rid) or {}):
+            try:
+                run_configuration(bad_manifest, EpisodeConfig("baseline"), "smoke",
+                                  FIXTURE_WATCHLIST, Path(tmp))
+                raise AssertionError(f"expected a {label} watchlist_viability audit to be refused")
+            except ManifestWatchlistViabilityError:
+                pass
+        check(f"zero register_run calls ({label} audit)", register_calls, [])
+        check(f"zero run_day calls ({label} audit)", run_day_calls, [])
+        check(f"zero journal-access calls ({label} audit)", journal_calls, [])
+    print("  ok  run_configuration refuses an approved, hash-consistent manifest whose "
+          "watchlist_viability audit is missing OR failing, before any execution-side call")
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
             fn()
             print(f"  ok  {name}")
-    print(f"PASS: {checks} assertions -- eval_suite determinism, regime coverage in both sets, "
-          "holdout separation/expansion, manifest hash/tamper rejection, public-API approval-gate "
-          "refusal before any execution call, clean per-episode state isolation, and the corrected "
-          "fill-vs-proposal metric")
+    print(f"PASS: {checks} assertions -- eval_suite determinism, regime coverage in both sets "
+          "(genuinely-quiet sideways vs. excluded unclassified months), holdout separation/expansion, "
+          "manifest hash/tamper rejection, public-API approval-gate and watchlist-viability-gate "
+          "refusal before any execution call, clean per-episode state isolation, the corrected "
+          "fill-vs-proposal metric, and the fixed-watchlist data-availability audit")
 
 
 if __name__ == "__main__":

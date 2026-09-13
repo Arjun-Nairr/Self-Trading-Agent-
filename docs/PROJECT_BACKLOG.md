@@ -407,49 +407,78 @@ document; it is implemented.**
     Prerequisite: must use run-isolated, point-in-time evidence and
     report real sample size.
   - Regime-diverse sampled evaluation suite. Status **`implemented`
-    (infrastructure only, 2026-09-13, corrected same day)** — role
+    (infrastructure only, 2026-09-13, corrected twice same day)** — role
     unchanged: a *prerequisite for* Bayesian optimization, not an
     approved experiment or a run. `backtest-harness/eval_suite.py` (+
-    `test_eval_suite.py`, 57 assertions): (1) **manifest generation** —
-    reads ONLY SPY's own daily closes (existing maverick-mcp/yfinance
-    path), classifies each calendar month in a fixed, documented eligible
-    range by a fixed, pre-committed priority-ordered rule (high_volatility
-    / rally / selloff / sideways), and writes a versioned (`v2`),
+    `test_eval_suite.py`, 128 assertions): (1) **manifest generation** —
+    classifies each calendar month in a fixed, documented eligible range
+    by a fixed, pre-committed priority-ordered rule, stratified-samples a
+    comparison suite + later disjoint holdout, and writes a versioned,
     SHA-256 content-hashed manifest whose `status` is always `"proposed"`.
     (2) **future runner** — `run_configuration` (the only public entry
-    point) / `_run_episode` (internal): refuses a `proposed` or tampered
-    manifest BEFORE any register_run/journal/market-data/checkpoint/state
-    call; reuses `run_backtest.py`'s real, unchanged per-day loop; isolates
-    a fresh Portfolio/masking/checkpoint per one-month episode (never
-    `backtest_state.json`, never Round 2); keeps the EXISTING `training`/
-    `smoke`/`archived` classification. **Correction pass (same day)** fixed
-    three defects: (a) the real executor was public and bypassable —
-    renamed `_run_episode` (internal), `run_configuration` is now the sole
-    public entry point and is the only thing that ever validates a
-    manifest, proven by a test asserting zero register_run/run_day/
-    journal calls for a proposed or tampered-but-claimed-approved
-    manifest; (b) `fill_count` was derived from `decisions` text (a
-    proposal and its later fill share the same "BUY "/"SELL " prefix, so
-    a fully-rejected episode could misreport fills) — `run_day` now emits
-    two small structured fields, `summary["fills"]`/`summary["proposals"]`,
-    and the runner counts only those, with `proposal_count` tracked
-    separately and never called a fill; (c) the committed manifest's
-    holdout lacked a `selloff` month — `select_holdout_pool` now expands
-    the trailing default window backward, one month at a time, only as
-    far as needed for all 4 regimes to appear in BOTH the holdout and the
-    (necessarily shrunk) comparison pool, recording the final pool
-    bounds/size/expansion rule in the manifest, and fails clearly
-    (never fabricates coverage) if the eligible range can't support it.
-    Manifest regenerated, same seed 20260913:
+    point) / `_run_episode` (internal): refuses an unapproved/tampered/
+    audit-incomplete manifest BEFORE any register_run/journal/market-
+    data/checkpoint/state call; reuses `run_backtest.py`'s real, unchanged
+    per-day loop; isolates a fresh Portfolio/masking/checkpoint per
+    one-month episode (never `backtest_state.json`, never Round 2); keeps
+    the EXISTING `training`/`smoke`/`archived` classification.
+    **First correction pass (same day)**: non-bypassable approval
+    (`run_configuration` sole public entry point, proven by zero-call
+    tests), `fill_count` derived from `run_day`'s own structured
+    `summary["fills"]`/`["proposals"]` instead of ambiguous `decisions`
+    text, and guaranteed 4-regime holdout coverage via a documented
+    backward pool-expansion search.
+    **Second correction pass (same day, experiment design)**: (a)
+    `classify_regime`'s `"sideways"` is no longer a residual bucket — it
+    now requires both a small net move (±2%) AND low daily variance
+    (<1.0 pct pt); any month meeting none of the 4 required regimes is
+    `"unclassified"` and excluded from both the comparison and holdout
+    pools (never silently forced into sideways) — this in turn exposed a
+    latent bug in `select_holdout_pool`'s expansion-stop condition (it
+    assumed one classified entry per calendar month; fixed to stop at the
+    calendar boundary of the earliest eligible month instead, now correct
+    against a sparse eligible set); (b) a new **read-only fixed-watchlist
+    viability audit** (`audit_episode_watchlist_viability`) runs for
+    every selected episode, through the SAME production path
+    `run_backtest.py` itself uses (`fetch_technicals` → maverick's
+    `get_full_analysis`) checked at the episode's first/last trading day
+    per ticker, plus a purely descriptive (never-gating) monthly
+    return/volatility range per ticker; `propose_manifest` fails clearly
+    and names the ticker/month if any watchlist name lacks enough
+    point-in-time data (low movement alone never fails it);
+    `run_configuration` separately refuses to execute any manifest whose
+    `watchlist_viability` is missing, malformed, or failing, even if
+    approved and hash-valid (content hash also covers the audit, so
+    tampering with it is caught the same way as any other field).
+    **Manifest regeneration is currently blocked on a real, verified
+    finding, not a code defect**: with the existing eligible range
+    (`2021-01-01`..`2026-01-31`), the new audit correctly caught that two
+    of the ten fixed-watchlist names — RYAN (real IPO 2021-07-22) and
+    ALGM (real IPO 2020-10-29) — don't have enough trailing price history
+    for maverick's technical service until real dates well into
+    2021–2022 (RYAN not until ~2022-06-01, confirmed against real
+    yfinance/maverick-mcp data). Narrowing `ELIGIBLE_RANGE_START` to fix
+    that breaks the OTHER requirement instead: only 2 real `selloff`
+    months exist anywhere after mid-2022 (2022-09, 2022-12), and
+    separating them across a chronological holdout boundary leaves the
+    comparison pool with zero `sideways` months — verified by actually
+    attempting it, not assumed. Per the user's explicit choice (asked
+    directly rather than decided unilaterally — this changes a
+    pre-committed range/coverage tradeoff), `ELIGIBLE_RANGE_START` was
+    left unchanged and no new manifest was generated this pass. The
+    previously-committed
     `backtest-harness/eval_suites/manifest_20260913T154853_887d30cff268.json`
-    — holdout pool expanded to 38 months (2022-12 onward) to find a real
-    selloff month; both sets now cover all 4 regimes (see `HANDOFF.md`
-    §6 for the exact months). **Defined but never invoked** — no episode,
-    comparison, or Bayesian search has run. Still gated on `HANDOFF.md`
-    §10's own measurement/evaluation decision, and additionally on: a
-    human actually approving a manifest (editing its `status` field —
-    the one edit excluded from the content hash), and an explicit
-    go-ahead to run comparisons at all.
+    (`manifest_version: 2`, generated before this pass, no
+    `watchlist_viability`) is now **stale** and `run_configuration`
+    correctly refuses to execute it under the current code — regenerating
+    a valid manifest needs a human decision on the range/coverage
+    tradeoff first. **Defined but never invoked** either way — no
+    episode, comparison, or Bayesian search has run. Still gated on
+    `HANDOFF.md` §10's own measurement/evaluation decision, and
+    additionally on: a human resolving the above tradeoff and generating
+    a fresh manifest, approving it (editing its `status` field — the one
+    edit excluded from the content hash), and an explicit go-ahead to run
+    comparisons at all.
 
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.
