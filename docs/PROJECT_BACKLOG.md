@@ -407,38 +407,49 @@ document; it is implemented.**
     Prerequisite: must use run-isolated, point-in-time evidence and
     report real sample size.
   - Regime-diverse sampled evaluation suite. Status **`implemented`
-    (infrastructure only, 2026-09-13)** — role unchanged: a *prerequisite
-    for* Bayesian optimization, not an approved experiment or a run.
-    `backtest-harness/eval_suite.py` (+ `test_eval_suite.py`, 30
-    assertions): (1) **manifest generation** — reads ONLY SPY's own daily
-    closes (existing maverick-mcp/yfinance path, same proxy
-    `benchmark_sensitivity.py` already uses), classifies each calendar
-    month in a fixed, documented eligible range by a fixed, pre-committed
-    priority-ordered rule (high_volatility / rally / selloff / sideways —
-    thresholds and method recorded in the manifest itself, never inferred
-    after the fact), stratified-samples a comparison suite plus a
-    separate, later, untouched holdout pool via a recorded seed, and
-    writes a versioned, SHA-256 content-hashed manifest whose `status` is
-    always `"proposed"` — this module can never mark its own output
-    `"approved"`. One real manifest generated and committed for review:
-    `backtest-harness/eval_suites/manifest_20260913T153100_a02d247146fb.json`
-    (seed 20260913, range 2021-01-01..2026-01-31; see `HANDOFF.md` §6 for
-    the chosen months). (2) **future runner** — `run_episode`/
-    `run_configuration`: refuses a `proposed` or tampered manifest
-    (`require_approved`); reuses `run_backtest.py`'s real, unchanged
-    per-day loop (point-in-time gating, alias masking, next-day
-    execution, risk checks all untouched); isolates a fresh Portfolio/
-    masking/checkpoint per one-month episode (never `backtest_state.json`,
-    never Round 2); keeps the EXISTING `training`/`smoke`/`archived`
-    classification — a suite/episode's own identity is local report
-    metadata only, never a new run_kind; produces a compact per-episode +
-    aggregate report (returns, drawdown, fills/closed trades, block
-    reasons, `[fundamentals:...]` tag counts when enabled). **Defined but
-    never invoked** — no episode, comparison, or Bayesian search has run.
-    Still gated on `HANDOFF.md` §10's own measurement/evaluation decision,
-    and additionally on: a human actually approving a manifest (editing
-    its `status` field — the one edit excluded from the content hash), and
-    an explicit go-ahead to run comparisons at all.
+    (infrastructure only, 2026-09-13, corrected same day)** — role
+    unchanged: a *prerequisite for* Bayesian optimization, not an
+    approved experiment or a run. `backtest-harness/eval_suite.py` (+
+    `test_eval_suite.py`, 57 assertions): (1) **manifest generation** —
+    reads ONLY SPY's own daily closes (existing maverick-mcp/yfinance
+    path), classifies each calendar month in a fixed, documented eligible
+    range by a fixed, pre-committed priority-ordered rule (high_volatility
+    / rally / selloff / sideways), and writes a versioned (`v2`),
+    SHA-256 content-hashed manifest whose `status` is always `"proposed"`.
+    (2) **future runner** — `run_configuration` (the only public entry
+    point) / `_run_episode` (internal): refuses a `proposed` or tampered
+    manifest BEFORE any register_run/journal/market-data/checkpoint/state
+    call; reuses `run_backtest.py`'s real, unchanged per-day loop; isolates
+    a fresh Portfolio/masking/checkpoint per one-month episode (never
+    `backtest_state.json`, never Round 2); keeps the EXISTING `training`/
+    `smoke`/`archived` classification. **Correction pass (same day)** fixed
+    three defects: (a) the real executor was public and bypassable —
+    renamed `_run_episode` (internal), `run_configuration` is now the sole
+    public entry point and is the only thing that ever validates a
+    manifest, proven by a test asserting zero register_run/run_day/
+    journal calls for a proposed or tampered-but-claimed-approved
+    manifest; (b) `fill_count` was derived from `decisions` text (a
+    proposal and its later fill share the same "BUY "/"SELL " prefix, so
+    a fully-rejected episode could misreport fills) — `run_day` now emits
+    two small structured fields, `summary["fills"]`/`summary["proposals"]`,
+    and the runner counts only those, with `proposal_count` tracked
+    separately and never called a fill; (c) the committed manifest's
+    holdout lacked a `selloff` month — `select_holdout_pool` now expands
+    the trailing default window backward, one month at a time, only as
+    far as needed for all 4 regimes to appear in BOTH the holdout and the
+    (necessarily shrunk) comparison pool, recording the final pool
+    bounds/size/expansion rule in the manifest, and fails clearly
+    (never fabricates coverage) if the eligible range can't support it.
+    Manifest regenerated, same seed 20260913:
+    `backtest-harness/eval_suites/manifest_20260913T154853_887d30cff268.json`
+    — holdout pool expanded to 38 months (2022-12 onward) to find a real
+    selloff month; both sets now cover all 4 regimes (see `HANDOFF.md`
+    §6 for the exact months). **Defined but never invoked** — no episode,
+    comparison, or Bayesian search has run. Still gated on `HANDOFF.md`
+    §10's own measurement/evaluation decision, and additionally on: a
+    human actually approving a manifest (editing its `status` field —
+    the one edit excluded from the content hash), and an explicit
+    go-ahead to run comparisons at all.
 
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.

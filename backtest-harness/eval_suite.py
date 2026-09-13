@@ -24,20 +24,26 @@ experiment. Implements two DELIBERATELY SEPARATE capabilities:
    -- there is nothing here *capable* of looking at agent decisions or
    P&L when choosing months, by construction, not by convention.
 
-2. FUTURE RUNNER -- run_configuration()/run_episode(): given an APPROVED,
-   untampered manifest and an explicit configuration (e.g. fundamentals
-   on/off, or a future approved rule variant), runs run_backtest.py's
-   REAL, UNCHANGED per-day loop once per one-month episode, each with a
-   freshly isolated Portfolio/masking/checkpoint (never touching
-   backtest_state.json/cycle_checkpoint.json, never Round 2), reusing the
-   EXISTING training/smoke/archived classification unchanged (an
-   episode's/suite's own identity is local report metadata only -- never
-   a new run_kind), and produces a compact per-episode + aggregate
-   comparison report. NEITHER this module's own top-level code NOR its
-   tests ever call run_configuration/run_episode against real Docker/
-   Neon/Hermes -- see test_eval_suite.py's fakes. It exists to be called
-   later, by a human/orchestrating script, once an approved manifest and
-   an explicit configuration comparison are actually authorized.
+2. FUTURE RUNNER -- run_configuration(): given an APPROVED, untampered
+   manifest and an explicit configuration (e.g. fundamentals on/off, or a
+   future approved rule variant), runs run_backtest.py's REAL, UNCHANGED
+   per-day loop once per one-month episode, each with a freshly isolated
+   Portfolio/masking/checkpoint (never touching backtest_state.json/
+   cycle_checkpoint.json, never Round 2), reusing the EXISTING training/
+   smoke/archived classification unchanged (an episode's/suite's own
+   identity is local report metadata only -- never a new run_kind), and
+   produces a compact per-episode + aggregate comparison report.
+   run_configuration() is the ONLY PUBLIC entry point that can execute an
+   episode -- the actual per-episode executor (_run_episode, leading
+   underscore) is internal precisely so approval cannot be bypassed by
+   calling a lower-level function directly; run_configuration verifies
+   the manifest (require_approved) BEFORE any register_run, journal
+   access, market-data call, checkpoint creation, or state mutation.
+   NEITHER this module's own top-level code NOR its tests ever call
+   run_configuration/_run_episode against real Docker/Neon/Hermes -- see
+   test_eval_suite.py's fakes. It exists to be called later, by a human/
+   orchestrating script, once an approved manifest and an explicit
+   configuration comparison are actually authorized.
 
 HARD BOUNDARY (same discipline as geometry_scan.py/benchmark_sensitivity.py):
 evaluation infrastructure only. Never wired into AGENTS.md, a prompt, or
@@ -100,12 +106,21 @@ CLASSIFICATION_METHOD = (
     "that fixed priority order, so a month gets exactly one label."
 ) % (HIGH_VOLATILITY_THRESHOLD_PCT, RALLY_THRESHOLD_PCT, SELLOFF_THRESHOLD_PCT)
 
-# The most recent HOLDOUT_MONTHS_COUNT eligible months are reserved as the
-# holdout pool -- never touched by the comparison-suite sampler below.
+# The most recent HOLDOUT_MONTHS_COUNT eligible months are the DEFAULT
+# holdout pool -- expanded backward (never touched forward) only as much
+# as necessary to cover all 4 required regimes; see select_holdout_pool.
+# Never touched by the comparison-suite sampler below.
 HOLDOUT_MONTHS_COUNT = 12
 EPISODES_PER_REGIME = 2
 HOLDOUT_EPISODES_PER_REGIME = 1
-MANIFEST_VERSION = 1
+# Correction pass (2026-09-13): a valid holdout (and comparison) set must
+# cover every one of these regimes -- see select_holdout_pool.
+REQUIRED_REGIMES = frozenset({"rally", "selloff", "high_volatility", "sideways"})
+# v2 (was 1): holdout selection is now a deterministic expand-until-covered
+# search rather than a fixed trailing window, and the manifest records
+# "holdout_pool" (start/size/initial_size/expansion_rule) instead of the
+# old flat "holdout_months_count" -- see propose_manifest.
+MANIFEST_VERSION = 2
 MANIFEST_DIR = Path(__file__).resolve().parent / "eval_suites"
 
 
@@ -215,6 +230,59 @@ def stratified_sample(months: list[MonthMetrics], per_regime: int, seed: int) ->
     return sorted(chosen, key=lambda m: (m.year, m.month))
 
 
+def select_holdout_pool(
+    all_months: list[MonthMetrics], eligible_end: date, initial_size: int,
+) -> tuple[tuple[int, int], list[MonthMetrics], int]:
+    """Deterministic, auditable holdout-pool selection (correction pass,
+    requirement 3). Starts at the trailing `initial_size` calendar months
+    (the documented default). If any of REQUIRED_REGIMES is missing from
+    that pool, expands ONE calendar month backward at a time -- never
+    forward, never a skip -- until all 4 are present. Never touches which
+    months are randomly SAMPLED (that stays stratified_sample's seeded
+    job); this only decides the pool's own chronological boundary.
+
+    Fails clearly (ManifestGenerationError), never silently returning an
+    incomplete holdout or hand-picking a month, in two cases:
+      1. Even the ENTIRE eligible range lacks one of the 4 regimes --
+         there is no boundary that could ever fix that.
+      2. The first boundary where the holdout reaches full coverage
+         leaves the comparison pool (every month strictly before it)
+         missing a regime. Expanding the holdout FURTHER only shrinks
+         the comparison pool more -- it can never recover a regime
+         already lost -- so this is reported immediately, not searched
+         around.
+
+    Returns (holdout_start_month, holdout_pool sorted chronologically,
+    final_size actually used) -- all three recorded in the manifest so
+    the selection is auditable."""
+    months_sorted = sorted(all_months, key=lambda m: (m.year, m.month))
+    size = initial_size
+    while size <= len(months_sorted):
+        holdout_start = _nth_month_from_end(eligible_end, size)
+        pool = [m for m in months_sorted if (m.year, m.month) >= holdout_start]
+        pool_regimes = {m.regime for m in pool}
+        if REQUIRED_REGIMES <= pool_regimes:
+            comparison_pool = [m for m in months_sorted if (m.year, m.month) < holdout_start]
+            comparison_regimes = {m.regime for m in comparison_pool}
+            missing = REQUIRED_REGIMES - comparison_regimes
+            if missing:
+                raise ManifestGenerationError(
+                    f"holdout pool reaches all 4 required regimes only by expanding to "
+                    f"the trailing {size} months (from {holdout_start[0]}-{holdout_start[1]:02d}), "
+                    f"but that leaves the comparison pool (every month before it) missing "
+                    f"{sorted(missing)} -- cannot satisfy full 4-regime coverage in both sets "
+                    "simultaneously from this eligible range; widen ELIGIBLE_RANGE_START or "
+                    "lower HOLDOUT_MONTHS_COUNT and regenerate. Not fabricating coverage."
+                )
+            return holdout_start, pool, size
+        size += 1
+    raise ManifestGenerationError(
+        f"even the entire eligible range ({len(months_sorted)} classified months) does not "
+        f"contain all 4 required regimes {sorted(REQUIRED_REGIMES)} -- cannot build a valid "
+        "holdout pool without fabricating coverage. Widen the eligible range and regenerate."
+    )
+
+
 # ---------------------------------------------------------------------
 # 1c. the one real I/O call -- existing maverick-mcp/yfinance path
 # ---------------------------------------------------------------------
@@ -276,15 +344,34 @@ def propose_manifest(seed: int, eligible_start: date = ELIGIBLE_RANGE_START,
             f"[{eligible_start}, {eligible_end}] had >=2 trading days to classify"
         )
 
-    holdout_start = _nth_month_from_end(eligible_end, HOLDOUT_MONTHS_COUNT)
+    holdout_start, holdout_pool, holdout_pool_size = select_holdout_pool(
+        all_months, eligible_end, HOLDOUT_MONTHS_COUNT)
     comparison_pool = [m for m in all_months if (m.year, m.month) < holdout_start]
-    holdout_pool = [m for m in all_months if (m.year, m.month) >= holdout_start]
 
     episodes = stratified_sample(comparison_pool, EPISODES_PER_REGIME, seed)
     # seed + 1: independent of the comparison draw but still fully
     # reproducible from the single top-level seed -- never a second
     # user-facing seed to track.
     holdout_episodes = stratified_sample(holdout_pool, HOLDOUT_EPISODES_PER_REGIME, seed + 1)
+
+    # Post-condition, not just a hope: select_holdout_pool already
+    # guarantees both pools cover all 4 regimes, so a per_regime>=1
+    # stratified draw is guaranteed to include each -- but a silent
+    # regression here must be loud, never a quietly incomplete manifest.
+    episode_regimes = {e.regime for e in episodes}
+    holdout_regimes = {e.regime for e in holdout_episodes}
+    if not (REQUIRED_REGIMES <= episode_regimes):
+        raise ManifestGenerationError(
+            f"internal error: comparison pool covered all 4 regimes but the sampled "
+            f"episodes only cover {sorted(episode_regimes)} -- refusing to write an "
+            "incomplete manifest"
+        )
+    if not (REQUIRED_REGIMES <= holdout_regimes):
+        raise ManifestGenerationError(
+            f"internal error: holdout pool covered all 4 regimes but the sampled "
+            f"holdout episodes only cover {sorted(holdout_regimes)} -- refusing to write "
+            "an incomplete manifest"
+        )
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
@@ -298,8 +385,21 @@ def propose_manifest(seed: int, eligible_start: date = ELIGIBLE_RANGE_START,
             "selloff_pct": SELLOFF_THRESHOLD_PCT,
             "high_volatility_pct": HIGH_VOLATILITY_THRESHOLD_PCT,
         },
+        "required_regimes": sorted(REQUIRED_REGIMES),
         "selection_seed": seed,
-        "holdout_months_count": HOLDOUT_MONTHS_COUNT,
+        "holdout_pool": {
+            "start": f"{holdout_start[0]}-{holdout_start[1]:02d}",
+            "size_months": holdout_pool_size,
+            "initial_size_months": HOLDOUT_MONTHS_COUNT,
+            "expanded": holdout_pool_size > HOLDOUT_MONTHS_COUNT,
+            "expansion_rule": (
+                "start from the trailing initial_size_months months; if any of the 4 "
+                "required regimes is missing, expand one calendar month backward at a "
+                "time until all 4 are present; fail clearly if the full eligible range "
+                "still cannot cover all 4, or if reaching holdout coverage would leave "
+                "the comparison pool missing one"
+            ),
+        },
         "episodes": [m.to_dict() for m in episodes],
         "holdout_episodes": [m.to_dict() for m in holdout_episodes],
         "all_classified_months": [m.to_dict() for m in sorted(all_months, key=lambda m: (m.year, m.month))],
@@ -434,12 +534,19 @@ def _max_drawdown_pct(equity_curve: list[float]) -> float:
     return round(worst, 4)
 
 
-def run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
-                watchlist: list[dict], checkpoint_dir: Path,
-                fetch_fundamentals_fn=fetch_fundamentals_assessment_counts) -> dict:
-    """Runs ONE one-month episode through run_backtest's real, unchanged
-    per-day loop (Portfolio/RunMasking/run_day/_run_cycle_or_halt) --
-    fresh in-memory Portfolio, fresh RunMasking, and CHECKPOINT_PATH
+def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
+                 watchlist: list[dict], checkpoint_dir: Path,
+                 fetch_fundamentals_fn=fetch_fundamentals_assessment_counts) -> dict:
+    """INTERNAL. Runs ONE one-month episode through run_backtest's real,
+    unchanged per-day loop (Portfolio/RunMasking/run_day/
+    _run_cycle_or_halt). Do not call directly -- this performs zero
+    manifest/approval validation of its own; run_configuration() is the
+    only public entry point, and it verifies the manifest (require_
+    approved) before calling this for even the first episode (correction
+    pass, requirement 1: approval must not be bypassable through the
+    public API).
+
+    Fresh in-memory Portfolio, fresh RunMasking, and CHECKPOINT_PATH
     isolated to `checkpoint_dir` for the duration of this call only
     (restored after, even on failure -- see the try/finally) so a
     concurrent real run's own checkpoint can never be touched. Never
@@ -500,10 +607,20 @@ def run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
         except Exception:
             fundamentals_assessment_counts = None  # best-effort enrichment only
 
-    fill_count = sum(
-        1 for s in day_summaries for line in s["decisions"]
-        if line.startswith("BUY ") or line.startswith("SELL ")
-    )
+    # Correction pass, requirement 2: derived from run_day's own
+    # structured summary["fills"]/summary["proposals"] lists (added
+    # alongside this correction -- see run_backtest.py), never from
+    # matching text prefixes in summary["decisions"] (which mixes a
+    # newly-queued proposal and a today-resolved fill under the same
+    # "BUY "/"SELL " prefix -- the exact bug this replaces). A queued
+    # proposal that is later rejected/superseded contributes to
+    # proposal_count only, never fill_count; only an order that actually
+    # filled (execution-sim status == "filled", the BUY/SELL branches
+    # inside run_day's chronological event loop) is ever counted as a
+    # fill, mechanical stop/target/time-stop exits included in neither
+    # (see summary["exits"], untouched here).
+    fills = [f for s in day_summaries for f in s.get("fills", [])]
+    proposals = [p for s in day_summaries for p in s.get("proposals", [])]
     blocked_reasons = [line for s in day_summaries for line in s["blocked"]]
     return {
         "episode": {"year": episode["year"], "month": episode["month"], "regime": episode["regime"],
@@ -520,7 +637,8 @@ def run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
             if portfolio.equity_curve else 0.0
         ),
         "max_drawdown_pct": _max_drawdown_pct(portfolio.equity_curve),
-        "fill_count": fill_count,
+        "fill_count": len(fills),
+        "proposal_count": len(proposals),
         "closed_trade_count": len(portfolio.closed_pnl),
         "blocked_count": len(blocked_reasons),
         "blocked_reasons": blocked_reasons[:20],  # bounded -- report stays compact
@@ -540,6 +658,7 @@ def _aggregate_episode_reports(per_episode: list[dict]) -> dict:
         "mean_return_pct": round(sum(returns) / n, 4),
         "worst_max_drawdown_pct": round(min(drawdowns), 4),
         "total_fills": sum(e["fill_count"] for e in per_episode),
+        "total_proposals": sum(e["proposal_count"] for e in per_episode),
         "total_closed_trades": sum(e["closed_trade_count"] for e in per_episode),
         "total_blocked": sum(e["blocked_count"] for e in per_episode),
     }
@@ -548,21 +667,28 @@ def _aggregate_episode_reports(per_episode: list[dict]) -> dict:
 def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
                       watchlist: list[dict], checkpoint_dir: Path,
                       episode_set: str = "episodes") -> dict:
-    """The comparison entry point -- requires an APPROVED, untampered
-    manifest (require_approved raises otherwise). Runs `config` against
-    every episode in manifest[episode_set] ('episodes', the comparison
-    suite, by default; 'holdout_episodes' for the separate, later,
-    out-of-sample set), each freshly isolated (see run_episode), and
-    returns a compact per-episode + aggregate report. Every configuration
-    compared this way must be run against the SAME manifest object/file
-    for the comparison to be fair -- this function itself does not enforce
-    that across separate calls, the caller must reuse one loaded manifest.
-    NEVER called by this module's own code."""
+    """THE public comparison entry point -- the only function in this
+    module allowed to execute an episode (correction pass, requirement 1:
+    _run_episode is internal and must never be called directly). Requires
+    an APPROVED, untampered manifest: require_approved runs FIRST, before
+    any register_run, journal access, market-data call, checkpoint
+    creation, or state mutation for even the first episode -- a
+    'proposed' or tampered manifest causes zero calls into any of that
+    (see test_eval_suite.py's dedicated public-API test).
+
+    Runs `config` against every episode in manifest[episode_set]
+    ('episodes', the comparison suite, by default; 'holdout_episodes' for
+    the separate, later, out-of-sample set), each freshly isolated (see
+    _run_episode), and returns a compact per-episode + aggregate report.
+    Every configuration compared this way must be run against the SAME
+    manifest object/file for the comparison to be fair -- this function
+    itself does not enforce that across separate calls, the caller must
+    reuse one loaded manifest. NEVER called by this module's own code."""
     require_approved(manifest)
     if episode_set not in ("episodes", "holdout_episodes"):
         raise ValueError(f"episode_set must be 'episodes' or 'holdout_episodes', got {episode_set!r}")
     per_episode = [
-        run_episode(ep, config, run_kind, watchlist, checkpoint_dir)
+        _run_episode(ep, config, run_kind, watchlist, checkpoint_dir)
         for ep in manifest[episode_set]
     ]
     return {
@@ -596,6 +722,9 @@ def main() -> None:
         print(f"wrote {path} (status=proposed -- human review required before use)")
         print(f"eligible range: {manifest['eligible_range']['start']} .. {manifest['eligible_range']['end']}")
         print(f"proxy: {manifest['proxy_ticker']}  seed: {manifest['selection_seed']}")
+        hp = manifest["holdout_pool"]
+        print(f"holdout pool: starts {hp['start']}, {hp['size_months']} months "
+              f"(initial {hp['initial_size_months']}, expanded={hp['expanded']})")
         print("comparison episodes:")
         for e in manifest["episodes"]:
             print(f"  {e['year']}-{e['month']:02d}  {e['regime']:<15} "

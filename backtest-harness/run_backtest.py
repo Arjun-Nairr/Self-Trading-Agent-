@@ -3038,7 +3038,16 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # -- see the re-derivation right after that call, below.
     active_limits = limits_ctx.get("limits") or RiskLimits()
     active_min_rr = active_limits.min_reward_risk
-    summary = {"day": str(day), "exits": [], "decisions": [], "blocked": [], "usage": {}}
+    summary = {
+        "day": str(day), "exits": [], "decisions": [], "blocked": [], "usage": {},
+        # Purely additive structured signals (correction pass, eval_suite.py
+        # requirement 2) -- "decisions" mixes human-readable lines for BOTH
+        # a newly queued proposal and a today-resolved fill of yesterday's
+        # queue, indistinguishable by prefix alone. "fills"/"proposals" give
+        # a caller an unambiguous count without parsing any text. Never read
+        # by run_day/main() itself -- observability only, same as "exits".
+        "fills": [], "proposals": [],
+    }
     day_label = masking.day_index(day)
     # Deterministic per (run, day) -- see record_snapshot_once's docstring.
     # run_key doubles as this run's run_id (main() now generates it as a
@@ -3211,6 +3220,11 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                         f"at 09:45 ET (queued day {order.queued_day_index + 1}) [{decision_id[:8]}]"
                     )
                     summary["decisions"].append(line)
+                    summary["fills"].append({
+                        "ticker": ticker, "alias": order.alias, "action": "BUY",
+                        "quantity": fill["fill_quantity"], "fill_price": fill["fill_price"],
+                        "decision_id": decision_id,
+                    })
                     activity.append(("order_placed", line, decision_id))
                 else:  # SELL
                     holding = working.holdings[ticker]
@@ -3228,6 +3242,11 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                         f"${working.closed_pnl[-1]:+,.2f}) [{decision_id[:8]}]"
                     )
                     summary["decisions"].append(line)
+                    summary["fills"].append({
+                        "ticker": ticker, "alias": order.alias, "action": "SELL",
+                        "quantity": fill["fill_quantity"], "fill_price": fill["fill_price"],
+                        "decision_id": decision_id,
+                    })
                     activity.append(("exit", line, decision_id))
 
     # Every order queued yesterday has now been resolved one way or
@@ -3721,6 +3740,10 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             available_cash -= quantity * entry_price
         line = f"{action} {real_ticker} ({decision['alias']}) x{quantity} queued for next trading day's open"
         summary["decisions"].append(line)
+        summary["proposals"].append({
+            "ticker": real_ticker, "alias": decision["alias"], "action": action,
+            "quantity": quantity, "decision_id": decision_id,
+        })
         activity.append(("order_queued", line, decision_id))
 
     # -- best-effort observability, deferred (locked architectural

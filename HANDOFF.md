@@ -69,27 +69,11 @@ Two rounds so far:
 - **Activity-escalation profile: still `aggressive_v1_base`** (min reward:risk 1.5:1) — never escalated. Current block started trading-day 40 with 4 completions so far (boundary at day 60, not yet reached).
 - **Round 2 itself ran entirely under `openai-codex` / `gpt-5.4-mini` / medium reasoning** — unchanged for the full 50-cycle run. The gateway's runtime model was migrated to `gpt-5.6-terra` on 2026-09-12, AFTER Round 2 completed and its state was last touched — see §6's fundamentals entry for the migration and §5 for the current locked value.
 
-**Verified via real, run-scoped Neon queries:** no duplicate `cycle_id` or
-`decision_id` anywhere in this run; exactly one `cycle_failed` activity
-row exists (the Day 50 incident below — preserved intentionally, not
-deleted); `backtest_cycle_evidence` holds exactly 25 rows (cycles 26–50
-only — see §7); all 35 tranche-1 `trades` rows are byte-for-byte
-unchanged from their original values.
+**Verified via real, run-scoped Neon queries:** no duplicate `cycle_id` or `decision_id` anywhere in this run; exactly one `cycle_failed` activity row exists (the Day 50 incident below — preserved intentionally, not deleted); `backtest_cycle_evidence` holds exactly 25 rows (cycles 26–50 only — see §7); all 35 tranche-1 `trades` rows are byte-for-byte unchanged from their original values.
 
-**Git:** branch `round2-prep-judgment-layer`, merged into `main` and
-pushed (§7's benchmark/sensitivity work is the most recent addition).
-`docs/PROJECT_BACKLOG.md` and `docs/research/` are separate,
-still-iterating untracked documents — leave untouched unless the user
-says otherwise. Full commit history: `git log`, not restated here.
+**Git:** branch `round2-prep-judgment-layer`, merged into `main` and pushed (§7's benchmark/sensitivity work is the most recent addition). `docs/PROJECT_BACKLOG.md` and `docs/research/` are separate, still-iterating untracked documents — leave untouched unless the user says otherwise. Full commit history: `git log`, not restated here.
 
-**The Day 50 incident, resolved:** a real `expected_reward_risk`
-BUY/SELL contract mismatch halted cycle 9 of a resumed attempt (real date
-2026-04-07); fixed in `7c4ac06` (made the contract action-aware: BUY
-requires finite `>0`, SELL/other permits finite `>=0`), verified against
-the real checkpointed payload, and the run completed cleanly to 50 cycles
-with zero further failures. Full narrative:
-`docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md`. The historical
-`cycle_failed` Neon row is preserved as an honest record, not deleted.
+**The Day 50 incident, resolved:** a real `expected_reward_risk` BUY/SELL contract mismatch halted cycle 9 of a resumed attempt (real date 2026-04-07); fixed in `7c4ac06` (made the contract action-aware: BUY requires finite `>0`, SELL/other permits finite `>=0`), verified against the real checkpointed payload, and the run completed cleanly to 50 cycles with zero further failures. Full narrative: `docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md`. The historical `cycle_failed` Neon row is preserved as an honest record, not deleted.
 
 ---
 
@@ -216,27 +200,43 @@ restatement of every threshold.
   end-to-end, but no BUY has ever actually filled in it (all 3 rejected
   at execution) — frozen, unapproved pending that decision.
 - **Regime-diverse evaluation suite** (`backtest-harness/eval_suite.py`,
-  `test_eval_suite.py` 30 assertions, 2026-09-13) — infrastructure only,
-  not an approved experiment (`docs/PROJECT_BACKLOG.md` §4). Manifest
-  generation reads ONLY SPY closes (existing maverick-mcp/yfinance path),
-  classifies each month by a fixed pre-committed rule, stratified-samples
-  a comparison suite + a separate untouched later holdout set via a
-  recorded seed, and writes a versioned, SHA-256-hashed manifest whose
-  `status` is always `"proposed"`. One real manifest generated and
-  committed: `eval_suites/manifest_20260913T153100_a02d247146fb.json` —
-  seed 20260913, range 2021-01-01..2026-01-31; comparison: 2021-04
-  sideways, 2022-04/05 high_volatility, 2022-07 rally, 2022-09/12
-  selloff, 2023-06 rally, 2024-01 sideways; holdout: 2025-04
-  high_volatility, 2025-05 rally, 2025-09 sideways (no selloff month in
-  the trailing 12-month holdout window — real data, not fabricated
-  coverage). The runner (`run_episode`/`run_configuration`) refuses a
-  `proposed` or tampered manifest, reuses `run_backtest.py`'s real,
-  unchanged per-day loop with a fresh isolated Portfolio/checkpoint per
-  episode (never `backtest_state.json`, never Round 2), and keeps the
-  existing `training`/`smoke`/`archived` classification unchanged — it is
-  **defined but was never invoked**: no episode, comparison, or Bayesian
-  search has run. Approval (editing the manifest's `status` field) and a
-  separate explicit go-ahead to run anything both remain outstanding.
+  `test_eval_suite.py` 57 assertions, implemented 2026-09-13, corrected
+  same day) — infrastructure only, not an approved experiment
+  (`docs/PROJECT_BACKLOG.md` §4). Manifest generation reads ONLY SPY
+  closes (maverick-mcp/yfinance), classifies each month by a fixed
+  pre-committed rule, and writes a versioned (`v2`), SHA-256-hashed
+  manifest whose `status` is always `"proposed"`. **Correction pass
+  (same day)** fixed three defects found in the first cut: (1)
+  **approval is now non-bypassable** — the real per-episode executor
+  (`_run_episode`) is internal; `run_configuration()` is the ONLY public
+  entry point and verifies the manifest BEFORE any `register_run`/
+  journal/market-data/checkpoint/state call (proven by a test that
+  asserts zero such calls for a `proposed` or tampered-but-claimed-
+  approved manifest); (2) **`fill_count` now means actual fills only** —
+  `run_day` gained two small structured fields, `summary["fills"]`/
+  `summary["proposals"]`, so the runner never again derives a count from
+  `decisions` text (which mixed a same-prefix proposal and a resolved
+  fill — the original bug); a separate `proposal_count` is tracked and
+  never called a fill; (3) **holdout coverage is now guaranteed** — the
+  holdout pool starts at the trailing 12 months and expands backward,
+  one month at a time, only as far as needed for all 4 regimes
+  (rally/selloff/high_volatility/sideways) to appear in BOTH the holdout
+  and the (necessarily shrunk) comparison pool, or fails clearly if
+  impossible; real SPY data required expanding to 38 months (2022-12
+  onward) to find a selloff month at all. Manifest regenerated,
+  same seed: `eval_suites/manifest_20260913T154853_887d30cff268.json` —
+  seed 20260913, range 2021-01-01..2026-01-31; comparison (8 months, all
+  4 regimes): 2021-01/06 sideways, 2021-12 rally, 2022-01 selloff,
+  2022-04/05 high_volatility, 2022-07 rally, 2022-09 selloff; holdout (4
+  months, all 4 regimes, pool 2022-12..2026-01): 2022-12 selloff, 2025-03
+  sideways, 2025-04 high_volatility, 2025-05 rally. The runner still
+  reuses `run_backtest.py`'s real, unchanged per-day loop with a fresh
+  isolated Portfolio/checkpoint per episode (never `backtest_state.json`,
+  never Round 2) and the existing `training`/`smoke`/`archived`
+  classification — **defined but never invoked**: no episode, comparison,
+  or Bayesian search has run. Approval (editing the manifest's `status`
+  field) and a separate explicit go-ahead to run anything both remain
+  outstanding.
 
 ---
 
