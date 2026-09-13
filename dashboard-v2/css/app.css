@@ -80,17 +80,14 @@ header.topbar {
 
 .controls { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
-.segmented {
-  display: inline-flex; border: 1px solid var(--border-strong); border-radius: 8px; overflow: hidden;
-  background: var(--surface);
+/* Fixed, non-interactive scope label — dashboard-exposure correction
+   (2026-09-13): live paper has no route/control anywhere in this app;
+   this just says so in the header. Not a button, nothing to toggle. */
+.mode-badge {
+  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  color: var(--text-dim); background: var(--surface-2); border: 1px solid var(--border-strong);
+  border-radius: 6px; padding: 3px 8px; white-space: nowrap;
 }
-.segmented button {
-  border: none; background: transparent; padding: 8px 14px; font-size: 13px; font-weight: 600;
-  color: var(--text-dim); cursor: pointer; transition: background 0.15s, color 0.15s;
-}
-.segmented button + button { border-left: 1px solid var(--border-strong); }
-.segmented button[aria-pressed="true"] { background: var(--blue); color: #fff; }
-.segmented button:hover:not([aria-pressed="true"]) { background: var(--surface-2); color: var(--text); }
 
 select.run-select {
   border: 1px solid var(--border-strong); border-radius: 8px; padding: 7px 10px; font-size: 13px;

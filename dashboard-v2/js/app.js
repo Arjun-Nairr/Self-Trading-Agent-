@@ -20,6 +20,11 @@ const PAGES = {
 const STATIC_PAGES = new Set(["roadmap"]);
 
 const state = {
+  // Dashboard-exposure correction (2026-09-13): fixed at "backtest",
+  // never mutated after this — there is no UI control left that can
+  // change it. loadRunData/page renderers still take `mode` as a plain
+  // value (unchanged, live-paper query support preserved in data.js),
+  // it just can never become anything but "backtest" from here.
   mode: "backtest",
   page: "overview",
   runId: null,
@@ -49,7 +54,7 @@ function renderNav() {
 
 function renderRunSelector() {
   const wrap = el("run-select-wrap");
-  if (state.mode !== "backtest" || !state.runs.length) { wrap.innerHTML = ""; return; }
+  if (!state.runs.length) { wrap.innerHTML = ""; return; }
   wrap.innerHTML = `<select class="run-select" aria-label="Select run"></select>`;
   const sel = wrap.querySelector("select");
   sel.innerHTML = state.runs.map(r =>
@@ -91,10 +96,14 @@ function renderHealthBar(data) {
 
 async function refresh(withSkeleton) {
   if (STATIC_PAGES.has(state.page)) {
-    // No run data needed — and no Neon/Data API request is made.
+    // No run data needed — and no Neon/Data API request is made. The
+    // Roadmap is project-level and static: it never shows a run selector
+    // or any other run/mode-specific control, so both are cleared here
+    // rather than left showing whatever the last data page rendered.
     // (.health-bar sets display:flex, which beats [hidden]; clear it too.)
     const bar = el("health-bar");
     bar.innerHTML = ""; bar.hidden = true;
+    el("run-select-wrap").innerHTML = "";
     setStatus("Roadmap · project overview");
     renderPage(state.lastData);
     return;
@@ -134,20 +143,9 @@ async function refresh(withSkeleton) {
   }
 }
 
-function setMode(mode) {
-  if (mode === state.mode) return;
-  state.mode = mode;
-  state.runId = null;
-  document.querySelectorAll(".segmented button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.mode === mode)));
-  refresh(true);
-}
-
 function boot() {
   initTheme();
   renderNav();
-  document.querySelectorAll(".segmented button").forEach(b => {
-    b.addEventListener("click", () => setMode(b.dataset.mode));
-  });
   refresh(true);
   if (state.refreshTimer) clearInterval(state.refreshTimer);
   state.refreshTimer = setInterval(() => refresh(false), REFRESH_MS);

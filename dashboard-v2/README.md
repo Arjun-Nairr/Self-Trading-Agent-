@@ -1,10 +1,19 @@
 # Dashboard V2 — candidate redesign (not yet the active dashboard)
 
 Full IA + visual rebuild of the trading dashboard: Overview / Trades /
-Decisions / Runs / Roadmap, one shared shell for backtest and
-live paper (mode is a header control, not a separate app). Vanilla
-HTML/CSS/JS — no framework, no build step, no package manager, no external
-UI libraries or fonts.
+Decisions / Runs / Roadmap. Vanilla HTML/CSS/JS — no framework, no build
+step, no package manager, no external UI libraries or fonts.
+
+**Dashboard-exposure correction (2026-09-13): backtest-only, live paper
+inaccessible.** Live paper trading is not activated and has no route, tab,
+selector, or control anywhere in this app — the header carries a fixed
+"Backtest research mode" label instead of a mode toggle, and every data
+request is scoped to backtest. The underlying live-paper query support
+(`js/data.js`'s `MODES.live` mapping, page renderers' `mode === "live"`
+branches) is untouched in the repository — this was a dashboard-exposure
+change only, not a deletion — but nothing in the shipped app can reach it.
+Re-exposing live paper is a separate, explicit, later decision (a
+dedicated live-readiness review), not implied by this note.
 
 The **Roadmap** page is a read-only visual projection of
 `docs/PROJECT_BACKLOG.md` (six engineering sectors, each grouped into
