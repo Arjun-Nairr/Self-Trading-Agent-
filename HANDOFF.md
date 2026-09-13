@@ -215,6 +215,28 @@ restatement of every threshold.
   training-evaluation run — the fundamentals-enabled *path* now works
   end-to-end, but no BUY has ever actually filled in it (all 3 rejected
   at execution) — frozen, unapproved pending that decision.
+- **Regime-diverse evaluation suite** (`backtest-harness/eval_suite.py`,
+  `test_eval_suite.py` 30 assertions, 2026-09-13) — infrastructure only,
+  not an approved experiment (`docs/PROJECT_BACKLOG.md` §4). Manifest
+  generation reads ONLY SPY closes (existing maverick-mcp/yfinance path),
+  classifies each month by a fixed pre-committed rule, stratified-samples
+  a comparison suite + a separate untouched later holdout set via a
+  recorded seed, and writes a versioned, SHA-256-hashed manifest whose
+  `status` is always `"proposed"`. One real manifest generated and
+  committed: `eval_suites/manifest_20260913T153100_a02d247146fb.json` —
+  seed 20260913, range 2021-01-01..2026-01-31; comparison: 2021-04
+  sideways, 2022-04/05 high_volatility, 2022-07 rally, 2022-09/12
+  selloff, 2023-06 rally, 2024-01 sideways; holdout: 2025-04
+  high_volatility, 2025-05 rally, 2025-09 sideways (no selloff month in
+  the trailing 12-month holdout window — real data, not fabricated
+  coverage). The runner (`run_episode`/`run_configuration`) refuses a
+  `proposed` or tampered manifest, reuses `run_backtest.py`'s real,
+  unchanged per-day loop with a fresh isolated Portfolio/checkpoint per
+  episode (never `backtest_state.json`, never Round 2), and keeps the
+  existing `training`/`smoke`/`archived` classification unchanged — it is
+  **defined but was never invoked**: no episode, comparison, or Bayesian
+  search has run. Approval (editing the manifest's `status` field) and a
+  separate explicit go-ahead to run anything both remain outstanding.
 
 ---
 
@@ -241,30 +263,10 @@ it links to, `docs/history/evaluations/round2_50cycle_evaluation_extract_RAW.md`
 (cycles 1–50) and `..._tranche1_evaluation_extract.md` (cycles 1–25) —
 open only if genuinely needed.
 
-**Benchmark and sensitivity pass (2026-09-05, corrected across four
-2026-09-06 passes — status current as of the fourth):**
-`docs/evaluations/round2_benchmark_sensitivity.md` — the trading system
-vs. cash/SPY/equal-weight-watchlist buy-and-hold/a defined SMA(10)
-technical baseline over 50 identical dates, plus sensitivity to
-`RULES.md`'s risk%/cap%/reward-threshold parameters (every stop/target
-walk validates the complete intraday session before use, `MissingDataError`
-on any gap — none in real data; every %/$ pair comes from one
-shared-formula function, `reconciliation_table`, never hand-typed — full
-defect list in the report's own correction-history note). Headline: the
-trading system (+3.696% full portfolio, −2.46% drawdown, 20.0% exposure)
-beat the watchlist (−2.66%) and technical baseline (+0.39%, flat, double
-the volatility) on return-per-volatility, though SPY (+4.20%) edged it on
-raw return at far higher exposure and a one-day timing head start. The
-concentration cap remains the more consequential lever (`chronological_cash_constrained_approximation`, never "fully replayable").
+**Benchmark and sensitivity pass (2026-09-05, corrected across four 2026-09-06 passes — status current as of the fourth):** `docs/evaluations/round2_benchmark_sensitivity.md` — the trading system vs. cash/SPY/equal-weight-watchlist buy-and-hold/a defined SMA(10) technical baseline over 50 identical dates, plus sensitivity to `RULES.md`'s risk%/cap%/reward-threshold parameters (every stop/target walk validates the complete intraday session before use, `MissingDataError` on any gap — none in real data; every %/$ pair comes from one shared-formula function, `reconciliation_table`, never hand-typed — full defect list in the report's own correction-history note). Headline: the trading system (+3.696% full portfolio, −2.46% drawdown, 20.0% exposure) beat the watchlist (−2.66%) and technical baseline (+0.39%, flat, double the volatility) on return-per-volatility, though SPY (+4.20%) edged it on raw return at far higher exposure and a one-day timing head start. The concentration cap remains the more consequential lever (`chronological_cash_constrained_approximation`, never "fully replayable").
 **Verdict unchanged: improve measurement first** — not sufficient for Bayesian optimization, still unapproved.
 
-**Per-trade journey report** (offline, read-only, human-evaluation-only,
-`backtest-harness/trade_journey_report.py`, `docs/evaluations/round2_trade_journey.md`):
-reconstructs each closed trade's daily price/P&L/stop-target path from
-data the harness already writes (no new capture). Round 2: 14/16 closed
-trades have a complete daily journey, the other 2 genuine same-session
-stop-outs. Explains actual five-day time-stop outcomes only — **not** a
-longer-hold or stop-distance-band counterfactual (needs re-fetched bars).
+**Per-trade journey report** (offline, read-only, human-evaluation-only, `backtest-harness/trade_journey_report.py`, `docs/evaluations/round2_trade_journey.md`): reconstructs each closed trade's daily price/P&L/stop-target path from data the harness already writes (no new capture). Round 2: 14/16 closed trades have a complete daily journey, the other 2 genuine same-session stop-outs. Explains actual five-day time-stop outcomes only — **not** a longer-hold or stop-distance-band counterfactual (needs re-fetched bars).
 Backs this with a durable **exit provenance** field (`trades.exit_provenance`, `schema.sql`) — deterministic harness exit (`harness_stop`/`harness_target`/`harness_time_stop`) or agent-requested, set server-side, never inferred from prose; pre-migration rows read `legacy_unknown`. Reconciled Round 2 from structural evidence, not note wording: 5/0/3 harness stop/target/time-stop, 8 agent-requested (7 with a time-stop rationale, 1 thesis-invalidation) — corrects `round2_50cycle_evaluation_extract.md`'s exit-reason-mix table (was 6/2, proven 5/3). Migration re-verified live on Neon 2026-09-12: column, constraint, and all 16 `legacy_unknown` backfill rows confirmed present, no other row touched.
 
 ---

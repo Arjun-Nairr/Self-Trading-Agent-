@@ -65,7 +65,9 @@ reflection injection (latest 2 run-scoped notes/cycle, new one every
   or any other uncontrolled backtest memory source.
 
 **Rejected:** OpenCode Go / DeepSeek V4 Flash gateway switch —
-unresolved upstream hang; locked model stays `openai-codex`/`gpt-5.4-mini`.
+unresolved upstream hang; provider stays `openai-codex` (model migrated
+`gpt-5.4-mini`→`gpt-5.6-terra` 2026-09-12, a runtime-compatibility fix,
+not a return to this rejected alternative — see `HANDOFF.md` §5).
 
 ---
 
@@ -239,10 +241,10 @@ unapproved pending that decision.
     failure handling). Status `approved` (direction only). Prerequisite:
     baseline unfreezes; a separate explicit design approval — the
     backtest-only integration above is not itself that approval.
-  - The first fundamentals-enabled backtest run (smoke, then training).
-    Status: implementation complete, **run not yet started** — needs
-    explicit user go-ahead per this milestone's own instructions, plus
-    a working Docker environment to actually execute a cycle.
+  - The first fundamentals-enabled backtest run. Status: **smoke
+    complete** (2026-09-12, `run_id 31bd7421-42ba-43e3-a1cd-afb1f9d0d0d1`,
+    3/3 cycles, 0 fills — see `HANDOFF.md` §6). Training still not
+    started — needs explicit user go-ahead.
   - Cache-first, on-demand fundamentals router wired into a real live
     trading cycle (check stored data first, fetch only when
     missing/stale). Status `approved` (direction only). Prerequisite:
@@ -404,31 +406,39 @@ document; it is implemented.**
     proposes judgment/rule/UX/system improvements. Status `discussing`.
     Prerequisite: must use run-isolated, point-in-time evidence and
     report real sample size.
-  - Regime-diverse sampled evaluation suite. Status `discussing`. Role:
-    a *prerequisite for* Bayesian optimization, not an approved
-    experiment. Goal: replace single-window-only evaluation (today's
-    evidence is one continuous 50-day window, `docs/evaluations/
-    round2_benchmark_sensitivity.md`) with a fixed, pre-committed
-    stress suite of separate one-month backtest episodes drawn from a
-    broader historical period, testing robustness across rallies,
-    selloffs, high-volatility conditions, and sideways markets —
-    reducing the chance of optimizing to one continuous window.
-    Required design constraints before any implementation: define the
-    regime-classification and stratified sampling method *before*
-    seeing any candidate results (pure random month selection cannot
-    guarantee regime coverage); record the eligible historical range,
-    selected months, selection method, and random seed before comparing
-    configurations; reset portfolio state independently per one-month
-    episode; run every candidate configuration against the identical
-    pre-committed episode suite; keep a separate, untouched set of
-    later and regime-diverse months for final out-of-sample evaluation;
-    preserve point-in-time gating, alias masking, next-day execution,
-    and durable `training`/`smoke`/`archived` classification in every
-    episode; evaluate selector/configuration impact separately from LLM
-    trading judgment and deterministic risk-rule effects. This does not
-    approve implementation, restart training, change rules, or begin
-    Bayesian optimization — the existing `HANDOFF.md` §10 measurement/
-    evaluation decision remains the gate.
+  - Regime-diverse sampled evaluation suite. Status **`implemented`
+    (infrastructure only, 2026-09-13)** — role unchanged: a *prerequisite
+    for* Bayesian optimization, not an approved experiment or a run.
+    `backtest-harness/eval_suite.py` (+ `test_eval_suite.py`, 30
+    assertions): (1) **manifest generation** — reads ONLY SPY's own daily
+    closes (existing maverick-mcp/yfinance path, same proxy
+    `benchmark_sensitivity.py` already uses), classifies each calendar
+    month in a fixed, documented eligible range by a fixed, pre-committed
+    priority-ordered rule (high_volatility / rally / selloff / sideways —
+    thresholds and method recorded in the manifest itself, never inferred
+    after the fact), stratified-samples a comparison suite plus a
+    separate, later, untouched holdout pool via a recorded seed, and
+    writes a versioned, SHA-256 content-hashed manifest whose `status` is
+    always `"proposed"` — this module can never mark its own output
+    `"approved"`. One real manifest generated and committed for review:
+    `backtest-harness/eval_suites/manifest_20260913T153100_a02d247146fb.json`
+    (seed 20260913, range 2021-01-01..2026-01-31; see `HANDOFF.md` §6 for
+    the chosen months). (2) **future runner** — `run_episode`/
+    `run_configuration`: refuses a `proposed` or tampered manifest
+    (`require_approved`); reuses `run_backtest.py`'s real, unchanged
+    per-day loop (point-in-time gating, alias masking, next-day
+    execution, risk checks all untouched); isolates a fresh Portfolio/
+    masking/checkpoint per one-month episode (never `backtest_state.json`,
+    never Round 2); keeps the EXISTING `training`/`smoke`/`archived`
+    classification — a suite/episode's own identity is local report
+    metadata only, never a new run_kind; produces a compact per-episode +
+    aggregate report (returns, drawdown, fills/closed trades, block
+    reasons, `[fundamentals:...]` tag counts when enabled). **Defined but
+    never invoked** — no episode, comparison, or Bayesian search has run.
+    Still gated on `HANDOFF.md` §10's own measurement/evaluation decision,
+    and additionally on: a human actually approving a manifest (editing
+    its `status` field — the one edit excluded from the content hash), and
+    an explicit go-ahead to run comparisons at all.
 
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.

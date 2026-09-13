@@ -1,0 +1,673 @@
+{
+  "all_classified_months": [
+    {
+      "end": "2021-01-31",
+      "month": 1,
+      "monthly_return_pct": 0.3471,
+      "realized_vol_pct": 1.0028,
+      "regime": "sideways",
+      "start": "2021-01-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-02-28",
+      "month": 2,
+      "monthly_return_pct": 1.0977,
+      "realized_vol_pct": 0.8263,
+      "regime": "sideways",
+      "start": "2021-02-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-03-31",
+      "month": 3,
+      "monthly_return_pct": 2.0658,
+      "realized_vol_pct": 0.907,
+      "regime": "sideways",
+      "start": "2021-03-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-04-30",
+      "month": 4,
+      "monthly_return_pct": 4.1662,
+      "realized_vol_pct": 0.6331,
+      "regime": "sideways",
+      "start": "2021-04-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-05-31",
+      "month": 5,
+      "monthly_return_pct": 0.44,
+      "realized_vol_pct": 0.8835,
+      "regime": "sideways",
+      "start": "2021-05-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-06-30",
+      "month": 6,
+      "monthly_return_pct": 2.3329,
+      "realized_vol_pct": 0.5393,
+      "regime": "sideways",
+      "start": "2021-06-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-07-31",
+      "month": 7,
+      "monthly_return_pct": 1.8772,
+      "realized_vol_pct": 0.7082,
+      "regime": "sideways",
+      "start": "2021-07-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-08-31",
+      "month": 8,
+      "monthly_return_pct": 3.1925,
+      "realized_vol_pct": 0.5167,
+      "regime": "sideways",
+      "start": "2021-08-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-09-30",
+      "month": 9,
+      "monthly_return_pct": -4.7112,
+      "realized_vol_pct": 0.8016,
+      "regime": "sideways",
+      "start": "2021-09-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-10-31",
+      "month": 10,
+      "monthly_return_pct": 5.7595,
+      "realized_vol_pct": 0.656,
+      "regime": "rally",
+      "start": "2021-10-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-11-30",
+      "month": 11,
+      "monthly_return_pct": -0.9738,
+      "realized_vol_pct": 0.8053,
+      "regime": "sideways",
+      "start": "2021-11-01",
+      "year": 2021
+    },
+    {
+      "end": "2021-12-31",
+      "month": 12,
+      "monthly_return_pct": 5.7999,
+      "realized_vol_pct": 1.0251,
+      "regime": "rally",
+      "start": "2021-12-01",
+      "year": 2021
+    },
+    {
+      "end": "2022-01-31",
+      "month": 1,
+      "monthly_return_pct": -5.8194,
+      "realized_vol_pct": 1.1596,
+      "regime": "selloff",
+      "start": "2022-01-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-02-28",
+      "month": 2,
+      "monthly_return_pct": -3.6031,
+      "realized_vol_pct": 1.3994,
+      "regime": "sideways",
+      "start": "2022-02-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-03-31",
+      "month": 3,
+      "monthly_return_pct": 5.3638,
+      "realized_vol_pct": 1.4237,
+      "regime": "rally",
+      "start": "2022-03-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-04-30",
+      "month": 4,
+      "monthly_return_pct": -9.0347,
+      "realized_vol_pct": 1.5615,
+      "regime": "high_volatility",
+      "start": "2022-04-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-05-31",
+      "month": 5,
+      "monthly_return_pct": -0.374,
+      "realized_vol_pct": 1.9653,
+      "regime": "high_volatility",
+      "start": "2022-05-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-06-30",
+      "month": 6,
+      "monthly_return_pct": -7.4978,
+      "realized_vol_pct": 1.868,
+      "regime": "high_volatility",
+      "start": "2022-06-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-07-31",
+      "month": 7,
+      "monthly_return_pct": 8.0658,
+      "realized_vol_pct": 1.1992,
+      "regime": "rally",
+      "start": "2022-07-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-08-31",
+      "month": 8,
+      "monthly_return_pct": -3.7953,
+      "realized_vol_pct": 1.2158,
+      "regime": "sideways",
+      "start": "2022-08-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-09-30",
+      "month": 9,
+      "monthly_return_pct": -9.5285,
+      "realized_vol_pct": 1.4963,
+      "regime": "selloff",
+      "start": "2022-09-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-10-31",
+      "month": 10,
+      "monthly_return_pct": 5.3463,
+      "realized_vol_pct": 1.6796,
+      "regime": "high_volatility",
+      "start": "2022-10-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-11-30",
+      "month": 11,
+      "monthly_return_pct": 6.0231,
+      "realized_vol_pct": 1.7506,
+      "regime": "high_volatility",
+      "start": "2022-11-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-12-31",
+      "month": 12,
+      "monthly_return_pct": -5.6934,
+      "realized_vol_pct": 1.1331,
+      "regime": "selloff",
+      "start": "2022-12-01",
+      "year": 2022
+    },
+    {
+      "end": "2023-01-31",
+      "month": 1,
+      "monthly_return_pct": 6.7381,
+      "realized_vol_pct": 1.031,
+      "regime": "rally",
+      "start": "2023-01-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-02-28",
+      "month": 2,
+      "monthly_return_pct": -3.5394,
+      "realized_vol_pct": 0.9372,
+      "regime": "sideways",
+      "start": "2023-02-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-03-31",
+      "month": 3,
+      "monthly_return_pct": 4.1071,
+      "realized_vol_pct": 1.1368,
+      "regime": "sideways",
+      "start": "2023-03-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-04-30",
+      "month": 4,
+      "monthly_return_pct": 1.2118,
+      "realized_vol_pct": 0.7558,
+      "regime": "sideways",
+      "start": "2023-04-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-05-31",
+      "month": 5,
+      "monthly_return_pct": 0.5632,
+      "realized_vol_pct": 0.8051,
+      "regime": "sideways",
+      "start": "2023-05-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-06-30",
+      "month": 6,
+      "monthly_return_pct": 5.4778,
+      "realized_vol_pct": 0.6451,
+      "regime": "rally",
+      "start": "2023-06-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-07-31",
+      "month": 7,
+      "monthly_return_pct": 3.1547,
+      "realized_vol_pct": 0.5029,
+      "regime": "sideways",
+      "start": "2023-07-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-08-31",
+      "month": 8,
+      "monthly_return_pct": -1.3429,
+      "realized_vol_pct": 0.7737,
+      "regime": "sideways",
+      "start": "2023-08-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-09-30",
+      "month": 9,
+      "monthly_return_pct": -4.9208,
+      "realized_vol_pct": 0.6802,
+      "regime": "sideways",
+      "start": "2023-09-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-10-31",
+      "month": 10,
+      "monthly_return_pct": -2.1319,
+      "realized_vol_pct": 0.8806,
+      "regime": "sideways",
+      "start": "2023-10-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-11-30",
+      "month": 11,
+      "monthly_return_pct": 7.9828,
+      "realized_vol_pct": 0.6904,
+      "regime": "rally",
+      "start": "2023-11-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-12-31",
+      "month": 12,
+      "monthly_return_pct": 3.9506,
+      "realized_vol_pct": 0.5909,
+      "regime": "sideways",
+      "start": "2023-12-01",
+      "year": 2023
+    },
+    {
+      "end": "2024-01-31",
+      "month": 1,
+      "monthly_return_pct": 2.1644,
+      "realized_vol_pct": 0.6883,
+      "regime": "sideways",
+      "start": "2024-01-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-02-29",
+      "month": 2,
+      "monthly_return_pct": 3.8594,
+      "realized_vol_pct": 0.7234,
+      "regime": "sideways",
+      "start": "2024-02-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-03-31",
+      "month": 3,
+      "monthly_return_pct": 2.3097,
+      "realized_vol_pct": 0.5853,
+      "regime": "sideways",
+      "start": "2024-03-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-04-30",
+      "month": 4,
+      "monthly_return_pct": -3.8647,
+      "realized_vol_pct": 0.8302,
+      "regime": "sideways",
+      "start": "2024-04-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-05-31",
+      "month": 5,
+      "monthly_return_pct": 5.4002,
+      "realized_vol_pct": 0.5855,
+      "regime": "rally",
+      "start": "2024-05-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-06-30",
+      "month": 6,
+      "monthly_return_pct": 3.4436,
+      "realized_vol_pct": 0.4019,
+      "regime": "sideways",
+      "start": "2024-06-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-07-31",
+      "month": 7,
+      "monthly_return_pct": 1.003,
+      "realized_vol_pct": 0.9036,
+      "regime": "sideways",
+      "start": "2024-07-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-08-31",
+      "month": 8,
+      "monthly_return_pct": 3.8065,
+      "realized_vol_pct": 1.1545,
+      "regime": "sideways",
+      "start": "2024-08-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-09-30",
+      "month": 9,
+      "monthly_return_pct": 4.2457,
+      "realized_vol_pct": 0.6907,
+      "regime": "sideways",
+      "start": "2024-09-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-10-31",
+      "month": 10,
+      "monthly_return_pct": 0.0035,
+      "realized_vol_pct": 0.6749,
+      "regime": "sideways",
+      "start": "2024-10-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-11-30",
+      "month": 11,
+      "monthly_return_pct": 5.518,
+      "realized_vol_pct": 0.7483,
+      "regime": "rally",
+      "start": "2024-11-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-12-31",
+      "month": 12,
+      "monthly_return_pct": -2.5806,
+      "realized_vol_pct": 0.8992,
+      "regime": "sideways",
+      "start": "2024-12-01",
+      "year": 2024
+    },
+    {
+      "end": "2025-01-31",
+      "month": 1,
+      "monthly_return_pct": 2.9385,
+      "realized_vol_pct": 0.8738,
+      "regime": "sideways",
+      "start": "2025-01-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-02-28",
+      "month": 2,
+      "monthly_return_pct": -0.6005,
+      "realized_vol_pct": 0.8139,
+      "regime": "sideways",
+      "start": "2025-02-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-03-31",
+      "month": 3,
+      "monthly_return_pct": -3.888,
+      "realized_vol_pct": 1.2592,
+      "regime": "sideways",
+      "start": "2025-03-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-04-30",
+      "month": 4,
+      "monthly_return_pct": -1.1462,
+      "realized_vol_pct": 3.3188,
+      "regime": "high_volatility",
+      "start": "2025-04-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-05-31",
+      "month": 5,
+      "monthly_return_pct": 5.5366,
+      "realized_vol_pct": 1.0645,
+      "regime": "rally",
+      "start": "2025-05-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-06-30",
+      "month": 6,
+      "monthly_return_pct": 4.5497,
+      "realized_vol_pct": 0.6219,
+      "regime": "sideways",
+      "start": "2025-06-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-07-31",
+      "month": 7,
+      "monthly_return_pct": 2.3363,
+      "realized_vol_pct": 0.4121,
+      "regime": "sideways",
+      "start": "2025-07-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-08-31",
+      "month": 8,
+      "monthly_return_pct": 3.7525,
+      "realized_vol_pct": 0.6405,
+      "regime": "sideways",
+      "start": "2025-08-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-09-30",
+      "month": 9,
+      "monthly_return_pct": 4.3352,
+      "realized_vol_pct": 0.4013,
+      "regime": "sideways",
+      "start": "2025-09-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-10-31",
+      "month": 10,
+      "monthly_return_pct": 2.036,
+      "realized_vol_pct": 0.8615,
+      "regime": "sideways",
+      "start": "2025-10-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-11-30",
+      "month": 11,
+      "monthly_return_pct": 0.0073,
+      "realized_vol_pct": 0.9659,
+      "regime": "sideways",
+      "start": "2025-11-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-12-31",
+      "month": 12,
+      "monthly_return_pct": 0.5388,
+      "realized_vol_pct": 0.5363,
+      "regime": "sideways",
+      "start": "2025-12-01",
+      "year": 2025
+    },
+    {
+      "end": "2026-01-31",
+      "month": 1,
+      "monthly_return_pct": 1.2881,
+      "realized_vol_pct": 0.646,
+      "regime": "sideways",
+      "start": "2026-01-01",
+      "year": 2026
+    }
+  ],
+  "classification_method": "month regime = 'high_volatility' if stdev(daily % returns within the month) >= 1.5 pct pts; elif monthly_return_pct >= 5.0: 'rally'; elif monthly_return_pct <= -5.0: 'selloff'; else 'sideways' -- checked in that fixed priority order, so a month gets exactly one label.",
+  "content_hash": "a02d247146fb52a6db1d3c13c877a939a2e199b75ddae2b5265648f718d9462e",
+  "eligible_range": {
+    "end": "2026-01-31",
+    "start": "2021-01-01"
+  },
+  "episodes": [
+    {
+      "end": "2021-04-30",
+      "month": 4,
+      "monthly_return_pct": 4.1662,
+      "realized_vol_pct": 0.6331,
+      "regime": "sideways",
+      "start": "2021-04-01",
+      "year": 2021
+    },
+    {
+      "end": "2022-04-30",
+      "month": 4,
+      "monthly_return_pct": -9.0347,
+      "realized_vol_pct": 1.5615,
+      "regime": "high_volatility",
+      "start": "2022-04-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-05-31",
+      "month": 5,
+      "monthly_return_pct": -0.374,
+      "realized_vol_pct": 1.9653,
+      "regime": "high_volatility",
+      "start": "2022-05-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-07-31",
+      "month": 7,
+      "monthly_return_pct": 8.0658,
+      "realized_vol_pct": 1.1992,
+      "regime": "rally",
+      "start": "2022-07-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-09-30",
+      "month": 9,
+      "monthly_return_pct": -9.5285,
+      "realized_vol_pct": 1.4963,
+      "regime": "selloff",
+      "start": "2022-09-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-12-31",
+      "month": 12,
+      "monthly_return_pct": -5.6934,
+      "realized_vol_pct": 1.1331,
+      "regime": "selloff",
+      "start": "2022-12-01",
+      "year": 2022
+    },
+    {
+      "end": "2023-06-30",
+      "month": 6,
+      "monthly_return_pct": 5.4778,
+      "realized_vol_pct": 0.6451,
+      "regime": "rally",
+      "start": "2023-06-01",
+      "year": 2023
+    },
+    {
+      "end": "2024-01-31",
+      "month": 1,
+      "monthly_return_pct": 2.1644,
+      "realized_vol_pct": 0.6883,
+      "regime": "sideways",
+      "start": "2024-01-01",
+      "year": 2024
+    }
+  ],
+  "generated_at": "2026-09-13T15:31:00.505422+00:00",
+  "holdout_episodes": [
+    {
+      "end": "2025-04-30",
+      "month": 4,
+      "monthly_return_pct": -1.1462,
+      "realized_vol_pct": 3.3188,
+      "regime": "high_volatility",
+      "start": "2025-04-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-05-31",
+      "month": 5,
+      "monthly_return_pct": 5.5366,
+      "realized_vol_pct": 1.0645,
+      "regime": "rally",
+      "start": "2025-05-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-09-30",
+      "month": 9,
+      "monthly_return_pct": 4.3352,
+      "realized_vol_pct": 0.4013,
+      "regime": "sideways",
+      "start": "2025-09-01",
+      "year": 2025
+    }
+  ],
+  "holdout_months_count": 12,
+  "manifest_version": 1,
+  "proxy_ticker": "SPY",
+  "selection_seed": 20260913,
+  "status": "proposed",
+  "thresholds": {
+    "high_volatility_pct": 1.5,
+    "rally_pct": 5.0,
+    "selloff_pct": -5.0
+  }
+}
