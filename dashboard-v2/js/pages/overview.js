@@ -85,12 +85,12 @@ export function render(el, data, ctx) {
       </div>
     </section>
 
-    <section>
+    <section class="band">
       <div class="section-title">Open positions</div>
       ${renderPositions(open, snap)}
     </section>
 
-    <section>
+    <section class="band">
       <div class="section-title">Equity over time</div>
       ${renderChart(snapshots)}
     </section>

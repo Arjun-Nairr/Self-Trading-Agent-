@@ -80,6 +80,11 @@
   --amber-dim: #fbf1de;
   --amber-line: #d8a53f;
 
+  /* Section band: a barely-there ground shift, only just enough to read as
+     a separate fold between its two hairlines. Deliberately closer to --bg
+     than --surface is — a band is not a card. */
+  --band: #f9fafc;
+
   /* Chart wash, tuned per theme so the curve carries the same weight in
      both — never a raw *-dim surface token, which reads far heavier. */
   --chart-pos-fill: rgba(18, 105, 62, 0.10);
@@ -122,6 +127,7 @@
     --amber: #d9ab52;
     --amber-dim: #302512;
     --amber-line: #8a6a22;
+    --band: #11151d;
     --chart-pos-fill: rgba(79, 179, 124, 0.14);
     --chart-neg-fill: rgba(232, 128, 128, 0.14);
   }
@@ -144,6 +150,7 @@
   --amber: #d9ab52;
   --amber-dim: #302512;
   --amber-line: #8a6a22;
+  --band: #11151d;
   --chart-pos-fill: rgba(79, 179, 124, 0.14);
   --chart-neg-fill: rgba(232, 128, 128, 0.14);
 }
@@ -277,6 +284,37 @@ section:first-of-type { margin-top: var(--s6); }
 }
 .section-title:first-child,
 section > .section-title { margin-top: 0; }
+
+/* Section band — the separation device for a page's follow-on folds.
+   A page's FIRST fold (its headline figures) stays on the plain page
+   ground; every major fold after it sits in one of these, so the rhythm
+   reads ground -> band -> band rather than a wall of equal blocks.
+
+   Deliberately NOT a card: no shadow, no radius, no heavy border. Just a
+   barely-there ground shift between two hairlines. The tint bleeds into
+   the shell's own side gutter so content inside a band stays on exactly
+   the same left edge as the page hero above it.
+
+   `section.band`, not `.band` — it has to outrank `section:first-of-type`
+   (same specificity, declared later), or the first band on a page would
+   silently keep the 24px section gap instead of its own 48px. */
+section.band {
+  margin: var(--s12) calc(var(--s6) * -1) 0;
+  padding: var(--s6);
+  background: var(--band);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+/* Consecutive bands share one gap, never two stacked margins. */
+section.band + section.band { margin-top: var(--s12); }
+
+@media (max-width: 760px) {
+  section.band {
+    margin-left: calc(var(--s4) * -1);
+    margin-right: calc(var(--s4) * -1);
+    padding: var(--s6) var(--s4);
+  }
+}
 
 /* One shared style for every explanatory note under a block. */
 .note {
@@ -580,10 +618,11 @@ td.reason { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-s
 .lifecycle .step.done { background: var(--blue-dim); color: var(--blue); border-color: transparent; }
 
 /* ------------------------------------------------------------------ chart */
-/* No card. A top hairline, full content width, and the same visual weight
-   in both themes. */
+/* No card. Full content width, same visual weight in both themes. Inside
+   its band the chart needs no rule of its own -- it sits directly under
+   its heading, attached to the section rather than floating below it. */
 
-.chart-block { border-top: 1px solid var(--border); padding-top: var(--s4); }
+.chart-block { padding-top: var(--s2); }
 
 /* Labels live outside the SVG as normal HTML so preserveAspectRatio="none"
    (needed to make the line/area fill the full width) never stretches text.

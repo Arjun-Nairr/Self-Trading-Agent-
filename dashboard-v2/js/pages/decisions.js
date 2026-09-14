@@ -68,16 +68,20 @@ export function render(el, data) {
     </div>
     <p class="note">Run-wide counts of journaled trade records. The full proposal funnel (evaluated → proposed → accepted) requires cycle evidence and is intentionally unavailable to this dashboard.</p>
 
-    <div class="section-title">Rejection reasons</div>
-    ${renderRejections(dist)}
-    <p class="note">News is never a positive BUY trigger in this system — it can only veto an otherwise technically-justified entry (RULES.md §5a).</p>
+    <section class="band">
+      <div class="section-title">Rejection reasons</div>
+      ${renderRejections(dist)}
+      <p class="note">News is never a positive BUY trigger in this system — it can only veto an otherwise technically-justified entry (RULES.md §5a).</p>
+    </section>
 
-    <div class="section-title">Recent decisions</div>
-    <div class="panel"><table class="responsive">
-      <thead><tr><th class="mono">Time</th><th>Ticker</th><th>Action</th><th>Outcome</th><th>Confidence</th><th>Signal</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>
-    <p class="note">Showing the ${rowsData.length} most recent decision${rowsData.length === 1 ? "" : "s"} for this ${data.mode === "backtest" ? "run" : "account"}.</p>
+    <section class="band">
+      <div class="section-title">Recent decisions</div>
+      <div class="panel"><table class="responsive">
+        <thead><tr><th class="mono">Time</th><th>Ticker</th><th>Action</th><th>Outcome</th><th>Confidence</th><th>Signal</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table></div>
+      <p class="note">Showing the ${rowsData.length} most recent decision${rowsData.length === 1 ? "" : "s"} for this ${data.mode === "backtest" ? "run" : "account"}.</p>
+    </section>
     <div id="decision-detail"></div>
   `;
 

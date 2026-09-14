@@ -38,11 +38,13 @@ export function render(el, data) {
     </div>
     <p class="safety-line">${esc(CIRCUIT_BREAKER_NOTE)}</p>
 
-    <div class="section-title">Benchmark comparison</div>
-    <div class="bench-list">
-      ${BENCHMARKS.map(b => `<div class="bench-row">${esc(b)}</div>`).join("")}
-    </div>
-    <p class="note">None of the three is available from Neon — see <code>docs/evaluations/round2_benchmark_sensitivity.md</code>. HANDOFF.md §8: no benchmark series is wired into this dashboard yet, so the comparison lives only in that offline report.</p>
+    <section class="band">
+      <div class="section-title">Benchmark comparison</div>
+      <div class="bench-list">
+        ${BENCHMARKS.map(b => `<div class="bench-row">${esc(b)}</div>`).join("")}
+      </div>
+      <p class="note">None of the three is available from Neon — see <code>docs/evaluations/round2_benchmark_sensitivity.md</code>. HANDOFF.md §8: no benchmark series is wired into this dashboard yet, so the comparison lives only in that offline report.</p>
+    </section>
 
     <div class="section-title">Data adequacy</div>
     <div class="warning-box">
@@ -51,14 +53,16 @@ export function render(el, data) {
         : `${closed.length} closed trade${closed.length === 1 ? "" : "s"} is below RULES.md §6b's own stated 30–60-trade six-month target — treat any win-rate or profit-factor figure above as preliminary, not a durable performance claim.`}
     </div>
 
-    <div class="section-title">${esc(reflectionsHeading)}</div>
-    ${insights.length
-      ? `<div class="reflections">${insights.map(r => `
-          <blockquote class="reflection">
-            <p>${esc(r.insight_text)}</p>
-            <span class="meta">${singleType ? "" : `${esc(cycleTypeLabel(r.cycle_type))} · `}${time(r.created_at)}</span>
-          </blockquote>`).join("")}</div>`
-      : `<div class="empty">No reflection entries yet.</div>`}
+    <section class="band">
+      <div class="section-title">${esc(reflectionsHeading)}</div>
+      ${insights.length
+        ? `<div class="reflections">${insights.map(r => `
+            <blockquote class="reflection">
+              <p>${esc(r.insight_text)}</p>
+              <span class="meta">${singleType ? "" : `${esc(cycleTypeLabel(r.cycle_type))} · `}${time(r.created_at)}</span>
+            </blockquote>`).join("")}</div>`
+        : `<div class="empty">No reflection entries yet.</div>`}
+    </section>
 
     ${renderTechnicalDetails(failedCount, lastFailed)}
   `;
