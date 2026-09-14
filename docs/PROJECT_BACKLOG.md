@@ -24,9 +24,16 @@ user decision before Claude Code changes files.
   was implemented 2026-09-12, `fundamentals/` — §2 below — explicitly
   scoped to never touch the trading path; the freeze on injecting it
   into agent reasoning stands.)
-- **Dashboard V2 is deployed** (Cloudflare Pages, `mobile-test` preview
-  branch) for manual mobile feedback. Only real phone issues found
-  during that testing should reopen dashboard work — not new features.
+- **Dashboard V2 is deployed** — a *preview*, not a production cutover
+  (V1 stays the active dashboard, see §6/§10 in `HANDOFF.md`) — on
+  Cloudflare Pages (project `trading-agent-dashboard-v2`, `mobile-test`
+  branch, https://mobile-test.trading-agent-dashboard-v2.pages.dev) for
+  manual mobile feedback. **Not auto-synced**: the project has no
+  GitHub Git integration (direct-upload only, confirmed 2026-09-14) —
+  pushing to `main` does not redeploy it; see `dashboard-v2/README.md`
+  §Deployment for the manual `wrangler pages deploy` command. Only real
+  phone issues found during that testing should reopen dashboard work —
+  not new features.
 - **No LLM chart-pattern / graph-vision system.** Numeric technical
   indicators (RSI/MACD/trend/support-resistance) remain the only
   chart-derived evidence. This is a locked scope boundary, not an open

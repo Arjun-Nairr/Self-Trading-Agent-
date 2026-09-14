@@ -27,6 +27,30 @@ leaves the rest of the repository unaffected. The cutover itself — and any
 `HANDOFF.md` update — is a separate, explicit decision, not made by this
 task.
 
+## Deployment
+
+A preview of this directory is deployed on Cloudflare Pages (project
+`trading-agent-dashboard-v2`, `mobile-test` branch):
+**https://mobile-test.trading-agent-dashboard-v2.pages.dev** — public,
+for manual mobile feedback only. This is a deployed *preview*, not a
+production cutover; see the "V1 remains the active dashboard" note
+above, which this does not change.
+
+**Not auto-synced.** The Pages project has no GitHub Git integration
+(direct-upload only, confirmed via `wrangler pages project list` —
+"Git Provider: No") — pushing to `main` does **not** redeploy it. After
+any `dashboard-v2/` commit intended for the preview, redeploy manually
+from a clean checkout of that commit:
+
+```
+npx wrangler pages deploy dashboard-v2 --project-name trading-agent-dashboard-v2 --branch mobile-test
+```
+
+Requires a Cloudflare-authenticated `wrangler` (`npx wrangler whoami`
+to check). Verified 2026-09-14: deployment history showed commits
+`20c38fa`/`2becf9e` were missing from the live preview; redeployed and
+reconfirmed live.
+
 ## Run it locally
 
 ```

@@ -44,3 +44,9 @@ scratchpad/
 # SEC JSON, regenerated on demand from the SEC's own public endpoints,
 # never the source of truth itself
 fundamentals/.cache/
+
+# wrangler's local cache/account-id scratch (created by `npx wrangler
+# pages deploy` -- see dashboard-v2/README.md's Deployment section);
+# never source, never the auth token itself (that lives outside the
+# repo), but no reason to track it either
+.wrangler/
