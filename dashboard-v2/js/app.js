@@ -104,12 +104,14 @@ async function refresh(withSkeleton) {
     const bar = el("health-bar");
     bar.innerHTML = ""; bar.hidden = true;
     el("run-select-wrap").innerHTML = "";
-    setStatus("Roadmap · project overview");
+    setStatus("Project roadmap");
     renderPage(state.lastData);
     return;
   }
   if (withSkeleton) showSkeleton();
-  setStatus(`${state.mode.toUpperCase()} · loading…`, "busy");
+  // The scope is already stated beside this line by the fixed
+  // "Backtest research mode" note -- no need to repeat it every tick.
+  setStatus("Loading…", "busy");
   try {
     if (state.mode === "backtest") {
       state.runs = await listTrainingRuns();
@@ -122,10 +124,13 @@ async function refresh(withSkeleton) {
         state.lastData = { trades: [], activity: [], snapshots: [], blockedActivity: [], insights: [], failedCount: 0, lastFailed: null };
         renderPage(state.lastData);
         renderHealthBar(state.lastData);
-        setStatus("BACKTEST · no training run available");
+        setStatus("No training run available");
         return;
       }
     } else {
+      // Unreachable while state.mode is fixed at "backtest" (see state
+      // above) -- kept alongside data.js's preserved MODES.live mapping and
+      // the renderers' own live branches, not removed by this visual pass.
       el("run-select-wrap").innerHTML = "";
       state.runId = null;
     }
@@ -134,9 +139,9 @@ async function refresh(withSkeleton) {
     state.lastData = data;
     renderPage(data);
     renderHealthBar(data);
-    setStatus(`${state.mode.toUpperCase()} · updated ${new Date().toLocaleTimeString()}`);
+    setStatus(`Updated ${new Date().toLocaleTimeString()}`);
   } catch (e) {
-    setStatus(`${state.mode.toUpperCase()} · fetch failed`, "err");
+    setStatus("Fetch failed", "err");
     el("page-root").innerHTML = `<div class="error-box">Failed to load: ${esc(e.message)}. Old data is not shown as current — retrying on the next refresh.</div>`;
     el("health-bar").hidden = true;
     state.lastData = null;

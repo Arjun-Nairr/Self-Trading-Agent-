@@ -5,21 +5,27 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="color-scheme" content="light dark">
 <title>Trading Agent Dashboard</title>
+<!-- No font preload: the @font-face rules are unicode-range subset, so a
+     preload fires a "preloaded but not used" warning while buying almost
+     nothing for a 34 KB face. font-display: swap already guarantees the
+     page is readable from the first frame. -->
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
 <a class="skip-link" href="#page-root">Skip to content</a>
 <div class="shell">
   <header class="topbar">
-    <div class="brand">
-      <h1>Trading Agent</h1>
-      <span class="mode-badge">Backtest research mode</span>
+    <div class="topbar-main">
+      <div class="brand"><h1>Trading Agent</h1></div>
+      <div class="controls">
+        <div id="run-select-wrap"></div>
+        <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode" aria-pressed="false">🌙 Dark</button>
+      </div>
+    </div>
+    <p class="topbar-meta">
+      <span class="mode-note">Backtest research mode</span>
       <span class="status" id="status-line"><span class="dot busy"></span>connecting…</span>
-    </div>
-    <div class="controls">
-      <div id="run-select-wrap"></div>
-      <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode" aria-pressed="false">🌙 Dark</button>
-    </div>
+    </p>
   </header>
 
   <div class="health-bar" id="health-bar" hidden></div>
@@ -28,7 +34,7 @@
 
   <main id="page-root"></main>
 
-  <footer class="appfoot">Read-only · Neon Data API, anonymous role, SELECT only · refreshes every 15s</footer>
+  <footer class="appfoot">Read-only view · refreshes every 15s</footer>
 </div>
 
 <nav class="bottom-nav" id="bottom-nav" aria-label="Dashboard pages (mobile)"></nav>

@@ -1,14 +1,31 @@
 import { pairTrades, time, esc } from "../calc.js";
 import { STRATEGY_PROFILE, CIRCUIT_BREAKER_NOTE } from "../strategy-profile.js";
 
-function benchmarkRow(label) {
-  return `<div class="kv"><span class="k">${label}</span><span class="v" style="font-weight:400;color:var(--text-faint)">not available from Neon — see docs/evaluations/round2_benchmark_sensitivity.md</span></div>`;
+const BENCHMARKS = [
+  "SPY buy-and-hold",
+  "Equal-weight watchlist buy-and-hold",
+  "SMA(10) technical baseline",
+];
+
+// Display-only presentation of a stored cycle_type value (e.g.
+// "weekly_reflection" -> "Weekly reflection"). Never written back, never
+// used in a query -- the stored value is untouched.
+function cycleTypeLabel(cycleType) {
+  const words = String(cycleType || "").replace(/_/g, " ").trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : "Reflection";
 }
 
 export function render(el, data) {
-  const { trades, snapshots, insights, failedCount, lastFailed } = data;
+  const { trades, insights, failedCount, lastFailed } = data;
   const { closed } = pairTrades(trades);
   const adequate = closed.length >= 30;
+
+  // Every reflection in this run shares one cycle_type today, so it reads
+  // once as the section heading instead of repeating down a column. If a
+  // run ever mixes types, each block states its own.
+  const cycleTypes = [...new Set((insights || []).map(r => r.cycle_type))];
+  const singleType = cycleTypes.length === 1 ? cycleTypes[0] : null;
+  const reflectionsHeading = singleType ? `${cycleTypeLabel(singleType)}s` : "Reflections";
 
   el.innerHTML = `
     <div class="section-title">Current strategy profile</div>
@@ -16,18 +33,16 @@ export function render(el, data) {
       ${STRATEGY_PROFILE.map(p => `
         <div class="stat">
           <div class="stat-label">${esc(p.label)}</div>
-          <div class="stat-value" style="font-size:15px">${esc(p.value)}</div>
+          <div class="stat-value text">${esc(p.value)}</div>
         </div>`).join("")}
     </div>
     <p class="safety-line">${esc(CIRCUIT_BREAKER_NOTE)}</p>
 
     <div class="section-title">Benchmark comparison</div>
-    <div class="card kv-list">
-      ${benchmarkRow("SPY buy-and-hold")}
-      ${benchmarkRow("Equal-weight watchlist buy-and-hold")}
-      ${benchmarkRow("SMA(10) technical baseline")}
+    <div class="bench-list">
+      ${BENCHMARKS.map(b => `<div class="bench-row">${esc(b)}</div>`).join("")}
     </div>
-    <p style="font-size:11px;color:var(--text-faint);margin:8px 0 0">HANDOFF.md §8: no benchmark series is wired into this dashboard yet — the comparison lives only in the offline report above.</p>
+    <p class="note">None of the three is available from Neon — see <code>docs/evaluations/round2_benchmark_sensitivity.md</code>. HANDOFF.md §8: no benchmark series is wired into this dashboard yet, so the comparison lives only in that offline report.</p>
 
     <div class="section-title">Data adequacy</div>
     <div class="warning-box">
@@ -36,10 +51,14 @@ export function render(el, data) {
         : `${closed.length} closed trade${closed.length === 1 ? "" : "s"} is below RULES.md §6b's own stated 30–60-trade six-month target — treat any win-rate or profit-factor figure above as preliminary, not a durable performance claim.`}
     </div>
 
-    <div class="section-title">Reflections</div>
+    <div class="section-title">${esc(reflectionsHeading)}</div>
     ${insights.length
-      ? `<div class="panel"><table class="responsive"><thead><tr><th>Cycle</th><th>Insight</th><th>Time</th></tr></thead><tbody>${insights.map(r => `<tr><td data-label="Cycle">${esc(r.cycle_type)}</td><td data-label="Insight">${esc(r.insight_text)}</td><td data-label="Time">${time(r.created_at)}</td></tr>`).join("")}</tbody></table></div>`
-      : `<div class="card empty" style="padding:16px">No reflection entries yet.</div>`}
+      ? `<div class="reflections">${insights.map(r => `
+          <blockquote class="reflection">
+            <p>${esc(r.insight_text)}</p>
+            <span class="meta">${singleType ? "" : `${esc(cycleTypeLabel(r.cycle_type))} · `}${time(r.created_at)}</span>
+          </blockquote>`).join("")}</div>`
+      : `<div class="empty">No reflection entries yet.</div>`}
 
     ${renderTechnicalDetails(failedCount, lastFailed)}
   `;

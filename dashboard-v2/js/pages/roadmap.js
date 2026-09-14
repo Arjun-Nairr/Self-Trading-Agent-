@@ -29,9 +29,10 @@ function sector(s) {
   </section>`;
 }
 
+// No page heading here: the active nav tab already says "Roadmap", and
+// repeating it directly beneath was the same label twice.
 export function render(el) {
   el.innerHTML = `
-    <div class="section-title">Roadmap</div>
     ${legend()}
     <div class="rm-sectors">${ROADMAP_SECTORS.map(sector).join("")}</div>
   `;

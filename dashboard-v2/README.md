@@ -2,7 +2,18 @@
 
 Full IA + visual rebuild of the trading dashboard: Overview / Trades /
 Decisions / Runs / Roadmap. Vanilla HTML/CSS/JS — no framework, no build
-step, no package manager, no external UI libraries or fonts.
+step, no package manager, no external UI libraries. Two typefaces are
+**self-hosted** from `fonts/` (Archivo + IBM Plex Mono, both SIL OFL 1.1);
+the shipped app makes no external font request of any kind.
+
+**Visual pass (2026-09-14): research tearsheet.** Hierarchy comes from the
+page ground, whitespace and single hairlines rather than from boxes. A
+bordered surface is spent only on the four things that really are separate
+objects — Roadmap sector cards, warning/error boxes, the run-status banner,
+and the detail panel. 4px spacing scale, 6px radius, nothing visible below
+12px, tabular numerals on every displayed figure, and light/dark designed as
+equals. Presentation only: no query, metric, caveat, route, or data point
+changed.
 
 **Dashboard-exposure correction (2026-09-13): backtest-only, live paper
 inaccessible.** Live paper trading is not activated and has no route, tab,
@@ -15,11 +26,14 @@ change only, not a deletion — but nothing in the shipped app can reach it.
 Re-exposing live paper is a separate, explicit, later decision (a
 dedicated live-readiness review), not implied by this note.
 
-The **Roadmap** page is a read-only visual projection of
-`docs/PROJECT_BACKLOG.md` (six engineering sectors, each grouped into
-completed / active / next / deferred). It reads a static local module only
-and makes **zero Neon / Data API calls**; the shell issues no request while
-it is the active page.
+The **Roadmap** page is a compact visual checklist: six engineering sectors,
+one short label per item, each carrying one of four status marks (completed
+/ active now / next / later-gated). It is hand-maintained in
+`js/roadmap-data.js` — a deliberately terse summary of
+`docs/PROJECT_BACKLOG.md`, never generated from it and never a competing
+source of truth. It reads that static local module only and makes **zero
+Neon / Data API calls**; the shell issues no request while it is the active
+page (verified 2026-09-14 across two refresh ticks).
 
 **V1 (`dashboard/index.html`) remains the active dashboard.** This is a
 separate candidate site under `dashboard-v2/`; removing this whole directory
@@ -80,6 +94,7 @@ shape / public-safety guard, and null/empty inputs.
 
 | Path | Role |
 |---|---|
+| `fonts/` | Self-hosted Archivo + IBM Plex Mono woff2 subsets (98 KB). See `fonts/README.md` for licensing and how to refresh them. |
 | `js/calc.js` | Pure calculation + formatting functions. No fetch, no DOM. Shared by the app and the tests. |
 | `js/data.js` | The **only** module that talks to Neon. Reuses V1's exact auth flow, query helpers, and endpoints. |
 | `js/roadmap-data.js` | Static, public-safe roadmap content for the Roadmap page. No fetch, no DOM, no secrets/URLs/IDs. |

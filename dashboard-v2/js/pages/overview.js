@@ -10,6 +10,11 @@ function stat(label, value, cls = "", sub = "") {
   return `<div class="stat"><div class="stat-label">${label}</div><div class="stat-value ${cls}">${value}</div>${sub ? `<div class="stat-sub">${sub}</div>` : ""}</div>`;
 }
 
+// The two figures this page exists to report, directly on the page ground.
+function hero(label, value, cls = "", sub = "") {
+  return `<div><div class="hero-label">${label}</div><div class="hero-value ${cls}">${value}</div>${sub ? `<div class="hero-sub">${sub}</div>` : ""}</div>`;
+}
+
 function trainingRunLabel(runId, runs) {
   const short = `${runId.slice(0, 8)}…`;
   const meta = (runs || []).find(r => r.run_id === runId);
@@ -66,18 +71,13 @@ export function render(el, data, ctx) {
     ${renderRunStatus(data, ctx || {})}
     ${staleBanner}
     <section>
-      <div class="section-title">Portfolio</div>
-      <div class="stats-grid">
-        ${stat("Equity", snap ? money(snap.equity) : "—", "", snap ? `Cash ${money(snap.cash)}` : "")}
-        ${stat("Total return", pctSigned(totRet), totRet >= 0 ? "pos" : "neg", `vs. ${money(STARTING_EQUITY)} start`)}
+      <div class="hero-pair">
+        ${hero("Equity", snap ? money(snap.equity) : "—", "", snap ? `Cash ${money(snap.cash)}` : "")}
+        ${hero("Total return", pctSigned(totRet), totRet >= 0 ? "pos" : "neg", `vs. ${money(STARTING_EQUITY)} start`)}
+      </div>
+      <div class="stats-grid six">
         ${stat("Realized P&L", money(rPnl), rPnl >= 0 ? "pos" : "neg", `${closed.length} closed`)}
         ${stat("Unrealized P&L", money(uPnl), uPnl >= 0 ? "pos" : "neg", `${open.length} open`)}
-      </div>
-    </section>
-
-    <section>
-      <div class="section-title">Risk &amp; exposure</div>
-      <div class="stats-grid">
         ${stat("Exposure", snap ? pctPlain(snap.exposure_pct) : "—")}
         ${stat("Drawdown", pctPlain(dd), dd < 0 ? "neg" : "")}
         ${stat("Max drawdown", pctPlain(maxDd), maxDd < 0 ? "neg" : "")}
@@ -105,9 +105,47 @@ export function render(el, data, ctx) {
   }
 }
 
-function renderPositions(open, snap) {
-  if (!open.length) return `<div class="card empty" style="padding:20px">No open positions.</div>`;
+// The detail each position shows is identical either way — only the
+// layout differs. A handful of positions read as lines; a real book of
+// them still needs the scannable columns of a table.
+const COMPACT_POSITION_LIMIT = 3;
 
+function renderPositions(open, snap) {
+  if (!open.length) return `<div class="empty">No open positions.</div>`;
+  return open.length <= COMPACT_POSITION_LIMIT
+    ? renderPositionLines(open, snap)
+    : renderPositionTable(open, snap);
+}
+
+// Ticker and P&L carry the line; entry/stop/target sit quietly beside them.
+function renderPositionLines(open, snap) {
+  const lines = open.map(t => {
+    const d = openPositionDetail(t.ticker, snap);
+    const current = d ? Number(d.current_price) : null;
+    const upl = d ? Number(d.unrealized_pl) : null;
+    const uplPct = d ? Number(d.unrealized_pl_pct) : null;
+    const stop = d ? d.stop_price : t.stop_price;
+    const target = d ? d.target_price : t.target_price;
+    return `<div class="pos-line">
+      <div class="pos-head">
+        <span class="pos-ticker">${esc(t.ticker)}</span>
+        <span class="pos-pnl ${upl == null ? "" : upl >= 0 ? "pos" : "neg"}">${
+          upl == null ? "—" : `${upl >= 0 ? "+" : ""}${money(upl)} (${pctSigned(uplPct)})`
+        }</span>
+      </div>
+      <div class="pos-meta">
+        <span>${t.fill_quantity} sh</span>
+        <span>Entry <b>${money(t.fill_price)}</b></span>
+        <span>Current <b>${money(current)}</b></span>
+        <span>Stop <b>${stop != null ? money(stop) : "—"}</b></span>
+        <span>Target <b>${target != null ? money(target) : "—"}</b></span>
+      </div>
+    </div>`;
+  }).join("");
+  return `<div class="pos-lines">${lines}</div>`;
+}
+
+function renderPositionTable(open, snap) {
   const rows = open.map(t => {
     // Current price and unrealized P&L come ONLY from the latest scoped
     // snapshot's own open_positions_detail — never the entry fill price
@@ -118,17 +156,17 @@ function renderPositions(open, snap) {
     const uplPct = d ? Number(d.unrealized_pl_pct) : null;
     return `<tr class="responsive-row">
       <td data-label="Ticker" class="ticker">${esc(t.ticker)}</td>
-      <td data-label="Qty">${t.fill_quantity}</td>
-      <td data-label="Entry">${money(t.fill_price)}</td>
-      <td data-label="Current">${money(current)}</td>
-      <td data-label="P&L" class="${upl == null ? "" : upl >= 0 ? "pos" : "neg"}">${upl == null ? "—" : `${upl >= 0 ? "+" : ""}${money(upl)} (${pctSigned(uplPct)})`}</td>
-      <td data-label="Stop">${d ? money(d.stop_price) : (t.stop_price != null ? money(t.stop_price) : "—")}</td>
-      <td data-label="Target">${d ? money(d.target_price) : (t.target_price != null ? money(t.target_price) : "—")}</td>
+      <td data-label="Qty" class="num">${t.fill_quantity}</td>
+      <td data-label="Entry" class="num">${money(t.fill_price)}</td>
+      <td data-label="Current" class="num">${money(current)}</td>
+      <td data-label="P&L" class="num cell-primary ${upl == null ? "" : upl >= 0 ? "pos" : "neg"}">${upl == null ? "—" : `${upl >= 0 ? "+" : ""}${money(upl)} (${pctSigned(uplPct)})`}</td>
+      <td data-label="Stop" class="num">${d ? money(d.stop_price) : (t.stop_price != null ? money(t.stop_price) : "—")}</td>
+      <td data-label="Target" class="num">${d ? money(d.target_price) : (t.target_price != null ? money(t.target_price) : "—")}</td>
     </tr>`;
   }).join("");
 
   return `<div class="panel"><table class="responsive">
-    <thead><tr><th>Ticker</th><th>Qty</th><th>Entry</th><th>Current</th><th>P&L</th><th>Stop</th><th>Target</th></tr></thead>
+    <thead><tr><th>Ticker</th><th class="num">Qty</th><th class="num">Entry</th><th class="num">Current</th><th class="num">P&L</th><th class="num">Stop</th><th class="num">Target</th></tr></thead>
     <tbody>${rows}</tbody>
   </table></div>`;
 }
@@ -152,7 +190,7 @@ function renderChart(snapshots) {
     const msg = series.length === 0
       ? "No snapshots yet for this run."
       : "One snapshot so far — the chart needs at least two to draw a line.";
-    return `<div class="card empty" style="padding:24px">${msg}</div>`;
+    return `<div class="empty">${msg}</div>`;
   }
 
   const vals = series.map(s => s.equity);
@@ -173,10 +211,14 @@ function renderChart(snapshots) {
   const last = vals[vals.length - 1];
   const positive = last >= STARTING_EQUITY;
   const lineColor = positive ? "var(--green)" : "var(--red)";
-  const fillColor = positive ? "var(--green-dim)" : "var(--red-dim)";
+  // A wash tuned per theme, not a *-dim surface token — the curve has to
+  // carry the same visual weight in light and dark.
+  const fillColor = positive ? "var(--chart-pos-fill)" : "var(--chart-neg-fill)";
   const areaPoints = `${x(0).toFixed(2)},${plotBottom.toFixed(2)} ${points} ${x(series.length - 1).toFixed(2)},${plotBottom.toFixed(2)}`;
-  // No dashed starting-equity reference line — the $100,000 Y-axis value
-  // below already communicates that level; a second annotation was redundant.
+  // Dotted starting-equity baseline: the one reference every point on this
+  // curve is read against. Drawn from the same y() the geometry uses.
+  const baselineY = y(STARTING_EQUITY).toFixed(2);
+  const baselineSvg = `<line x1="0" y1="${baselineY}" x2="${W}" y2="${baselineY}" stroke="var(--text-faint)" stroke-width="0.3" stroke-dasharray="1.5 1.5" vector-effect="non-scaling-stroke"/>`;
 
   const first = series[0], lastPt = series[series.length - 1];
   const midIdx = Math.floor((series.length - 1) / 2);
@@ -202,7 +244,7 @@ function renderChart(snapshots) {
     `${series.length} snapshots. Low ${money(dataLo)}, high ${money(dataHi)}, starting equity ${money(STARTING_EQUITY)}.`;
 
   const gridSvg = yTicks.map(v =>
-    `<line x1="0" y1="${y(v).toFixed(2)}" x2="${W}" y2="${y(v).toFixed(2)}" stroke="var(--border)" stroke-width="0.3"/>`).join("");
+    `<line x1="0" y1="${y(v).toFixed(2)}" x2="${W}" y2="${y(v).toFixed(2)}" stroke="var(--border)" stroke-width="1" vector-effect="non-scaling-stroke"/>`).join("");
 
   const yAxisHtml = yTicks.map(v =>
     `<span class="chart-y-tick" style="top:${y(v).toFixed(2)}%">${esc(yWhole(v))}</span>`).join("");
@@ -210,16 +252,28 @@ function renderChart(snapshots) {
   const xAxisHtml = xTicks.map(t =>
     `<span class="chart-x-tick" data-anchor="${t.anchor}" style="left:${t.pct.toFixed(2)}%">${esc(t.label)}</span>`).join("");
 
+  // Final point, emphasised and labelled with the value it reaches.
+  // Positioned in HTML on the same fractions the SVG geometry uses --
+  // preserveAspectRatio="none" would squash a real <circle>.
+  const endX = x(series.length - 1).toFixed(2);
+  const endY = y(last).toFixed(2);
+  const sign = positive ? "pos" : "neg";
+  const endpointHtml =
+    `<span class="chart-endpoint-dot ${sign}" style="left:${endX}%;top:${endY}%"></span>` +
+    `<span class="chart-endpoint ${sign}" style="left:${endX}%;top:${endY}%">${esc(money(last))}</span>`;
+
   return `
-    <div class="card chart-card">
+    <div class="chart-block">
       <div class="chart-grid">
         <div class="chart-y-axis">${yAxisHtml}</div>
         <div class="chart-plot">
           <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" class="equity-chart" role="img" aria-label="${esc(summary)}">
             ${gridSvg}
             <polygon points="${areaPoints}" fill="${fillColor}" stroke="none"/>
-            <polyline points="${points}" fill="none" stroke="${lineColor}" stroke-width="0.6" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>
+            ${baselineSvg}
+            <polyline points="${points}" fill="none" stroke="${lineColor}" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>
           </svg>
+          ${endpointHtml}
         </div>
         <div class="chart-x-axis">${xAxisHtml}</div>
       </div>

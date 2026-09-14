@@ -1,4 +1,7 @@
-import { money, pctSigned, time, esc, openPositionDetail, relatedActivity, latestPositions } from "../calc.js";
+import {
+  money, pctSigned, time, esc, openPositionDetail, relatedActivity, latestPositions,
+  pairTrades, winRate, realizedPnl,
+} from "../calc.js";
 
 let selectedKey = null; // ticker+created_at of the entry row, or null
 const LEDGER_LIMIT = 20;
@@ -17,14 +20,17 @@ export function render(el, data) {
 
   const rows = positions.map(r => {
     const t = r.entry;
-    let current, pnl, pnlPct, daysHeld, exitReason;
+    let current, pnl, pnlPct, daysHeld, exitReason, exitReasonText;
 
     if (r.kind === "closed") {
       current = r.exit.fill_price;
       pnl = r.pnl;
       pnlPct = r.pnlPct;
       daysHeld = dayDelta(t.created_at, r.exit.created_at);
-      exitReason = esc((r.exit.strategy_notes || "").replace("Mechanical exit: ", ""));
+      // Clamped to one line on desktop (see td.reason); the full text stays
+      // here as the cell's own tooltip and, in full, in the detail panel.
+      exitReasonText = (r.exit.strategy_notes || "").replace("Mechanical exit: ", "");
+      exitReason = esc(exitReasonText);
     } else {
       // Open position: current price and unrealized P&L come ONLY from the
       // latest scoped snapshot's own open_positions_detail — never the
@@ -42,26 +48,52 @@ export function render(el, data) {
       else if (data.mode === "live") daysHeld = dayDelta(t.created_at, new Date().toISOString());
       else daysHeld = null;
       exitReason = null;
+      exitReasonText = null;
     }
+
+    // CLOSED is the ledger's default state and carries no emphasis; OPEN is
+    // the exception worth a pill.
+    const statusCell = r.kind === "open"
+      ? `<span class="status-tag open">open</span>`
+      : `<span class="status-quiet">closed</span>`;
+    // A real 0 stays a real 0 (a same-session close genuinely held zero
+    // simulated days) -- it is only de-emphasised. The em-dash stays what
+    // it has always meant here: no stored value at all.
+    const daysCell = daysHeld == null
+      ? `<span class="muted-cell">—</span>`
+      : (daysHeld === 0 ? `<span class="muted-cell">0</span>` : String(daysHeld));
 
     return `<tr data-key="${esc(key(t))}" class="responsive">
       <td data-label="Ticker" class="ticker">${esc(t.ticker)}</td>
-      <td data-label="Status"><span class="status-tag ${r.kind}">${r.kind}</span></td>
-      <td data-label="Entry">${money(t.fill_price)}</td>
-      <td data-label="${r.kind === "closed" ? "Exit" : "Current"}">${money(current)}</td>
-      <td data-label="Qty">${t.fill_quantity ?? "—"}</td>
-      <td data-label="P&L" class="${pnl == null ? "" : pnl >= 0 ? "pos" : "neg"}">${pnl == null ? "—" : `${pnl >= 0 ? "+" : ""}${money(pnl)} (${pctSigned(pnlPct)})`}</td>
-      <td data-label="Stop">${t.stop_price != null ? money(t.stop_price) : "—"}</td>
-      <td data-label="Target">${t.target_price != null ? money(t.target_price) : "—"}</td>
-      <td data-label="Days held">${daysHeld == null ? "—" : daysHeld}</td>
-      <td data-label="Exit reason">${exitReason ?? "—"}</td>
+      <td data-label="Status">${statusCell}</td>
+      <td data-label="P&L" class="num cell-primary ${pnl == null ? "" : pnl >= 0 ? "pos" : "neg"}">${pnl == null ? "—" : `${pnl >= 0 ? "+" : ""}${money(pnl)} (${pctSigned(pnlPct)})`}</td>
+      <td data-label="Entry" class="num">${money(t.fill_price)}</td>
+      <td data-label="${r.kind === "closed" ? "Exit" : "Current"}" class="num">${money(current)}</td>
+      <td data-label="Qty" class="num">${t.fill_quantity ?? "—"}</td>
+      <td data-label="Stop" class="num">${t.stop_price != null ? money(t.stop_price) : "—"}</td>
+      <td data-label="Target" class="num">${t.target_price != null ? money(t.target_price) : "—"}</td>
+      <td data-label="Days held" class="num">${daysCell}</td>
+      <td data-label="Exit reason" class="reason" title="${esc(exitReasonText ?? "")}">${exitReason ?? "—"}</td>
     </tr>`;
   }).join("");
 
+  // Conclusion first, from figures already computed for this run -- no new
+  // query, no new metric definition.
+  const { closed: closedAll } = pairTrades(data.trades);
+  const wr = winRate(closedAll);
+  const rPnl = realizedPnl(closedAll);
+  const summary = `
+    <div class="summary-line">
+      <span>Closed positions <b>${closedAll.length}</b></span>
+      <span>Win rate <b>${wr.n ? `${Math.round(wr.pct)}%` : "—"}</b>${wr.n ? ` (n=${wr.n})` : ""}</span>
+      <span>Realized P&L <b class="${rPnl >= 0 ? "pos" : "neg"}">${money(rPnl)}</b></span>
+    </div>`;
+
   el.innerHTML = `
     <div class="section-title">${esc(title)}</div>
+    ${summary}
     <div class="panel"><table class="responsive">
-      <thead><tr><th>Ticker</th><th>Status</th><th>Entry</th><th>Exit/Current</th><th>Qty</th><th>P&L</th><th>Stop</th><th>Target</th><th>Days held</th><th>Exit reason</th></tr></thead>
+      <thead><tr><th>Ticker</th><th>Status</th><th class="num">P&L</th><th class="num">Entry</th><th class="num">Exit/Current</th><th class="num">Qty</th><th class="num">Stop</th><th class="num">Target</th><th class="num">Days held</th><th>Exit reason</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
     <div id="trade-detail"></div>
@@ -108,12 +140,12 @@ function renderDetail(el, r, activity) {
         <div class="kv"><span class="k">Filled price / qty</span><span class="v">${t.fill_price != null ? money(t.fill_price) : "not filled"} / ${t.fill_quantity ?? "—"}</span></div>
         <div class="kv"><span class="k">Reasoning</span><span class="v">${esc(t.strategy_notes || "—")}</span></div>
       </div>
-      <p style="font-size:11px;color:var(--text-faint);margin-top:12px">
+      <p class="note">
         ${related.length
           ? `${related.length} activity record${related.length === 1 ? "" : "s"} matched by ticker/time window (best-effort, not a real join).`
           : "No matching activity record found (best-effort ticker/time-window match)."}
       </p>
-      <p style="font-size:11px;color:var(--text-faint);margin-top:6px">
+      <p class="note">
         The repository does not yet store a reliable per-trade intraday price path, so no price-path chart is shown here — see HANDOFF.md §8.
       </p>
       <button class="close-detail" type="button">Close</button>

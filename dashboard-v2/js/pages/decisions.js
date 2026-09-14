@@ -4,6 +4,30 @@ let selectedKey = null;
 
 function key(t) { return `${t.ticker}__${t.created_at}`; }
 
+// The most frequent non-null value in a column, or null when the column is
+// empty. Display-only: decides what to render quietly, never what to show.
+function modeValue(values) {
+  const counts = new Map();
+  for (const v of values) {
+    if (v == null) continue;
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  let best = null, bestN = 0;
+  for (const [v, n] of counts) if (n > bestN) { best = v; bestN = n; }
+  return best;
+}
+
+// Five bars filled to the value. The textual "N/5" stays in the accessible
+// name so the number itself is never lost, only its visual weight changes.
+function confidenceMeter(confidence) {
+  if (!confidence) return `<span class="muted-cell">—</span>`;
+  const n = Number(confidence);
+  const dots = Array.from({ length: 5 }, (_, i) =>
+    `<span class="conf-dot ${i < n ? "on" : ""}"></span>`).join("");
+  return `<span class="conf-meter" role="img" aria-label="Confidence ${n} of 5">${dots}</span>`
+    + `<span class="sr-only">${n}/5</span>`;
+}
+
 export function render(el, data) {
   const { decisionRows, decisionCounts, blockedActivity, activity } = data;
   const rowsData = decisionRows || [];
@@ -20,14 +44,18 @@ export function render(el, data) {
   const dist = rejectionDistribution(blockedActivity);
   const selected = rowsData.find(t => key(t) === selectedKey) || null;
 
+  // `technical` is the dominant value on every row today; keeping it quiet
+  // means a genuinely different signal would stand out on sight later.
+  const dominantSignal = modeValue(rowsData.map(t => t.primary_signal));
+
   const rows = rowsData.map(t => `
     <tr data-key="${esc(key(t))}" class="responsive">
-      <td data-label="Time">${time(t.created_at)}</td>
+      <td data-label="Time" class="mono">${time(t.created_at)}</td>
       <td data-label="Ticker" class="ticker">${esc(t.ticker)}</td>
       <td data-label="Action">${esc(t.action)}</td>
       <td data-label="Outcome"><span class="status-tag ${esc(t.status)}">${esc(t.status)}</span></td>
-      <td data-label="Confidence">${t.confidence ? `${t.confidence}/5` : "—"}</td>
-      <td data-label="Signal">${esc(t.primary_signal || "—")}</td>
+      <td data-label="Confidence">${confidenceMeter(t.confidence)}</td>
+      <td data-label="Signal" class="${t.primary_signal === dominantSignal ? "muted-cell" : ""}">${esc(t.primary_signal || "—")}</td>
     </tr>`).join("");
 
   el.innerHTML = `
@@ -38,20 +66,18 @@ export function render(el, data) {
       <div class="stat"><div class="stat-label">Rejected</div><div class="stat-value">${counts.rejected}</div></div>
       <div class="stat"><div class="stat-label">Pending</div><div class="stat-value">${counts.pending}</div></div>
     </div>
-    <p style="font-size:11px;color:var(--text-faint);margin:8px 0 0">Run-wide counts of journaled trade records. The full proposal funnel (evaluated → proposed → accepted) requires cycle evidence and is intentionally unavailable to this dashboard.</p>
+    <p class="note">Run-wide counts of journaled trade records. The full proposal funnel (evaluated → proposed → accepted) requires cycle evidence and is intentionally unavailable to this dashboard.</p>
 
     <div class="section-title">Rejection reasons</div>
-    ${dist.length
-      ? `<div class="card kv-list">${dist.map(([k, v]) => `<div class="kv"><span class="k">${esc(ruleLabel(k))}</span><span class="v">${v}</span></div>`).join("")}</div>`
-      : `<div class="card empty" style="padding:16px">No blocked decisions recorded.</div>`}
-    <p style="font-size:11px;color:var(--text-faint);margin:8px 0 0">News is never a positive BUY trigger in this system — it can only veto an otherwise technically-justified entry (RULES.md §5a).</p>
+    ${renderRejections(dist)}
+    <p class="note">News is never a positive BUY trigger in this system — it can only veto an otherwise technically-justified entry (RULES.md §5a).</p>
 
     <div class="section-title">Recent decisions</div>
     <div class="panel"><table class="responsive">
-      <thead><tr><th>Time</th><th>Ticker</th><th>Action</th><th>Outcome</th><th>Confidence</th><th>Signal</th></tr></thead>
+      <thead><tr><th class="mono">Time</th><th>Ticker</th><th>Action</th><th>Outcome</th><th>Confidence</th><th>Signal</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>
-    <p style="font-size:11px;color:var(--text-faint);margin:8px 0 0">Showing the ${rowsData.length} most recent decision${rowsData.length === 1 ? "" : "s"} for this ${data.mode === "backtest" ? "run" : "account"}.</p>
+    <p class="note">Showing the ${rowsData.length} most recent decision${rowsData.length === 1 ? "" : "s"} for this ${data.mode === "backtest" ? "run" : "account"}.</p>
     <div id="decision-detail"></div>
   `;
 
@@ -63,6 +89,23 @@ export function render(el, data) {
   });
 
   if (selected) renderDetail(el.querySelector("#decision-detail"), selected, activity);
+}
+
+// Each rule's bar is scaled against the largest count already in `dist`
+// (rejectionDistribution returns it sorted descending). No new request, no
+// invented score -- the bar length is the same number printed beside it.
+function renderRejections(dist) {
+  if (!dist.length) return `<div class="empty">No blocked decisions recorded.</div>`;
+  const max = dist[0][1] || 1;
+  const rows = dist.map(([rule, count]) => {
+    const pct = Math.max(2, Math.round((count / max) * 100));
+    return `<div class="rej-row">
+      <span class="rej-label">${esc(ruleLabel(rule))}</span>
+      <span class="rej-count">${count}</span>
+      <span class="rej-bar" style="width:${pct}%" aria-hidden="true"></span>
+    </div>`;
+  }).join("");
+  return `<div class="rej-list">${rows}</div>`;
 }
 
 function evidenceRow(label, value, muted = false) {
