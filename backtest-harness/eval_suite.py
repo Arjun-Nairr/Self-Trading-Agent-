@@ -92,8 +92,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_backtest as rb                                              # noqa: E402
 from run_backtest import (                                             # noqa: E402
     DEFAULT_MASKING_SEED, REPO, Portfolio, _limits_for_profile,
-    _name_variants, _run_cycle_or_halt, json_from, register_run,
-    resolve_trade_rejection, run_day, run_in,
+    _name_variants, _run_cycle_or_halt, json_from, log_cycle_failure,
+    register_run, resolve_trade_rejection, run_day, run_in,
 )
 from anonymize import RunMasking                                       # noqa: E402
 
@@ -104,10 +104,17 @@ from anonymize import RunMasking                                       # noqa: E
 # never silently invisible in a generated manifest.
 # ---------------------------------------------------------------------
 
-# 2021-01-01..2026-01-31: five full calendar years, ending the last full
-# month before Round 2's own real window starts (2026-02-17) -- every
-# episode date is wholly separate from Round 2's own dates by construction.
-ELIGIBLE_RANGE_START = date(2021, 1, 1)
+# 2022-06-01..2026-01-31, ending the last full month before Round 2's own
+# real window starts (2026-02-17) -- every episode date is wholly separate
+# from Round 2's own dates by construction. START moved forward from the
+# original 2021-01-01 (2026-09-15 fundamentals-measurement block, explicit
+# user decision on the range/coverage tradeoff first surfaced 2026-09-13):
+# under 2021-01-01, the fixed-watchlist viability audit correctly failed
+# RYAN (real IPO 2021-07-22) and ALGM (real IPO 2020-10-29), which lack
+# enough trailing technical-service history until real dates well into
+# 2021-2022 (RYAN not until ~2022-06-01). 2022-06-01 is that verified
+# floor, chosen by the user rather than searched for after seeing results.
+ELIGIBLE_RANGE_START = date(2022, 6, 1)
 ELIGIBLE_RANGE_END = date(2026, 1, 31)
 
 # The project's EXISTING broad-market proxy (see benchmark_sensitivity.py)
@@ -144,7 +151,10 @@ CLASSIFICATION_METHOD = (
 # as necessary to cover all 4 required regimes; see select_holdout_pool.
 # Never touched by the comparison-suite sampler below.
 HOLDOUT_MONTHS_COUNT = 12
-EPISODES_PER_REGIME = 2
+# 2026-09-15 fundamentals-measurement block: exactly one comparison episode
+# per condition (was 2) -- the frozen design's own requirement, chosen
+# before any month was classified.
+EPISODES_PER_REGIME = 1
 HOLDOUT_EPISODES_PER_REGIME = 1
 # Correction pass (2026-09-13): a valid holdout (and comparison) set must
 # cover every one of these regimes -- see select_holdout_pool.
@@ -866,6 +876,20 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
                 lambda: run_day(cursor, day_index, portfolio, masking, watchlist,
                                 limits_ctx, run_id, fundamentals_enabled=config.fundamentals_enabled),
                 day_label=masking.day_index(cursor), run_id=run_id,
+                # Explicit, not _run_cycle_or_halt's own default: a default
+                # parameter binds to run_backtest.log_cycle_failure at THAT
+                # module's def-time and is never re-resolved from this
+                # module's own name at call time, so patching
+                # "eval_suite.log_cycle_failure" would silently do nothing
+                # against the implicit default -- found live 2026-09-15 when
+                # test_run_configuration_halts_cleanly_without_advancing's
+                # deliberately-raising fake run_day reached the REAL logger
+                # and wrote a genuine 'cycle_failed' agent_activity row to
+                # Neon despite the test's own claim of zero real I/O. Naming
+                # it here makes it patchable at this module's own boundary,
+                # same as register_run/fetch_fundamentals_assessment_counts
+                # just above.
+                fail_logger=log_cycle_failure,
             )
             if halted:
                 break

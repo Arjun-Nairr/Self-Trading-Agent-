@@ -39,7 +39,6 @@ export const ROADMAP_SECTORS = [
     items: [
       { status: "done", text: "News analysis" },
       { status: "done", text: "Fundamental analysis (bank statements)" },
-      { status: "next", text: "Dynamic company selector" },
       { status: "later", text: "Reddit sentiment" },
     ],
   },

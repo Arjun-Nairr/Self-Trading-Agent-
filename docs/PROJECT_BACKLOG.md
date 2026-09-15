@@ -295,27 +295,14 @@ unapproved pending that decision.
     citations/provenance are retained on every passage; retrieval is
     cut off by the simulated date (no lookahead); the agent receives
     only the retrieved evidence, never unrestricted document access.
-  - Point-in-time dynamic candidate selector. Status `discussing`. Goal:
-    replace the fixed 10-name watchlist as the *live* system's scaling
-    mechanism, without turning selection into a hidden trade signal.
-    Pipeline: broad eligible universe → deterministic low-bar selector
-    → LLM trading-agent judgment → risk checker → execution. The
-    selector only narrows attention — it must never itself judge a
-    trade good or create a buy trigger. High-recall only: eligibility,
-    liquidity, history, price, and news-coverage criteria — never
-    predictive scoring. Must run in both modes: live selects from the
-    current broader universe; backtest reproduces the identical
-    selection logic using only data available as of each simulated
-    date, and selected candidates stay alias-masked before reaching the
-    trading agent, same as today. Required safeguards before any
-    implementation: point-in-time universe membership (no survivorship
-    bias); historical `as_of` gating on every selector input; a durable
-    per-cycle record of both selected and rejected names with reasons;
-    a fixed-watchlist baseline preserved for comparison; selector impact
-    evaluated separately from trading-agent judgment and risk-rule
-    effects. Prerequisite: do not implement, alter the current fixed
-    watchlist, restart training, or change rules until the frozen
-    Round 2 measurement/evaluation decision (`HANDOFF.md` §10) is made.
+  - Point-in-time dynamic candidate selector. Status `cancelled for this
+    project`. The fixed 10-ticker watchlist remains the permanent scope for
+    evaluation and any future live-paper pilot. Dynamic selection would create
+    a separate research project with a changed universe, selection-bias
+    controls, and a new baseline; it is intentionally not required to finish
+    or deploy this system. Reaffirmed explicitly 2026-09-15c (fundamentals-
+    measurement block); removed from `dashboard-v2/js/roadmap-data.js`'s
+    Market Intelligence sector — it was never accurate as "next" there.
   - Measurable technical-strategy library. Status `discussing` / `Later`.
     Evaluate a small number of objective swing-trading concepts (for
     example momentum, mean reversion, breakout, relative strength, or
@@ -538,6 +525,36 @@ document; it is implemented.**
     An episode's own final pending order (if any) is resolved as rejected
     at episode end (`resolve_trade_rejection`, reused verbatim), never left
     dangling. Still **defined but never invoked** — no episode has run.
+
+    **2026-09-15c fundamentals-measurement block — infeasible, blocked
+    before any run:** the user's own explicit range decision
+    (`ELIGIBLE_RANGE_START=2022-06-01`, the RYAN/ALGM viability floor
+    above) plus `EPISODES_PER_REGIME=1` (exactly one comparison episode
+    per condition, the frozen design's own requirement) are now committed
+    in `eval_suite.py`. `propose --seed 20260915` still fails
+    (`ManifestGenerationError`): the only 2 real `selloff` months in this
+    range (2022-09, 2022-12) force the holdout boundary back to 2022-12,
+    leaving the comparison pool with zero `sideways` months — a different
+    manifestation of the SAME structural tradeoff, not a new problem.
+    Full diagnostic (real SPY monthly classification table, exact error,
+    honest null-result conclusion): `docs/evaluations/
+    fundamentals_v1_measurement_block_2026-09-15.md`. No manifest, no
+    episode, no Hermes call, no training/evaluation run. Still open: a
+    start date between 2021-01-01 and 2022-06-01 that threads both
+    constraints (unchecked), a watchlist exception for RYAN/ALGM, or
+    relaxing `select_holdout_pool`'s single-contiguous-block requirement —
+    each a real tradeoff needing an explicit human choice, not a retry.
+    **Incidental fix (found running this attempt):** `test_eval_suite.py`
+    was silently writing real `cycle_failed` rows to Neon whenever Docker
+    happened to be running (a missing `fail_logger` mock — `_run_cycle_
+    or_halt`'s default binds to the real `log_cycle_failure` at
+    `run_backtest.py`'s own def-time, so patching `eval_suite.
+    log_cycle_failure` could never have worked before it was imported
+    into that module). Fixed at the source; verified zero real writes with
+    Docker running. 3 pre-existing orphaned rows from the bug (verified:
+    no associated trades/registry/snapshot data) are documented, not
+    deleted — the delete was blocked by this environment's own
+    shared-resource safety gate.
 
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.

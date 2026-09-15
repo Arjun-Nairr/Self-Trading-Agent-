@@ -529,17 +529,26 @@ def test_run_configuration_halts_cleanly_without_advancing():
                             fundamentals_enabled=False):
         raise RuntimeError("simulated cycle failure")
 
+    fake_fail_logger_calls = []
+
+    def fake_fail_logger(day_label, error_text, run_id, usage=None):
+        fake_fail_logger_calls.append({"day_label": day_label, "run_id": run_id})
+
     with tempfile.TemporaryDirectory() as tmp:
         checkpoint_dir = Path(tmp) / "checkpoints"
         with patch("eval_suite.run_day", side_effect=fake_run_day_raises), \
              patch("eval_suite.register_run", return_value=None), \
-             patch("eval_suite.fetch_fundamentals_assessment_counts", return_value={}):
+             patch("eval_suite.fetch_fundamentals_assessment_counts", return_value={}), \
+             patch("eval_suite.log_cycle_failure", side_effect=fake_fail_logger):
             report = run_configuration(manifest, EpisodeConfig("baseline"), EVAL_RUN_KIND, watchlist, checkpoint_dir)
 
     ep = report["per_episode"][0]
     check_true("a halted episode is reported as halted, never silently treated as complete", ep["halted"])
     check("a halted episode completed zero days", ep["days_completed"], 0)
-    print("  ok  run_configuration reports a halted cycle honestly instead of masking the failure")
+    check("the FAKE fail logger (not the real log_cycle_failure) received the failure event "
+          "-- no real Docker/Neon call made", len(fake_fail_logger_calls), 1)
+    print("  ok  run_configuration reports a halted cycle honestly instead of masking the failure, "
+          "without ever reaching real Docker/Neon")
 
 
 # ===========================================================================

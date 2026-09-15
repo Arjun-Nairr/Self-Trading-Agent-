@@ -167,38 +167,18 @@ restatement of every threshold.
   (`backtest_cycle_evidence.fundamentals_provenance`, narrow nullable
   schema addition, reused from checkpoint on replay); enforced technical
   primacy (a fundamentals-enabled BUY must declare `primary_signal`
-  technical/both, `other` rejected). **Operational validation, attempts
-  1–3 (2026-09-12):** migration APPLIED and reverified each time
-  (`anonymous` has zero grants, boundary intact). Attempts blocked/failed
-  in turn on `SEC_EDGAR_USER_AGENT` unset, then a stale `trade-journal`
-  image (rebuilt — not a code edit), then `ResponseValidationError:
-  response missing a 'decisions' list` on both attempts of a cycle — a
-  **failure-only diagnostic seam** was added to `ask_hermes` (local/
-  gitignored `.diagnostics/`, redacted, fires only when the retry path is
-  exhausted; 6 new tests) and root-caused attempt 3's identical failure as
-  `HTTP 400: {"detail":"The 'gpt-5.4-mini' model is not supported when
-  using Codex with a ChatGPT account."}` — a Codex/model-account issue,
-  not a fundamentals/schema defect. **Attempt 4 — SUCCESS (2026-09-12):**
-  runtime model migrated `gpt-5.4-mini` → `gpt-5.6-terra` (provider
-  `openai-codex`, reasoning `medium` unchanged) in the persisted gateway
-  config (`~/.hermes-trading-agent/config.yaml`, NOT part of this repo —
-  no tracked file controls it), gateway restarted alone. A no-tool/no-
-  data preflight call confirmed `model: gpt-5.6-terra` and a clean JSON
-  reply before any cycle ran. Smoke run `31bd7421-42ba-43e3-a1cd-
-  afb1f9d0d0d1` (`smoke`) completed **3/3 cycles**: 3 BUY proposals
-  (`primary_signal: technical`, `technical_basis: multiple` throughout),
-  all rejected at execution-time risk checks (gap/stop-distance), 0
-  fills. Audited and confirmed: evidence row + non-null
-  `fundamentals_provenance` (real CIK/accession/source_url/filed_at) for
-  all 3 cycles; zero real ticker/company/CIK/accession/URL/raw filing
-  date anywhere in prompt/input/response/`strategy_notes`; `anonymous`
-  still has zero grants. Every attempt (1–4) left Round 2 untouched —
-  sha256-verified identical local state each time; Neon Round 2 counts
-  (`trades` 64, `backtest_cycle_evidence` 25, `portfolio_snapshots` 50)
-  unchanged throughout. (4) **still not done:** live mode; any
-  training-evaluation run — the fundamentals-enabled *path* now works
-  end-to-end, but no BUY has ever actually filled in it (all 3 rejected
-  at execution) — frozen, unapproved pending that decision.
+  technical/both, `other` rejected). **Operational validation (2026-09-12,
+  4 attempts, 1–3 blocked on env/image/model-account issues, all
+  root-caused and fixed — see `docs/history/` for the full narrative):
+  attempt 4 SUCCEEDED** after migrating the runtime model to
+  `gpt-5.6-terra`. Smoke run `31bd7421-...` completed 3/3 cycles: 3 BUY
+  proposals, all rejected at execution-time risk checks, 0 fills.
+  Confirmed: real SEC provenance recorded privately, zero real
+  ticker/CIK/filing identity anywhere agent-facing, `anonymous` still zero
+  grants, Round 2 untouched throughout (sha256-verified each attempt). (4)
+  **still not done:** live mode; any training/evaluation run — the path
+  works end-to-end but no BUY has ever filled under it — frozen pending
+  that decision.
 - **Regime-diverse evaluation suite** (`backtest-harness/eval_suite.py`,
   `test_eval_suite.py` 128 assertions, implemented 2026-09-13, corrected
   twice same day) — infrastructure only, not an approved experiment
@@ -226,22 +206,14 @@ restatement of every threshold.
   naming the ticker/month, if any watchlist name lacks enough point-in-
   time data; `run_configuration` now also refuses any manifest whose
   `watchlist_viability` is missing/malformed/failing, even if approved
-  and hash-valid. **Manifest regeneration is currently blocked, by
-  design, on a real finding, not a bug**: with the existing
-  `ELIGIBLE_RANGE_START=2021-01-01`, the audit correctly caught that RYAN
-  (real IPO 2021-07-22) and ALGM (real IPO 2020-10-29) lack enough
-  trailing history for maverick's technical service until real dates in
-  2021–2022 (RYAN not until ~2022-06); narrowing the eligible range to
-  fix that instead breaks 4-regime holdout coverage (only 2 selloff
-  months exist anywhere after mid-2022). Per the user's explicit choice,
-  the range was left unchanged and no new manifest was generated this
-  pass — **the committed
-  `eval_suites/manifest_20260913T154853_887d30cff268.json` is now stale**
-  (`manifest_version: 2`, no `watchlist_viability`) and `run_configuration`
-  correctly refuses to execute it under the current code. A human
-  decision on the range/coverage tradeoff is needed before the next
-  `propose` run. Still **defined but never invoked** either way — no
-  episode, comparison, or Bayesian search has run.
+  and hash-valid. **Manifest regeneration still blocked, by design, on a
+  real finding, not a bug** — see §14 for the 2026-09-15 attempt at the
+  user's own chosen range (`2022-06-01`), why it's ALSO infeasible, and
+  the exact tradeoff still unresolved. The committed
+  `eval_suites/manifest_20260913T154853_887d30cff268.json` stays stale
+  (`manifest_version: 2`) and `run_configuration` correctly refuses it.
+  Still **defined but never invoked** either way — no episode,
+  comparison, or Bayesian search has run.
 
 ---
 
@@ -393,6 +365,24 @@ reproducibility gap for new runs — Round 2 predates it, untouched.
 `run_kind` gains `evaluation` (`docs/PROJECT_BACKLOG.md` §4 — stale v2
 manifest still correctly refused, reconfirmed live). `verify.py` (§11)
 covers the non-mutating suites. Still blocked on everything §10 blocks.
+
+---
+
+## 14. 2026-09-15c fundamentals-measurement block — blocked before any run
+
+`ELIGIBLE_RANGE_START=2022-06-01` (RYAN/ALGM viability floor, §6) +
+`EPISODES_PER_REGIME=1` now committed in `eval_suite.py`, per the user's
+frozen design. `propose --seed 20260915` still fails: the only 2 real
+`selloff` months (2022-09/12) force the holdout back to 2022-12, leaving
+the comparison pool with zero `sideways` months — infeasible by
+construction. **No manifest, no episode, no Hermes call.** Full
+diagnostic: `docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
+Conclusion unchanged: **keep Fundamentals V1 as unproven context**.
+Incidental fix: `test_eval_suite.py` was silently writing real
+`cycle_failed` Neon rows with Docker up (missing `fail_logger` mock) —
+fixed at the source; 3 pre-existing orphaned rows are documented, not
+deleted (blocked by this environment's own safety gate). Roadmap:
+"Dynamic company selector" removed (cancelled, `docs/PROJECT_BACKLOG.md` §2).
 
 ---
 
