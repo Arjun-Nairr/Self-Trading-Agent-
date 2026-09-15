@@ -91,7 +91,7 @@ digest.
 | `alpaca-mcp` | Live orders/account/positions + backtest's historical news and intraday-bar data. |
 | `trade-journal-mcp` | All Neon reads/writes — decisions, executions, activity, insights, snapshots, cycle evidence. |
 | `execution-sim-mcp` | Backtest-only fill simulator (slippage-aware, real historical ranges). |
-| `dashboard` | Static frontend, local-only (`http://127.0.0.1:8842`, loopback-bound). |
+| `dashboard` | V1, static frontend, local-only (`http://127.0.0.1:8842`, loopback-bound) — active dashboard, see §10. V2 (`dashboard-v2/`) is a separate, genuinely PUBLIC Cloudflare Pages preview — see §10. |
 
 **Backtest mode:** `backtest-harness/run_backtest.py` fetches everything,
 masks tickers/dates, hands the trading agent one prompt per simulated trading day.
@@ -147,7 +147,7 @@ restatement of every threshold.
 - **Point-in-time masking** (`backtest-harness/anonymize.py`): reshuffled ticker/company aliases per run, verified leak-free against real headline text (`test_anonymize.py`).
 - **Trade journal** (`trade-journal-mcp/`): idempotent decision/execution recording with full field-mismatch detection on any `decision_id` collision; run/mode isolation enforced at both write and read boundaries.
 - **Per-cycle evidence instrumentation** (`backtest_cycle_evidence` table, added `bfb16fe`, hardened `af0921d`) — see §7.
-- **Dashboard**: local-only, read-only against Neon's Data API, real token/retry/rejection counts, per-run scoping, mobile-responsive.
+- **Dashboard V1**: local-only, read-only against Neon's Data API, real token/retry/rejection counts, per-run scoping, mobile-responsive. **Dashboard V2 is a separate, genuinely public Cloudflare Pages preview** (SELECT-only against the same anonymous Data API grant, `backtest_cycle_evidence` excluded) — see §10; do not read this bullet as covering V2's exposure.
 - **Offline diagnostics** (not drafts, executable, human-only, never wired into the live path): `geometry_scan.py` / `counterfactual.py` (justified the Round-1→Round-2 rule changes) and `benchmark_sensitivity.py` (§7's benchmark/sensitivity report).
 - **SEC EDGAR Fundamentals V1** (`fundamentals/`, 2026-09-12) — four
   distinct states, do not conflate: (1) **data foundation** —
@@ -335,12 +335,12 @@ model/provider change; no Bayesian optimization; no fundamental-data work.
 **Implementation track (agreed NOW order — see `docs/obsidian/03-project-workflow.canvas`):**
 step 1, the Obsidian vault, is **done**. Step 2, **Dashboard V2**
 (`dashboard-v2/`, full IA + visual rebuild) **exists as an unactivated
-candidate, not yet cut over** — a pass correcting unsupported UI claims
-(naming, open-position price/days-held source, the Decisions funnel) is
-done; awaiting visual review and an explicit cutover decision. V1 stays
-active until then. Then the individual-trade view, then the
-experiment/optimization framework. NEXT/LATER canvas items stay
-discussion-only until the user explicitly approves moving one.
+candidate, not yet cut over to be the active dashboard** — V1 stays
+active until an explicit cutover decision, but V2 is already a genuinely
+**public** Cloudflare Pages preview (`dashboard-v2/README.md` §Deployment)
+— not loopback-only; corrects §4/§6 (prior audit H3). Then the
+individual-trade view, then the experiment/optimization framework.
+NEXT/LATER canvas items stay discussion-only until explicitly approved.
 
 ---
 
@@ -348,7 +348,7 @@ discussion-only until the user explicitly approves moving one.
 
 | File | What it is |
 |---|---|
-| `RULES.md` | Authoritative, locked rules — position sizing, caps, circuit breaker, prohibitions. Aggressive Phase 1 profile. |
+| `verify.py`, `RULES.md` | `python verify.py`: one non-mutating command for every safety-layer suite pytest alone silently skips. `RULES.md`: authoritative, locked rules — position sizing, caps, circuit breaker, prohibitions, Aggressive Phase 1 profile. |
 | `AGENTS.md` | The trading agent's operating procedure, step by step. |
 | `SOUL.md` | The trading agent's identity/temperament (Phase 2, active). |
 | `backtest-harness/run_backtest.py`, `anonymize.py`, `backtest_state.json` | Harness/orchestrator (masking, checkpointing, escalation, evidence capture); local gitignored in-progress portfolio state. |
@@ -377,7 +377,22 @@ python run_backtest.py --start 2026-02-17 --end 2026-08-14 --days <N>
 Run from `backtest-harness/`. `backtest_state.json`'s `run_id`/cursor
 (`e68525f9-...`/`2026-04-29`) reuse automatically as long as `--start`/
 `--end` match exactly. **Never include `--reset`** — it discards the 50
-cycles this file documents. (Registered `training`; `--run-kind` is fresh-run-only.)
+cycles this file documents, and now also needs `--confirm-destructive-
+reset` (§13). (Registered `training`; `--run-kind` is fresh-run-only.)
+
+---
+
+## 13. 2026-09-15 correction pass — data integrity & reproducibility
+
+Read-only-audit-driven fixes, not a strategy change; Round 2/`RULES.md`/
+`AGENTS.md`/`SOUL.md`/model untouched. New FUTURE-run invariants: no raw
+SEC magnitudes in fundamentals prompts; a BUY needs its alias in that
+cycle's real candidates; a >50% technicals outage halts the cycle, not a
+quiet-day entry; `fetch_bars` pins raw prices; a run's watchlist+alias
+mapping freeze in `backtest_state.json`; `--reset` needs `--confirm-
+destructive-reset` over real progress. `run_kind` gains `evaluation`
+(`docs/PROJECT_BACKLOG.md` §4, no episode run yet). `verify.py` (§11)
+covers the non-mutating suites. Still blocked on everything §10 blocks.
 
 ---
 

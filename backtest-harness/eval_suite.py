@@ -92,8 +92,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_backtest as rb                                              # noqa: E402
 from run_backtest import (                                             # noqa: E402
     DEFAULT_MASKING_SEED, REPO, Portfolio, _limits_for_profile,
-    _name_variants, _run_cycle_or_halt, json_from, register_run, run_day,
-    run_in,
+    _name_variants, _run_cycle_or_halt, json_from, register_run,
+    resolve_trade_rejection, run_day, run_in,
 )
 from anonymize import RunMasking                                       # noqa: E402
 
@@ -158,6 +158,16 @@ REQUIRED_REGIMES = frozenset({"rally", "selloff", "high_volatility", "sideways"}
 # section -- see audit_episode_watchlist_viability / propose_manifest.
 MANIFEST_VERSION = 3
 MANIFEST_DIR = Path(__file__).resolve().parent / "eval_suites"
+
+# Correction pass item E (prior audit M2): the ONLY run_kind
+# run_configuration will register an episode under. Previously the caller
+# passed an arbitrary 'training'/'smoke' value -- 'training' made every
+# eval episode indistinguishable from a real Round 2-style run in the
+# registry and the dashboard's training-run selector; 'smoke' mislabels
+# genuine evaluation data as an infrastructure test, the exact thing
+# 'smoke' exists to exclude. See trade-journal-mcp/schema.sql's
+# backtest_run_registry CHECK constraint, widened to accept this value.
+EVAL_RUN_KIND = "evaluation"
 
 
 # ---------------------------------------------------------------------
@@ -658,6 +668,18 @@ class ManifestNotApprovedError(ValueError):
     """The manifest's status is not exactly 'approved'."""
 
 
+class ManifestVersionError(ValueError):
+    """Correction pass item E.3 (prior audit L4): the manifest's own
+    manifest_version does not match this code's MANIFEST_VERSION.
+    manifest_version is written and content-hashed (so tampering with it
+    is caught the same way as any other field) but was previously never
+    actually COMPARED against the running code anywhere -- a future
+    MANIFEST_VERSION bump with changed classification semantics (see that
+    constant's own changelog comments) would otherwise execute an older,
+    approved manifest silently, under semantics it was never generated
+    or reviewed under."""
+
+
 class ManifestWatchlistViabilityError(ValueError):
     """An episode's watchlist_viability audit is missing, malformed, or
     reports a failing ticker (correction pass, part 2). Distinct from
@@ -684,12 +706,23 @@ def verify_manifest(manifest: dict) -> None:
 
 
 def require_approved(manifest: dict) -> None:
-    """The runner's own gate: refuse a proposed OR tampered manifest.
-    Verifies the hash FIRST -- a tampered manifest is rejected regardless
-    of its claimed status -- then requires status == 'approved' exactly;
-    'proposed' (the only status propose_manifest ever writes) is refused
-    exactly like any other non-'approved' value."""
+    """The runner's own gate: refuse a proposed, tampered, OR
+    version-incompatible manifest. Verifies the hash FIRST -- a tampered
+    manifest is rejected regardless of its claimed status -- then the
+    manifest_version compatibility gate (correction pass item E.3, prior
+    audit L4), THEN requires status == 'approved' exactly; 'proposed'
+    (the only status propose_manifest ever writes) is refused exactly
+    like any other non-'approved' value."""
     verify_manifest(manifest)
+    stored_version = manifest.get("manifest_version")
+    if stored_version != MANIFEST_VERSION:
+        raise ManifestVersionError(
+            f"manifest_version {stored_version!r} does not match this code's "
+            f"MANIFEST_VERSION {MANIFEST_VERSION} -- classification semantics may "
+            "have changed since this manifest was generated. Regenerate and "
+            "re-approve a fresh manifest with the current code before running "
+            "any episode; never run an old-version manifest under new-version code."
+        )
     if manifest.get("status") != "approved":
         raise ManifestNotApprovedError(
             f"manifest status is {manifest.get('status')!r}, not 'approved' -- "
@@ -801,10 +834,12 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
     need it); a halted episode is simply reported as such, never retried
     automatically.
 
-    run_kind: 'training' or 'smoke' -- the EXISTING durable classification
-    (backtest_run_registry), completely unchanged. The episode's/suite's
-    own identity (`config.config_label`, `episode['regime']`, etc.) is
-    local report metadata only, never sent as a run_kind."""
+    run_kind: the durable classification (backtest_run_registry) every
+    episode registers under -- run_configuration (the only public caller)
+    already enforces this is exactly EVAL_RUN_KIND ('evaluation') before
+    ever reaching here. The episode's/suite's own identity
+    (`config.config_label`, `episode['regime']`, etc.) is local report
+    metadata only, never sent as a run_kind."""
     start = date.fromisoformat(episode["start"])
     end = date.fromisoformat(episode["end"])
     run_id = str(uuid.uuid4())
@@ -845,6 +880,24 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
             cursor += timedelta(days=1)
     finally:
         rb.CHECKPOINT_PATH = original_checkpoint_path
+
+    # Correction pass item E.2 (prior audit M1): an episode never resumes
+    # (see this function's own docstring) -- whether it reached `end`
+    # cleanly or halted partway, any order still 'pending' in the journal
+    # at this point can NEVER be resolved by a later cycle the way the
+    # main harness's own next-invocation would. Resolve it honestly as
+    # rejected instead of leaving a permanently dangling pending row
+    # indistinguishable from one genuinely still awaiting execution.
+    # Best-effort (never masks the episode's own halted/report outcome,
+    # same discipline as do_observability above) -- but real: reuses the
+    # exact resolve_trade_rejection path the main harness itself uses.
+    dangling_pending_orders = list(portfolio.pending_orders)
+    for order in dangling_pending_orders:
+        try:
+            resolve_trade_rejection(order.decision_id, "episode window ended before execution")
+        except Exception:
+            pass
+    portfolio.pending_orders = []
 
     fundamentals_assessment_counts = None
     if config.fundamentals_enabled and not halted:
@@ -888,6 +941,11 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
         "closed_trade_count": len(portfolio.closed_pnl),
         "blocked_count": len(blocked_reasons),
         "blocked_reasons": blocked_reasons[:20],  # bounded -- report stays compact
+        # Correction pass item E.2 (prior audit M1): how many orders this
+        # episode itself resolved as rejected at its own end -- 0 in the
+        # ordinary case, non-zero exactly when the episode's own final
+        # cycle queued a decision with nothing left to resolve it.
+        "dangling_pending_orders_resolved": len(dangling_pending_orders),
         "fundamentals_assessment_counts": fundamentals_assessment_counts,
     }
 
@@ -931,7 +989,24 @@ def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
     Every configuration compared this way must be run against the SAME
     manifest object/file for the comparison to be fair -- this function
     itself does not enforce that across separate calls, the caller must
-    reuse one loaded manifest. NEVER called by this module's own code."""
+    reuse one loaded manifest. NEVER called by this module's own code.
+
+    run_kind: correction pass item E (prior audit M2) -- must be exactly
+    EVAL_RUN_KIND ('evaluation'). Checked here, BEFORE require_approved
+    even runs, so an eval episode can never register itself as 'training'
+    (indistinguishable from a real run in the dashboard's training-run
+    selector) or 'smoke' (mislabels genuine evaluation data as an infra
+    test). The parameter stays explicit at the call site (self-documenting
+    -- "this registers as evaluation") rather than a silent default;
+    trade-journal-mcp's own registry validation is the second, independent
+    layer of the same guarantee."""
+    if run_kind != EVAL_RUN_KIND:
+        raise ValueError(
+            f"run_configuration only ever registers episodes as {EVAL_RUN_KIND!r} "
+            f"-- got {run_kind!r}. An eval episode must never be classified "
+            "'training' (indistinguishable from real training data) or 'smoke' "
+            "(mislabels genuine evaluation data as an infrastructure test)."
+        )
     require_approved(manifest)
     if episode_set not in ("episodes", "holdout_episodes"):
         raise ValueError(f"episode_set must be 'episodes' or 'holdout_episodes', got {episode_set!r}")

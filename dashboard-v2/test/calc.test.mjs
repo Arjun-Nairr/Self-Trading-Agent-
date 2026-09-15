@@ -292,6 +292,24 @@ test("trainingRunsFromRows: excludes smoke/archived, keeps training runs with sn
   assert.equal(runs[0].latest_day_label, "Day 41"); // first (newest) occurrence kept, not the dup
 });
 
+// Correction pass item E (prior audit M2): backtest_run_registry.run_kind
+// gained 'evaluation' (backtest-harness/eval_suite.py's comparison
+// episodes) -- an eval episode must never appear in this dashboard's
+// training-run selector, exactly like smoke/archived above.
+test("trainingRunsFromRows: excludes 'evaluation' runs, same as smoke/archived", () => {
+  const registryRows = [
+    { run_id: "train-1", run_kind: "training" },
+    { run_id: "eval-1", run_kind: "evaluation" },
+  ];
+  const snapshotRows = [
+    { run_id: "eval-1", created_at: "2026-01-05T00:00:00Z", day_label: "Day 20" },
+    { run_id: "train-1", created_at: "2026-01-04T00:00:00Z", day_label: "Day 41" },
+  ];
+  const runs = trainingRunsFromRows(registryRows, snapshotRows);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0].run_id, "train-1");
+});
+
 test("trainingRunsFromRows: a training run with no snapshots never appears", () => {
   const registryRows = [{ run_id: "train-empty", run_kind: "training" }];
   const runs = trainingRunsFromRows(registryRows, []);

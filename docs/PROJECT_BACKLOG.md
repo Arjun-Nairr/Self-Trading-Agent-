@@ -355,6 +355,21 @@ that grant (verified).
   Prerequisite: decide whether masked/aggregate backtest data at this
   sensitivity level needs auth before any wider hosting, or whether
   the current anonymous-SELECT-only boundary is sufficient long-term.
+  - **`blockedActivity`'s unbounded query (prior audit M4), evaluated
+    2026-09-15 (correction pass item G) and deliberately left unchanged.**
+    `dashboard-v2/js/data.js`'s `agent_activity` rejection-distribution
+    query (`event_type=in.(risk_check,order_rejected)`) has no `limit`,
+    unlike the sibling query at `limit=200` — because
+    `rejectionDistribution`'s per-rule counts (Decisions page) are a
+    genuinely **run-wide** figure; bounding the query to the newest N rows
+    would silently turn it into a recent-window figure, which is worse
+    than the current growth risk, not better (explicitly ruled out by this
+    correction pass). A CORRECT bounded fix needs server-side aggregation
+    (a Postgres view/RPC doing the count, so the client downloads a small
+    aggregated result instead of every raw row) — that is a new Neon
+    privilege/query surface, out of bounds for this pass and for the
+    anonymous-SELECT-only boundary as it exists today. Revisit together
+    with the access-hardening review above, not in isolation.
 - **Later:**
   - Live bracket/OCO orders (broker-side protective exits — today's
     `alpaca-mcp` submits a single order only). Status `deferred`.
@@ -486,6 +501,22 @@ document; it is implemented.**
     a fresh manifest, approving it (editing its `status` field — the one
     edit excluded from the content hash), and an explicit go-ahead to run
     comparisons at all.
+
+    **2026-09-15 correction pass (item E, prior audit M1/M2/L4):**
+    `backtest_run_registry.run_kind` gained a fourth value, `evaluation`
+    (schema CHECK + `trade-journal-mcp/server.py`'s `_VALID_RUN_KINDS`,
+    both additive migrations, no existing row touched) — `run_configuration`
+    now refuses to register an episode under anything but `EVAL_RUN_KIND`
+    (`'evaluation'`), so an episode can never be mistaken for real training
+    data or dismissed as infrastructure noise; dashboard-v2's training-run
+    selector already excludes it (strict `run_kind === "training"`
+    allowlist, unaffected by this addition). `require_approved` now also
+    refuses a `manifest_version` mismatch against the running code's
+    `MANIFEST_VERSION` — the stale committed v2 manifest above is caught
+    directly by this now, not only incidentally by the v3 viability audit.
+    An episode's own final pending order (if any) is resolved as rejected
+    at episode end (`resolve_trade_rejection`, reused verbatim), never left
+    dangling. Still **defined but never invoked** — no episode has run.
 
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.

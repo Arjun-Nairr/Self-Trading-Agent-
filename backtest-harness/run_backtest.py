@@ -240,6 +240,75 @@ def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _watchlist_hash(watchlist: list[dict]) -> str:
+    """SHA-256 over the exact (symbol, name) pairs that determine aliasing --
+    canonical (sorted by symbol, fixed key order) so the hash is stable
+    regardless of watchlist.json's own key/entry ordering. Correction pass
+    item D (freeform red-team R2): this is what lets a resume detect that
+    watchlist/watchlist.json changed since this run's aliases were frozen,
+    without needing the full snapshot for a quick comparison."""
+    canonical = sorted(
+        (str(t["symbol"]), str(t["name"])) for t in watchlist
+    )
+    return hashlib.sha256(json.dumps(canonical).encode()).hexdigest()
+
+
+def _resolve_watchlist_snapshot(
+    is_resume: bool,
+    stored_snapshot: list[dict] | None,
+    current_watchlist: list[dict],
+) -> list[dict]:
+    """Pure decision logic for correction pass item D (freeform red-team
+    R2) -- durable per-run watchlist invariant, mirroring _resolve_seed/
+    _resolve_window/_resolve_fundamentals_enabled's own style and
+    fail-closed discipline (never a fetch, prompt, journal write, or state
+    mutation before this decides).
+
+    RunMasking's alias assignment is `dict(zip(sorted(tickers), shuffled_
+    pool))` -- a POSITIONAL zip against the sorted ticker list. Changing
+    the watchlist by even one name reshuffles every OTHER ticker's alias
+    too, not just the new one's: a live position's own alias can move
+    mid-run if watchlist/watchlist.json is edited (e.g. a re-screen, RULES
+    .md §8) while a run is in progress. This freezes the exact watchlist
+    snapshot a run's aliases were built from, the same way seed/window/
+    fundamentals are already frozen, so a resume can never silently pick
+    up a changed file.
+
+      - Fresh run (not a resume, including --reset): nothing stored yet to
+        conflict with -- the watchlist read this invocation becomes this
+        run's frozen snapshot going forward.
+      - Resumed run, no stored snapshot at all (a legacy state file
+        written before this field existed, e.g. the preserved Round 2
+        run): nothing to compare against or reconstruct -- adopt the
+        current file's content as the snapshot from this point forward,
+        same accepted-legacy-default discipline as
+        _resolve_fundamentals_enabled.
+      - Resumed run, a stored snapshot exists and the current file's
+        (symbol, name) pairs hash identically: reuse the stored snapshot
+        exactly (never the freshly-read one, even if byte-identical, so
+        entry order/extra fields never matter).
+      - Resumed run, a stored snapshot exists and the current file has
+        changed: fail loudly (SystemExit) BEFORE any fetch/prompt/journal
+        write/state mutation -- never silently reshuffle ticker<->alias
+        assignments Hermes has already learned this run."""
+    if not is_resume or stored_snapshot is None:
+        return current_watchlist
+    if _watchlist_hash(stored_snapshot) != _watchlist_hash(current_watchlist):
+        raise SystemExit(
+            "watchlist/watchlist.json has changed since this run's aliases "
+            f"were frozen (frozen hash {_watchlist_hash(stored_snapshot)}, "
+            f"current file hash {_watchlist_hash(current_watchlist)}) -- a "
+            "resumed run must reuse its frozen watchlist snapshot in "
+            f"{STATE_PATH.name}; RunMasking's positional-zip alias "
+            "assignment means ANY membership change reshuffles EVERY "
+            "existing ticker's alias, not just the changed one's, including "
+            "a currently-held position's. Restore watchlist/watchlist.json "
+            "to match this run's frozen snapshot, or start a fresh/--reset "
+            "run to adopt the new watchlist with fresh aliases."
+        )
+    return stored_snapshot
+
+
 # --------------------------------------------------------------------------
 # simulated portfolio
 # --------------------------------------------------------------------------
@@ -653,11 +722,22 @@ def evaluate_opening_gap(stop_price: float, target_price: float, open_price: flo
     fills near the open, not near the stop"). A target gap-up fills at the
     worse-for-the-strategy of open/target for the same reason, applied
     symmetrically -- never assume the best case in either direction.
-    Returns ("stop"|"target", exit_price) or None."""
+    Returns ("stop"|"target", exit_price) or None.
+
+    Correction pass item G (freeform red-team R3): the returned exit_price
+    is rounded to the cent, same discipline as _slipped_buy_price's own
+    `round(..., 2)` for entries. Real intraday bar data can carry more
+    than 2 decimal digits; an unrounded exit_price here used to feed
+    working.closed_pnl (Python float arithmetic on a non-cent value) AND
+    get journaled separately (trades.fill_price is NUMERIC(14,2), which
+    Postgres rounds on insert) -- the SAME exit, represented two
+    DIFFERENT ways in the harness's own bookkeeping vs. the authoritative
+    stored record. Rounding once here, at the source, is what makes them
+    reconcile exactly."""
     if open_price <= stop_price:
-        return "stop", min(open_price, stop_price)
+        return "stop", round(min(open_price, stop_price), 2)
     if open_price >= target_price:
-        return "target", max(open_price, target_price)
+        return "target", round(max(open_price, target_price), 2)
     return None
 
 
@@ -669,11 +749,15 @@ def evaluate_bar_stop_target(stop_price: float, target_price: float, bar: dict) 
     resolved conservatively (assume the stop, never the target). This is a
     real, accepted limitation of bar-level (not tick-level) simulation --
     documented in HANDOFF.md, not silently assumed away. Returns
-    ("stop"|"target", exit_price) or None."""
+    ("stop"|"target", exit_price) or None.
+
+    Correction pass item G (freeform red-team R3): rounded to the cent
+    at the source, same reasoning as evaluate_opening_gap's own fix --
+    see that docstring."""
     if bar["low"] <= stop_price:
-        return "stop", min(bar["open"], stop_price)
+        return "stop", round(min(bar["open"], stop_price), 2)
     if bar["high"] >= target_price:
-        return "target", target_price
+        return "target", round(target_price, 2)
     return None
 
 
@@ -835,7 +919,12 @@ def simulate_trading_day(
                            "entry_price": holding.entry_price, "bar_time": "09:30"})
             continue
         if trading_days_elapsed - holding.entry_trading_day >= TIME_STOP_TRADING_DAYS:
-            exit_price = open_bar["open"]
+            # Correction pass item G (freeform red-team R3): rounded to
+            # the cent, same reasoning as evaluate_opening_gap/
+            # evaluate_bar_stop_target's own fix (see those docstrings) --
+            # this is the one mechanical-exit price that never went
+            # through either function.
+            exit_price = round(open_bar["open"], 2)
             running_cash += holding.quantity * exit_price
             del remaining[ticker]
             events.append({"stage": "time_stop", "ticker": ticker, "kind": "exit",
@@ -1128,6 +1217,46 @@ def _resolve_fundamentals_enabled(is_resume: bool, stored: bool | None, requeste
     )
 
 
+def _check_reset_allowed(existing_state: dict | None, confirmed: bool) -> None:
+    """Pure decision logic for correction pass item F (prior audit M3):
+    --reset must not silently discard an existing run's progress.
+    backtest_state.json is the ONLY copy of cash, holdings, pending
+    orders, cursor, masking seed, and the activity-escalation block
+    counters -- Neon holds the journal but never this resumable state
+    (see HANDOFF.md's own "where each kind of data lives" table).
+
+    `existing_state` is the parsed backtest_state.json content if a state
+    file exists at all (None -- nothing to protect, an ordinary fresh/
+    --reset run with no prior file at all is completely unaffected). A
+    state file with trading_days_elapsed == 0 (a registered but never
+    actually advanced run) is also unprotected -- nothing real would be
+    lost. Deliberately does not distinguish training/smoke classification
+    (that needs a registry lookup this local, Docker/Neon-free decision
+    function has no business making) -- guarding on real progress alone
+    is the simpler, strictly MORE protective choice; a smoke run's local
+    progress is exactly as hard to reconstruct as training's.
+
+    Fails loudly (SystemExit) when real progress would be discarded and
+    `confirmed` is False -- the ordinary new-run/reset workflow (no
+    existing state, or an existing-but-unadvanced one) is completely
+    unaffected and needs no extra flag."""
+    if existing_state is None:
+        return
+    trading_days_elapsed = existing_state.get("portfolio", {}).get("trading_days_elapsed", 0)
+    if trading_days_elapsed <= 0 or confirmed:
+        return
+    run_id = existing_state.get("run_id", "unknown")
+    raise SystemExit(
+        f"--reset would discard {STATE_PATH.name}'s existing progress "
+        f"({trading_days_elapsed} trading day(s), run_id={run_id}) -- this "
+        "is the ONLY local copy of this run's cash, holdings, pending "
+        "orders, cursor, masking seed, and activity-escalation block state; "
+        "Neon holds the journal but not this. Pass --confirm-destructive-"
+        "reset if this is genuinely intended, or omit --reset to resume "
+        "this run instead."
+    )
+
+
 def _atomic_write_json(path: Path, data: dict) -> None:
     """Write-to-temp-then-atomic-rename. A process killed mid-write (exactly
     the failure mode this whole repair is about) must never leave
@@ -1233,20 +1362,37 @@ def _clear_checkpoint() -> None:
 # --------------------------------------------------------------------------
 
 def fetch_bars(tickers: list[str], day: date) -> dict[str, dict]:
-    """That day's real daily OHLC — used ONLY for the cheap holiday/
-    no-trading-day check and informational display (positions_view's
-    current_price, shown to Hermes) since the 2026-08-25 intraday
-    chronology follow-up. Mechanical exits, queued-order execution, and
-    every risk-check mark now come from fetch_intraday_bars instead --
-    see simulate_trading_day. Kept for exactly those two remaining uses
-    (and test_execution_path.py's own direct coverage of this maverick/
-    yfinance path) rather than removed, to keep this change's diff scoped
-    to what actually needed fixing."""
+    """That day's real daily OHLC — used for the cheap holiday/
+    no-trading-day check, informational display (positions_view's
+    current_price, shown to Hermes), AND the decision-time-only advisory
+    context (build_decision_time_context's equity/exposure/position marks
+    — itself never authoritative, see that function's own docstring)
+    since the 2026-08-25 intraday chronology follow-up. Mechanical exits,
+    queued-order EXECUTION, and every execution-time risk-check mark come
+    from fetch_intraday_bars instead -- see simulate_trading_day; that is
+    the sole authority a trade actually happens on. Kept as its own
+    function (and test_execution_path.py's own direct coverage of this
+    maverick/yfinance path) rather than merged, to keep this change's diff
+    scoped to what actually needed fixing.
+
+    auto_adjust=False is explicit and load-bearing, not yfinance's own
+    default (which is auto_adjust=True as of this yfinance version --
+    dividend/split-adjusted OHLC). Every other price path in this project
+    is raw: Alpaca execution fills (alpaca-mcp's bars, execution-sim's
+    fills) and maverick-mcp's own technicals fetch
+    (market_data/fetchers.py's _default_history_fn, pinned explicitly for
+    this exact reason on 2026-08-28) both request raw prices. An adjusted
+    daily bar here would silently disagree with the raw price the
+    decision-time equity/exposure context and the real fill are computed
+    from around any real ex-dividend date, and -- because yfinance
+    back-adjusts using dividends known at FETCH time -- a retried cycle
+    could recompute a different bar for the same historical day than an
+    earlier attempt did. See test_fetch_bars_requests_raw_prices."""
     script = f'''
 import json, yfinance as yf
 out = {{}}
 for t in {tickers!r}:
-    h = yf.Ticker(t).history(start="{day}", end="{day + timedelta(days=1)}")
+    h = yf.Ticker(t).history(start="{day}", end="{day + timedelta(days=1)}", auto_adjust=False)
     if not h.empty:
         r = h.iloc[0]
         out[t] = {{"open": float(r["Open"]), "high": float(r["High"]),
@@ -1379,7 +1525,7 @@ asyncio.run(main())
 # an explicitly labeled technical-only evaluation instead.
 # ---------------------------------------------------------------------
 
-# The exact V1 metrics fundamentals/edgar.py can return -- rendered
+# The exact V1 metrics fundamentals/edgar.py can return -- consumed
 # verbatim, in this fixed order, never a superset (no new metric is
 # invented here; this backtest integration is a consumer of the accepted
 # module's own contract, not a second place that defines metrics).
@@ -1388,6 +1534,31 @@ FUNDAMENTALS_METRIC_ORDER = [
     "operating_cash_flow", "cash_and_equivalents", "total_debt",
     "current_assets", "current_liabilities", "current_ratio",
 ]
+
+# Correction pass item A (prior audit C1): only these three -- growth,
+# profitability, liquidity -- carry a useful contextual PROJECTION at a
+# fraction of the fingerprint an absolute dollar magnitude carries. The
+# other seven FUNDAMENTALS_METRIC_ORDER names are fetched (their filing
+# date still contributes to filing_age_days below) but their raw VALUE
+# never enters mask_fundamentals' output, and therefore never reaches
+# build_prompt/Hermes. A magnitude like "revenue 6,238,000,000" is a far
+# stronger company+calendar-period retrieval cue than the share price
+# anonymize.py deliberately leaves unmasked -- see this constant's own
+# test, test_fundamentals_prompt_never_renders_a_raw_magnitude.
+FUNDAMENTALS_RATIO_METRICS = frozenset({"revenue_growth_yoy", "net_margin", "current_ratio"})
+assert FUNDAMENTALS_RATIO_METRICS <= set(FUNDAMENTALS_METRIC_ORDER)
+
+# How each ratio metric's already-computed value (see fundamentals/
+# edgar.py -- revenue_growth_yoy/net_margin are already *100 percentages,
+# current_ratio is a bare ratio) is rendered. A generic ",.0f" (the prior
+# formatting, correct for a whole-dollar magnitude) would round a 7.3%
+# margin to "7" and lose the sign of a negative one -- wrong for a ratio
+# regardless of the masking question, and now the only thing rendered.
+_FUNDAMENTALS_RATIO_FORMAT = {
+    "revenue_growth_yoy": lambda v: f"{v:+.1f}%",
+    "net_margin": lambda v: f"{v:+.1f}%",
+    "current_ratio": lambda v: f"{v:.2f}x",
+}
 
 # The only values Hermes may self-report for how available fundamentals
 # affected its confidence -- deliberately NOT a numeric weight (RULES.md's
@@ -1433,10 +1604,15 @@ def mask_fundamentals(fetch_result: dict) -> dict:
     """Pure, testable: turns one ticker's raw fetch_fundamentals() result
     into the compact, identity-free block build_prompt renders. NEVER
     includes real ticker/company name, CIK, SEC source_url, accession
-    number, or a raw calendar filing date -- only the fixed V1 metric
-    values (already unit-checked/point-in-time-gated by fundamentals/
-    edgar.py itself) and a RELATIVE filing-age-in-days indicator, the
-    same masking convention mask_news already uses for headline age.
+    number, or a raw calendar filing date -- only a RELATIVE filing-age-
+    in-days indicator (same masking convention mask_news already uses for
+    headline age) and, since correction pass item A, only the three
+    FUNDAMENTALS_RATIO_METRICS values -- never a raw absolute dollar
+    magnitude (revenue, net_income, operating_cash_flow, cash_and_
+    equivalents, total_debt, current_assets, current_liabilities). A
+    magnitude metric still contributes its filing date to filing_age_days
+    below (that alone identifies nothing) but its VALUE never enters
+    `metrics`, so it never reaches build_prompt/Hermes.
 
     Per-metric 'unavailable' reasons from fundamentals/edgar.py are safe
     to pass through verbatim -- they only ever name generic US-GAAP tags
@@ -1461,10 +1637,13 @@ def mask_fundamentals(fetch_result: dict) -> dict:
         m = snap.metrics.get(name)
         if m is None or m.status != "available":
             continue
-        metrics[name] = {"value": m.value}
         obs = m.observation or (m.derived_from[0] if m.derived_from else None)
         if obs is not None and obs.filed_at:
             filed_dates.append(obs.filed_at)
+        if name in FUNDAMENTALS_RATIO_METRICS:
+            metrics[name] = {"value": m.value}
+        # else: a magnitude metric -- its filing date already counted
+        # above; its raw value is deliberately never added to `metrics`.
 
     if not metrics:
         return {"available": False, "reason": "no eligible V1 metric available for this candidate",
@@ -1554,7 +1733,8 @@ def fundamentals_prompt_lines(fundamentals_block: dict | None) -> list[str]:
         return []
     if fundamentals_block["available"]:
         bits = ", ".join(
-            f"{name} {vals['value']:,.0f}" for name, vals in fundamentals_block["metrics"].items()
+            f"{name} {_FUNDAMENTALS_RATIO_FORMAT[name](vals['value'])}"
+            for name, vals in fundamentals_block["metrics"].items()
         )
         age = fundamentals_block["filing_age_days"]
         age_str = f"~{age}d ago" if age is not None else "age unknown"
@@ -2181,7 +2361,14 @@ asyncio.run(main())
                     "confidence": entry.get("confidence"),
                     "exit_reason": (t.get("strategy_notes") or "").replace("Mechanical exit: ", ""),
                     "pnl": round(pnl, 2),
-                    "won": pnl >= 0,
+                    # Correction pass item F (prior audit L1): aligned on
+                    # `> 0`, same convention dashboard-v2/js/calc.js and
+                    # dashboard/index.html already use -- a breakeven
+                    # (pnl == 0) trade is neither a win Hermes reasons
+                    # about in reflection material nor a win the human-
+                    # facing dashboards show; it must not read as one on
+                    # only one side.
+                    "won": pnl > 0,
                     # The SELL row's own resolution time -- what "most
                     # recently closed" actually means, not insertion order.
                     "_exit_time": t["updated_at"],
@@ -2516,6 +2703,16 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     lines.append("CANDIDATES")
     for c in candidates:
         t = c["tech"]
+        # Correction pass item F (prior audit L5): defense in depth, not a
+        # live check on the real pipeline -- run_day's own candidate-
+        # construction loop already drops any ticker whose technicals
+        # errored before it ever becomes a `candidate` (see
+        # _check_candidate_coverage/InsufficientCandidateCoverageError for
+        # the real fail-closed handling of that case), so this can never
+        # fire when called from run_day. Kept only because build_prompt is
+        # also called directly (e.g. by tests) with hand-built candidate
+        # lists that may not honor that invariant -- explicitly documented
+        # now instead of reading as an unexplained, never-firing guard.
         if "error" in t:
             continue
         lines.append(
@@ -2605,6 +2802,86 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     return "\n".join(lines)
 
 
+class InsufficientCandidateCoverageError(RuntimeError):
+    """Correction pass item B.2 (prior audit H2): raised when too many of
+    this cycle's expected (unheld) watchlist tickers errored on their
+    technical fetch to trust the survivors as a real day, not an outage.
+    Propagates uncaught, exactly like fetch_bars/fetch_intraday_bars'
+    own RuntimeError on a data failure -- caught only by
+    _run_cycle_or_halt, which halts the cycle (date NOT advanced, state
+    NOT written, no Hermes call, no journal write) rather than letting a
+    shrunken candidate set masquerade as an ordinary quiet day."""
+
+
+# A fraction, not a fixed ticker count -- scales with "the actual expected
+# candidate universe for that simulated day" (correction pass item B.2's
+# own wording) rather than a magic number picked for today's 10-name
+# watchlist. Below this fraction of unheld tickers producing usable
+# technicals, the cycle is a data outage, not a quiet market.
+MIN_CANDIDATE_COVERAGE_FRACTION = 0.5
+
+
+def _check_candidate_coverage(unheld_tickers: list[str], technicals: dict[str, dict]) -> None:
+    """Pure, testable: raises InsufficientCandidateCoverageError when too
+    few of `unheld_tickers` produced usable technicals this cycle. No-op
+    when there is nothing to evaluate (every watchlist name already held)
+    -- that is a legitimate zero-candidate cycle, not an outage."""
+    if not unheld_tickers:
+        return
+    usable = sum(1 for t in unheld_tickers if "error" not in technicals.get(t, {"error": "missing"}))
+    required = math.ceil(len(unheld_tickers) * MIN_CANDIDATE_COVERAGE_FRACTION)
+    if usable < required:
+        errored = [t for t in unheld_tickers if "error" in technicals.get(t, {"error": "missing"})]
+        raise InsufficientCandidateCoverageError(
+            f"only {usable}/{len(unheld_tickers)} expected candidates produced usable "
+            f"technicals this cycle (need >= {required}, "
+            f"{MIN_CANDIDATE_COVERAGE_FRACTION:.0%} coverage) -- treating this as a data "
+            f"outage, not a quiet market. Errored: {errored}"
+        )
+
+
+def _full_candidate_status(all_tickers: list[str], held_tickers: list[str],
+                           candidates: list[dict], response: dict,
+                           masking: "RunMasking") -> list[dict]:
+    """Correction pass item B.2 (prior audit H2): a per-ticker
+    accountability record for EVERY expected watchlist name this cycle --
+    not just the ones that survived to become a candidate. _candidate_status
+    alone only ever sees names that already survived to become a
+    candidate, so a technicals outage that shrinks the candidate set left
+    no structural trace; this makes the gap auditable instead of invisible.
+
+    Deliberately takes NO fresh technicals fetch -- only `all_tickers`
+    (the frozen watchlist, item D) and `held_tickers` (this cycle's
+    portfolio state), both stable across a checkpoint replay, plus
+    `candidates`/`response` (the SAME checkpoint-consistent pair
+    _candidate_status already uses). Given today's candidate-construction
+    loop (run_day: every unheld ticker either errors and is skipped, or
+    succeeds and unconditionally becomes a candidate), "unheld and absent
+    from `candidates`" IS "technical fetch failed" -- inferring it
+    structurally this way, rather than consulting a freshly re-fetched
+    technicals dict, is what keeps a replay's evidence write byte-
+    identical to the original attempt even if a retry's own fetch
+    succeeds or fails differently than the first attempt did.
+
+    Status is one of: 'held' (an open position, not evaluated as an entry
+    candidate this cycle -- exits use held_technicals, a separate path),
+    'excluded' (technical fetch failed for this candidate -- never
+    silently dropped), or 'proposed'/'no_proposal' (delegated to
+    _candidate_status, unchanged)."""
+    candidate_aliases = {c["alias"] for c in candidates}
+    proposed_status = {c["alias"]: c["status"] for c in _candidate_status(candidates, response)}
+    out = []
+    for ticker in all_tickers:
+        alias = masking.alias(ticker)
+        if ticker in held_tickers:
+            out.append({"alias": alias, "status": "held"})
+        elif alias not in candidate_aliases:
+            out.append({"alias": alias, "status": "excluded", "reason": "technical_fetch_error"})
+        else:
+            out.append({"alias": alias, "status": proposed_status.get(alias, "no_proposal")})
+    return out
+
+
 def _candidate_status(candidates: list[dict], response: dict) -> list[dict]:
     """Structural candidate_status -- an eligible candidate is 'proposed'
     iff its alias appears in the validated response's own decisions list,
@@ -2646,7 +2923,9 @@ class HermesResult:
     retry_diagnostics: list[dict]
 
 
-def _call_hermes(prompt: str) -> str:
+def _call_hermes(prompt: str) -> tuple[str, dict]:
+    # Correction pass item F (prior audit L5): the annotation previously
+    # said -> str; the real return (below) is (result.stdout, usage).
     escaped = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
     # --usage-file: real per-call token accounting (input/output/cache/
     # reasoning tokens, api_calls) written to a JSON report inside the
@@ -3340,6 +3619,12 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     news = fetch_news(unheld_tickers + held_tickers, day)
     technicals = {t: all_technicals[t] for t in unheld_tickers if t in all_technicals}
     held_technicals = {t: all_technicals[t] for t in held_tickers if t in all_technicals}
+    # Correction pass item B.2 (prior audit H2): a technicals outage must
+    # halt the cycle like any other data failure, BEFORE any Hermes call,
+    # rather than silently continue with a shrunken candidate set that
+    # would journal as an ordinary quiet day. See
+    # InsufficientCandidateCoverageError.
+    _check_candidate_coverage(unheld_tickers, technicals)
 
     # Fundamentals V1 (opt-in, default off): CANDIDATES only, never held
     # positions -- exits stay technical/news-only, unaffected. Fetched
@@ -3434,6 +3719,17 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     reflection_trades = (
         fetch_recent_closed_trades(masking, run_id=run_key) if is_reflection_day else None
     )
+    # Correction pass item F (prior audit M5): these two are the only
+    # prompt inputs that carry text written by Hermes ITSELF back into a
+    # later prompt (every other input is freshly derived from tools/DB
+    # numbers). In practice the model only ever saw aliases, so a real
+    # ticker is unlikely -- but a hallucinated absolute year or name in a
+    # past reflection would otherwise re-enter every later prompt as a
+    # retrieval cue with nothing to catch it. Same leak gate as
+    # candidates/positions_view above, just applied to the two inputs it
+    # previously skipped.
+    masking.assert_clean(recent_insights)
+    masking.assert_clean(reflection_trades)
 
     # The exact masked structured objects build_prompt is about to render --
     # passed straight through to record_cycle_evidence later, never
@@ -3532,7 +3828,12 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # exactly what was checkpointed, identically to the original attempt
     # (gap fix: a rerun that fetched different candidates locally must not
     # be able to alter the evidence record).
-    candidate_status = _candidate_status(input_payload["candidates"], response)
+    # Correction pass item B.2 (prior audit H2): every expected watchlist
+    # name this cycle, not only the ones that survived to become a
+    # candidate -- held and technical-fetch-excluded names get their own
+    # honest status instead of silently vanishing from the record.
+    candidate_status = _full_candidate_status(
+        tickers, held_tickers, input_payload["candidates"], response, masking)
     usage_for_evidence = summary["usage"] or {}
     record_cycle_evidence(
         cycle_id=cycle_id, run_id=run_key, day_label=masking.day_index(day),
@@ -3624,6 +3925,14 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # the fill's resolution found the row already claimed 'rejected' by
     # the first and was silently dropped (_record_execution_result only
     # ever resolves a row still 'pending').
+    # Correction pass item B.1 (prior audit H1): a BUY may only be
+    # accepted when its alias was present in THIS cycle's actual candidate
+    # list (i.e. had usable technical evidence rendered to the agent) --
+    # input_payload["candidates"], the same checkpoint-consistent source
+    # _candidate_status/_full_candidate_status already use, never the
+    # freshly re-fetched local `candidates`. Evidence-membership only:
+    # setup QUALITY stays entirely Hermes' judgment (RULES.md §10).
+    candidate_aliases = {c["alias"] for c in input_payload["candidates"]}
     available_cash = working.cash
     queued_tickers: set[str] = set()
     for i, decision in enumerate(response.get("decisions", [])):
@@ -3636,6 +3945,16 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         action = decision.get("action", "").upper()
         if action not in ("BUY", "SELL"):
             summary["blocked"].append(f"{real_ticker}: unsupported action {action!r}")
+            continue
+        if action == "BUY" and decision["alias"] not in candidate_aliases:
+            line = (
+                f"{real_ticker}: decision-time risk check rejected -- §5.3: alias "
+                f"{decision['alias']!r} was not present in this cycle's candidate "
+                "list (no technical evidence was rendered for it this cycle) "
+                f"[profile={working.profile_level} min_rr={active_min_rr}]"
+            )
+            summary["blocked"].append(line)
+            activity.append(("risk_check", line, None))
             continue
         try:
             quantity = int(decision["quantity"])
@@ -3824,6 +4143,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "ticker<->alias assignments Hermes already "
                              "learned this run")
     parser.add_argument("--reset", action="store_true")
+    # Correction pass item F (prior audit M3): --reset unlinking
+    # backtest_state.json used to have no confirmation, no backup, no
+    # registry check -- one stray flag could permanently discard a
+    # run's only local copy of its progress. See _check_reset_allowed.
+    parser.add_argument("--confirm-destructive-reset", action="store_true",
+                        help="REQUIRED alongside --reset when the existing "
+                             f"{STATE_PATH.name} has real progress "
+                             "(trading_days_elapsed > 0) -- an ordinary "
+                             "--reset with nothing real to lose, or a "
+                             "resume without --reset, never needs this.")
     # Durable run classification (backtest_run_registry, trade-journal-mcp/
     # schema.sql) -- required for a FRESH run so a smoke test can never be
     # mistaken for real training data at the database level, not just in
@@ -3930,11 +4259,12 @@ def main() -> None:
     preflight()
 
     if args.reset and STATE_PATH.exists():
+        _check_reset_allowed(json.loads(STATE_PATH.read_text()), args.confirm_destructive_reset)
         STATE_PATH.unlink()
     if args.reset:
         _clear_checkpoint()  # a reset run has no relationship to any stale checkpoint
 
-    watchlist = json.loads(
+    current_watchlist = json.loads(
         (REPO / "watchlist" / "watchlist.json").read_text()
     )["tickers"]
 
@@ -3969,6 +4299,13 @@ def main() -> None:
         # mutation below. See _resolve_fundamentals_enabled.
         fundamentals_enabled = _resolve_fundamentals_enabled(
             True, state.get("fundamentals_enabled"), args.enable_fundamentals)
+        # Correction pass item D (freeform red-team R2): the watchlist is a
+        # durable per-run invariant, same discipline as seed/window/
+        # fundamentals -- a resumed run reuses its FROZEN snapshot, never
+        # whatever watchlist/watchlist.json currently holds. See
+        # _resolve_watchlist_snapshot.
+        watchlist = _resolve_watchlist_snapshot(
+            True, state.get("watchlist_snapshot"), current_watchlist)
         print(f"resuming from {cursor} (run_id={run_id}, seed={seed}, "
               f"fundamentals={'enabled' if fundamentals_enabled else 'disabled'})")
     else:
@@ -3979,10 +4316,21 @@ def main() -> None:
         run_id = None  # generated below
         seed = _resolve_seed(None, args.seed)
         fundamentals_enabled = _resolve_fundamentals_enabled(False, None, args.enable_fundamentals)
+        watchlist = _resolve_watchlist_snapshot(False, None, current_watchlist)
 
     start = date.fromisoformat(start_str)
     names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
     masking = RunMasking(names, run_start=start, seed=seed)
+    # Reproducibility/audit record of the frozen ticker<->alias mapping --
+    # local state only, never sent to Hermes (the prompt only ever carries
+    # aliases). watchlist_snapshot_hash/alias_mapping_hash let a later
+    # audit confirm two saved states share the same frozen identity without
+    # diffing the full snapshot/mapping by hand.
+    watchlist_snapshot_hash = _watchlist_hash(watchlist)
+    alias_mapping = masking.mapping()
+    alias_mapping_hash = hashlib.sha256(
+        json.dumps(alias_mapping, sort_keys=True).encode()
+    ).hexdigest()
 
     # --reset (or a genuinely fresh state file) ALWAYS gets a brand new
     # run_id -- this is what makes "do not let --reset reuse old trade IDs
@@ -4089,7 +4437,9 @@ def main() -> None:
             STATE_PATH,
             {"portfolio": portfolio.to_dict(), "cursor": str(cursor + timedelta(days=1)),
              "run_id": run_id, "seed": seed, "start": start_str, "end": end_str,
-             "fundamentals_enabled": fundamentals_enabled},
+             "fundamentals_enabled": fundamentals_enabled,
+             "watchlist_snapshot": watchlist, "watchlist_snapshot_hash": watchlist_snapshot_hash,
+             "alias_mapping": alias_mapping, "alias_mapping_hash": alias_mapping_hash},
         )
         # Only NOW -- the atomic local-state commit for this exact cycle
         # has actually succeeded -- is this cycle's checkpoint (if any) no

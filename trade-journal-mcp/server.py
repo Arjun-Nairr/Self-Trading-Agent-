@@ -694,15 +694,17 @@ async def _get_recent_activity(
     return [dict(r) for r in rows]
 
 
-_VALID_RUN_KINDS = {"training", "smoke", "archived"}
+_VALID_RUN_KINDS = {"training", "smoke", "archived", "evaluation"}
 
 
 async def _register_run(run_id: str, run_kind: str) -> dict[str, Any]:
     """Idempotently register a backtest run's durable classification in
     backtest_run_registry -- a run is 'training' (real, evaluation-ready),
     'smoke' (end-to-end infra test, never shown in normal dashboard views),
-    or 'archived' (preserved historical run, never shown in normal
-    dashboard views).
+    'archived' (preserved historical run, never shown in normal dashboard
+    views), or 'evaluation' (a backtest-harness/eval_suite.py comparison
+    episode -- correction pass item E, prior audit M2; added so a real
+    eval episode is never mistaken for training data or infra noise).
 
     Same INSERT ON CONFLICT DO NOTHING + fallback SELECT + mismatch-fails-
     loudly pattern as _record_decision: supplying the SAME (run_id,
@@ -711,7 +713,8 @@ async def _register_run(run_id: str, run_kind: str) -> dict[str, Any]:
     run_kind for an already-registered run_id fails loudly instead of
     silently overwriting a real classification -- a run's kind is
     permanent once set, by design (see run_backtest.py's own --run-kind
-    handling, which is the only caller that ever writes here)."""
+    handling and eval_suite.py's run_configuration, the two callers that
+    ever write here)."""
     if run_kind not in _VALID_RUN_KINDS:
         raise ValueError(f"run_kind must be one of {sorted(_VALID_RUN_KINDS)}, got {run_kind!r}")
     pool = await get_pool()

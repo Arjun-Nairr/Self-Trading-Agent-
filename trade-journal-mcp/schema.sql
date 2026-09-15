@@ -654,3 +654,30 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 UPDATE trades SET exit_provenance = 'legacy_unknown'
 WHERE action = 'SELL' AND status = 'filled' AND exit_provenance IS NULL;
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-09-15, correction pass item E, prior audit M2) --
+-- backtest_run_registry.run_kind gains a fourth value, 'evaluation'.
+--
+-- eval_suite.py's regime-diverse comparison suite (backtest-harness/
+-- eval_suite.py) had no correct run_kind to register its episodes under:
+-- 'training' would make every eval episode indistinguishable from a real
+-- Round 2-style run in this registry AND in dashboard-v2's training-run
+-- selector (js/data.js filters on run_kind=eq.training); 'smoke' mislabels
+-- genuine evaluation data as an infrastructure test, the exact thing
+-- 'smoke' exists to exclude. eval_suite.py's own run_configuration()
+-- now refuses to register an episode under anything but 'evaluation'
+-- (EVAL_RUN_KIND) -- this widened CHECK is the second, independent layer
+-- of that same guarantee, at the database boundary rather than only in
+-- the Python caller.
+--
+-- Purely additive: no existing backtest_run_registry row is touched, and
+-- no eval_suite.py episode has ever registered a row (see HANDOFF.md §13
+-- / docs/PROJECT_BACKLOG.md §4 -- "defined but never invoked"), so this
+-- migration relabels nothing.
+-- ---------------------------------------------------------------------------
+ALTER TABLE backtest_run_registry DROP CONSTRAINT IF EXISTS backtest_run_registry_run_kind_check;
+DO $$ BEGIN
+    ALTER TABLE backtest_run_registry ADD CONSTRAINT backtest_run_registry_run_kind_check
+        CHECK (run_kind IN ('training', 'smoke', 'archived', 'evaluation'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;

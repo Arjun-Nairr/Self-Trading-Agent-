@@ -234,6 +234,42 @@ def test_real_watchlist_headline_forms_are_masked():
         assert symbol not in masked, (symbol, masked)
 
 
+def test_mapping_is_deterministic_for_same_seed_and_snapshot():
+    """Correction pass item D (freeform red-team R2), property 2: the SAME
+    seed + the SAME frozen ticker/name snapshot always reproduces the
+    identical alias mapping -- required so a resume can freeze the mapping
+    once and trust it's reproducible from (seed, snapshot) alone."""
+    m1 = RunMasking(NAMES, run_start=RUN_START, seed=42)
+    m2 = RunMasking(dict(NAMES), run_start=RUN_START, seed=42)  # fresh dict, same content
+    assert m1.mapping() == m2.mapping()
+    assert m1.mapping() == {"AAPL": m1.alias("AAPL"), "MSFT": m1.alias("MSFT")}
+
+
+def test_mapping_reshuffles_when_watchlist_membership_changes():
+    """Correction pass item D, the actual defect this closes: RunMasking's
+    alias assignment is a POSITIONAL zip against sorted(tickers), so adding
+    even one ticker (same seed) reassigns EVERY existing ticker's alias --
+    not just the new one's. This is exactly why the watchlist snapshot must
+    be frozen per run rather than re-read live on every resume."""
+    before = RunMasking(NAMES, run_start=RUN_START, seed=42).mapping()
+    grown = dict(NAMES, GOOG=["Alphabet Inc.", "Google"])
+    after = RunMasking(grown, run_start=RUN_START, seed=42).mapping()
+    moved = [t for t in before if after[t] != before[t]]
+    assert moved, "expected adding one ticker to reshuffle at least one existing alias"
+
+
+def test_frozen_snapshot_prompt_text_stays_alias_masked():
+    """Correction pass item D, property 4: text built from a frozen
+    watchlist snapshot never carries a real ticker/company name to the
+    agent -- only its alias, exactly as an unfrozen snapshot would."""
+    m = RunMasking(NAMES, run_start=RUN_START, seed=42)
+    for ticker, variants in NAMES.items():
+        masked = m.mask_text(f"{ticker} ({variants[0]}) reported strong earnings")
+        m.assert_clean(masked)
+        assert ticker not in masked and variants[0] not in masked
+        assert m.alias(ticker) in masked
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

@@ -168,6 +168,13 @@ class RunMasking:
         and trade journal record the real instrument."""
         return self._to_real[alias.upper()]
 
+    def mapping(self) -> dict[str, str]:
+        """The complete real-ticker -> alias mapping, sorted by ticker for
+        a deterministic serialization. Local reproducibility/audit record
+        only (e.g. persisted into backtest_state.json) -- never rendered
+        into a prompt; Hermes only ever sees aliases, never this table."""
+        return {t: self._to_alias[t] for t in sorted(self._to_alias)}
+
     def day_index(self, as_of: date) -> str:
         """Absolute date -> 'Day N'. Hermes still needs a sense of elapsed
         time (how long a position has been held); it does not need to know

@@ -26,7 +26,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from run_backtest import (                                            # noqa: E402
-    FUNDAMENTALS_METRIC_ORDER, ResponseValidationError,
+    FUNDAMENTALS_METRIC_ORDER, FUNDAMENTALS_RATIO_METRICS, ResponseValidationError,
     _fundamentals_assessment_for_decision, _validate_decision_shape,
     _tag_strategy_notes, build_prompt, fetch_fundamentals,
     fundamentals_prompt_lines, fundamentals_provenance, mask_fundamentals,
@@ -146,7 +146,11 @@ FORBIDDEN_STRINGS = [
 def test_mask_fundamentals_never_leaks_identity_or_provenance():
     snap = FakeSnapshot(
         ticker="AAPL", as_of_date="2026-04-29", status="available",
-        metrics={"revenue": available_metric(1_000_000)},
+        # A magnitude (revenue) alongside a ratio (current_ratio) so the
+        # snapshot stays "available" post-correction-pass-A -- see
+        # test_mask_fundamentals_only_includes_approved_v1_metrics for the
+        # magnitude-suppression assertion itself.
+        metrics={"revenue": available_metric(1_000_000), "current_ratio": available_metric(1.8)},
     )
     masked = mask_fundamentals({"ok": True, "snapshot": snap})
     blob = repr(masked)
@@ -176,7 +180,8 @@ def test_build_prompt_fundamentals_rendering_never_leaks_identity():
         "fundamentals": mask_fundamentals({
             "ok": True,
             "snapshot": FakeSnapshot(ticker="AAPL", as_of_date="2026-04-29", status="available",
-                                     metrics={"revenue": available_metric(1_000_000)}),
+                                     metrics={"revenue": available_metric(1_000_000),
+                                              "current_ratio": available_metric(1.8)}),
         }),
     }
     account = {"equity": 100000, "cash": 90000, "exposure_pct": 10.0, "drawdown_pct": 0}
@@ -185,6 +190,62 @@ def test_build_prompt_fundamentals_rendering_never_leaks_identity():
         check_true(f"rendered prompt never contains {forbidden!r}", forbidden not in prompt)
     check_true("rendered prompt does contain the alias, not a real ticker", "ALPHA" in prompt)
     check_true("rendered prompt never contains the real ticker AAPL", "AAPL" not in prompt)
+
+
+def test_fundamentals_prompt_never_renders_a_raw_magnitude_only_ratio_growth_context():
+    """Correction pass item A (prior audit C1) -- the core guarantee: an
+    absolute SEC dollar magnitude must never reach the rendered prompt
+    text, while the ratio/growth projection built from the SAME snapshot
+    still renders correctly. Both assertions live in one test because the
+    defect this closes is specifically "identity leaks THROUGH an
+    otherwise-useful signal" -- proving the magnitude is gone is only
+    meaningful alongside proving the useful signal survived."""
+    snap = FakeSnapshot(
+        ticker="AAPL", as_of_date="2026-04-29", status="available",
+        metrics={
+            "revenue": available_metric(6_238_000_000),
+            "net_income": available_metric(412_000_000),
+            "total_debt": available_metric(2_700_000_000),
+            "cash_and_equivalents": available_metric(890_000_000),
+            "operating_cash_flow": available_metric(701_000_000),
+            "current_assets": available_metric(3_100_000_000),
+            "current_liabilities": available_metric(1_700_000_000),
+            "revenue_growth_yoy": available_metric(7.3),
+            "net_margin": available_metric(6.6),
+            "current_ratio": available_metric(1.82),
+        },
+    )
+    masked = mask_fundamentals({"ok": True, "snapshot": snap})
+    check_true("snapshot with both magnitudes and ratios available reads as available",
+               masked["available"])
+
+    candidate = {
+        "alias": "ALPHA", "sector": "Tech",
+        "tech": {"price": 100.0, "rsi": 55.0, "rsi_signal": "neutral", "macd_signal": "bullish",
+                  "trend": "up", "outlook": "positive", "support": [95], "resistance": [110]},
+        "news": [], "fundamentals": masked,
+    }
+    account = {"equity": 100000, "cash": 90000, "exposure_pct": 10.0, "drawdown_pct": 0}
+    prompt = build_prompt("Day 41", account, [], [candidate], [], fundamentals_enabled=True)
+
+    # No raw magnitude value, in any of its natural renderings, reaches
+    # the prompt -- comma-grouped, bare, or abbreviated.
+    for raw in ("6,238,000,000", "6238000000", "412,000,000", "412000000",
+                "2,700,000,000", "890,000,000", "701,000,000",
+                "3,100,000,000", "1,700,000,000"):
+        check_true(f"rendered prompt never contains raw magnitude {raw!r}", raw not in prompt)
+    for magnitude_name in ("revenue", "net_income", "operating_cash_flow",
+                            "cash_and_equivalents", "total_debt",
+                            "current_assets", "current_liabilities"):
+        check_true(f"masked metrics never include the magnitude key {magnitude_name!r}",
+                   magnitude_name not in masked["metrics"])
+
+    # The ratio/growth projection built from the SAME snapshot is present
+    # and correctly formatted -- this correction must not silently zero
+    # out the useful signal along with the fingerprint.
+    check_true("revenue_growth_yoy renders as a signed percentage", "+7.3%" in prompt)
+    check_true("net_margin renders as a signed percentage", "+6.6%" in prompt)
+    check_true("current_ratio renders as a 2-decimal ratio", "1.82x" in prompt)
 
 
 # ===========================================================================
@@ -197,14 +258,18 @@ def test_mask_fundamentals_only_includes_approved_v1_metrics():
         metrics={
             "revenue": available_metric(1_000_000),
             "net_income": available_metric(200_000),
+            "net_margin": available_metric(6.6),
             "current_ratio": UNAVAILABLE_METRIC,
         },
     )
     masked = mask_fundamentals({"ok": True, "snapshot": snap})
     check_true("every rendered metric name is in the approved V1 list",
                set(masked["metrics"]) <= set(FUNDAMENTALS_METRIC_ORDER))
-    check("only the genuinely available metrics are included",
-          set(masked["metrics"]), {"revenue", "net_income"})
+    check_true("every rendered metric name is a ratio/growth metric, never a magnitude",
+               set(masked["metrics"]) <= FUNDAMENTALS_RATIO_METRICS)
+    check("only the genuinely available RATIO metric is included -- available "
+          "magnitude metrics (revenue, net_income) are fetched but suppressed",
+          set(masked["metrics"]), {"net_margin"})
     check_true("an unavailable metric never appears with an invented value",
                "current_ratio" not in masked["metrics"])
 

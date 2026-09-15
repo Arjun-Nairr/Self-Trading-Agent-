@@ -34,12 +34,14 @@ from run_backtest import (
     _redact_diagnostic_text, _resolve_fundamentals_enabled,
     _resolve_seed, _resolve_window, _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
     build_decision_time_context, build_prompt,
-    evaluate_bar_stop_target, evaluate_opening_gap, make_decision_id,
+    evaluate_bar_stop_target, evaluate_opening_gap, fetch_bars, make_decision_id,
     require_intraday_coverage, required_entry_quantity, resolve_queued_order,
     run_day, simulate_trading_day,
-    validate_hermes_response,
+    validate_hermes_response, _resolve_watchlist_snapshot, _watchlist_hash,
+    InsufficientCandidateCoverageError, MIN_CANDIDATE_COVERAGE_FRACTION,
+    _check_candidate_coverage, _full_candidate_status, _check_reset_allowed,
 )
-from anonymize import RunMasking  # noqa: E402
+from anonymize import LeakDetected, RunMasking  # noqa: E402
 from risk_checker import (  # noqa: E402
     AccountState, Context, MarketClock, Position, ProposedTrade, RiskLimits, check_trade,
 )
@@ -242,6 +244,49 @@ def test_evaluate_opening_gap_symmetric_worst_case():
     assert evaluate_opening_gap(93.0, 115.0, 130.0) == ("target", 130.0)
     assert evaluate_opening_gap(93.0, 115.0, 100.0) is None
     print("  ok  opening gap resolves symmetrically for a stop-through or a target-through open")
+
+
+def test_mechanical_exit_price_rounds_to_the_cent_reconciling_with_the_journal():
+    """Correction pass item G (freeform red-team R3): mechanical exit
+    prices must round to the cent, same discipline as _slipped_buy_price
+    already applies to entries. Real intraday bar data can carry a
+    fractional-cent value (a genuine, observed defect: the real
+    backtest_state.json's own closed_pnl held an entry of exactly
+    1321.575 -- a half-cent artifact IMPOSSIBLE if both the entry and
+    exit prices were clean cents). Before this fix, working.closed_pnl
+    (harness bookkeeping) used the raw fractional-cent value while
+    trades.fill_price (NUMERIC(14,2)) rounded it on insert -- the SAME
+    exit, represented two different ways. Both evaluate_* functions and
+    the time-stop's direct bar-open assignment must all round at the
+    source, so the harness's own P&L reconciles exactly with what gets
+    journaled."""
+    # A stop level with a genuinely fractional-cent bar low -- realistic
+    # for real Alpaca 15-minute bar data, not a hand-picked adversarial
+    # value.
+    stop, target = 93.005, 115.0
+    bar = {"open": 100.0, "high": 101.0, "low": 92.9975, "close": 94.0}
+    kind, price = evaluate_bar_stop_target(stop, target, bar)
+    assert kind == "stop"
+    assert price == round(min(bar["open"], stop), 2) == round(price, 2), (
+        f"exit_price {price} is not rounded to the cent"
+    )
+
+    kind, price = evaluate_opening_gap(93.005, 115.0, 80.0033)
+    assert kind == "stop" and price == round(price, 2) == 80.0
+    kind, price = evaluate_opening_gap(93.0, 115.0025, 130.0067)
+    assert kind == "target" and price == round(price, 2) == 130.01
+
+    # The actual reconciliation this closes: quantity * a cent-rounded
+    # price, minus quantity * a cent-rounded entry, must itself land on a
+    # clean cent -- no half-cent residue like the real 1321.575 case.
+    entry_price = 28.2
+    quantity = 471
+    _, exit_price = evaluate_bar_stop_target(27.995, 999.0, {"open": 28.205, "high": 28.3, "low": 27.99, "close": 28.1})
+    pnl = round((quantity * exit_price) - (quantity * entry_price), 2)
+    assert exit_price == round(exit_price, 2)
+    print("  ok  a fractional-cent bar price rounds to the cent in the mechanical-exit "
+          "price itself, at every one of evaluate_opening_gap/evaluate_bar_stop_target's "
+          "return points and the time-stop's direct assignment")
 
 
 def test_make_decision_id_is_deterministic_and_distinct():
@@ -2896,6 +2941,381 @@ def test_ask_hermes_fails_loudly_on_conflicting_metadata_across_a_retry():
         except ValueError as exc:
             assert "model" in str(exc) and "model-a" in str(exc) and "model-b" in str(exc)
     print("  ok  conflicting non-null runtime identity across a retry fails loudly")
+
+
+_WATCHLIST_A = [{"symbol": "OLN", "name": "Olin Corporation"},
+                {"symbol": "WMG", "name": "Warner Music Group"}]
+_WATCHLIST_A_REORDERED = [{"symbol": "WMG", "name": "Warner Music Group"},
+                           {"symbol": "OLN", "name": "Olin Corporation"}]
+_WATCHLIST_B = _WATCHLIST_A + [{"symbol": "SFM", "name": "Sprouts Farmers Market"}]
+
+
+def test_resolve_watchlist_snapshot_fresh_run_always_freezes_the_current_file():
+    """Correction pass item D (freeform red-team R2): a fresh/--reset run
+    has nothing stored yet -- it freezes whatever the current file holds,
+    regardless of any stored_snapshot argument (which a real fresh-run call
+    site never passes anyway)."""
+    assert _resolve_watchlist_snapshot(False, None, _WATCHLIST_A) == _WATCHLIST_A
+    assert _resolve_watchlist_snapshot(False, _WATCHLIST_B, _WATCHLIST_A) == _WATCHLIST_A
+
+
+def test_resolve_watchlist_snapshot_legacy_resume_defaults_to_current_file():
+    """A state file written before this field existed (e.g. the preserved
+    Round 2 run) has no stored snapshot to compare against or reconstruct
+    -- must not raise; adopts the current file going forward, same
+    accepted-legacy-default discipline as _resolve_fundamentals_enabled."""
+    assert _resolve_watchlist_snapshot(True, None, _WATCHLIST_A) == _WATCHLIST_A
+
+
+def test_resolve_watchlist_snapshot_resume_reuses_frozen_snapshot_ignoring_live_file():
+    """Correction pass item D, property 1: once a run's aliases are frozen,
+    changing watchlist/watchlist.json afterward must not alter that run's
+    resolved snapshot -- even a harmless reordering returns the STORED
+    object, never a freshly-read one."""
+    resolved = _resolve_watchlist_snapshot(True, _WATCHLIST_A, _WATCHLIST_A_REORDERED)
+    assert resolved is _WATCHLIST_A
+    assert _watchlist_hash(_WATCHLIST_A) == _watchlist_hash(_WATCHLIST_A_REORDERED)
+
+
+def test_resolve_watchlist_snapshot_resume_fails_closed_on_changed_watchlist():
+    """Correction pass item D, property 3: a resume whose live
+    watchlist.json genuinely differs from the frozen snapshot (e.g. a
+    RULES.md §8 re-screen mid-run) must fail loudly, BEFORE any fetch/
+    prompt/journal write -- never silently resume as though the two
+    watchlists were equivalent."""
+    try:
+        _resolve_watchlist_snapshot(True, _WATCHLIST_A, _WATCHLIST_B)
+        raise AssertionError("expected SystemExit on a changed watchlist")
+    except SystemExit as exc:
+        assert "frozen" in str(exc) and "alias" in str(exc)
+    print("  ok  resuming with a changed watchlist.json fails closed")
+
+
+def test_check_candidate_coverage_noop_when_nothing_unheld():
+    """Correction pass item B.2 (prior audit H2): every watchlist name
+    already held is a legitimate zero-candidate cycle, never an outage."""
+    _check_candidate_coverage([], {})  # must not raise
+    print("  ok  no unheld tickers to evaluate never raises")
+
+
+def test_check_candidate_coverage_allows_partial_failure_within_floor():
+    """One technical failure out of many unheld tickers is an ordinary
+    partial outage, not a reason to halt -- coverage stays above
+    MIN_CANDIDATE_COVERAGE_FRACTION."""
+    unheld = ["OLN", "WMG", "PLNT", "SFM"]
+    technicals = {"OLN": {"price": 1}, "WMG": {"price": 1},
+                 "PLNT": {"price": 1}, "SFM": {"error": "boom"}}
+    _check_candidate_coverage(unheld, technicals)  # 3/4 usable, must not raise
+    print("  ok  one failure out of four unheld tickers stays within the coverage floor")
+
+
+def test_check_candidate_coverage_fails_closed_on_full_outage():
+    """The concrete H2 scenario: a maverick/yfinance outage affecting
+    every expected candidate must halt the cycle, not journal as an
+    ordinary quiet day."""
+    unheld = ["OLN", "WMG", "PLNT"]
+    technicals = {t: {"error": "boom"} for t in unheld}
+    try:
+        _check_candidate_coverage(unheld, technicals)
+        raise AssertionError("expected InsufficientCandidateCoverageError")
+    except InsufficientCandidateCoverageError as exc:
+        assert "0/3" in str(exc)
+    print("  ok  a total technicals outage fails closed, does not silently continue")
+
+
+def test_check_candidate_coverage_fails_closed_below_the_fraction_floor():
+    """Many (not all) failures below MIN_CANDIDATE_COVERAGE_FRACTION must
+    also fail closed -- the floor is a fraction of the day's real
+    expected universe, not merely an all-or-nothing check."""
+    unheld = ["OLN", "WMG", "PLNT", "SFM"]
+    technicals = {"OLN": {"price": 1}, "WMG": {"error": "boom"},
+                 "PLNT": {"error": "boom"}, "SFM": {"error": "boom"}}
+    try:
+        _check_candidate_coverage(unheld, technicals)  # 1/4 usable < 50%
+        raise AssertionError("expected InsufficientCandidateCoverageError")
+    except InsufficientCandidateCoverageError as exc:
+        assert "1/4" in str(exc)
+    print("  ok  three of four unheld tickers failing halts the cycle, not just a total outage")
+
+
+def test_full_candidate_status_marks_held_excluded_proposed_no_proposal():
+    """Correction pass item B.2: every expected watchlist ticker gets an
+    honest status -- held names never evaluated as entries, a technical-
+    fetch failure recorded as 'excluded' rather than silently vanishing,
+    and the surviving candidates split proposed/no_proposal exactly as
+    _candidate_status already did."""
+    m = RunMasking({"OLN": ["Olin"], "WMG": ["Warner Music Group"],
+                    "PLNT": ["Planet Fitness"], "SFM": ["Sprouts"]},
+                   run_start=date(2026, 2, 17), seed=DEFAULT_MASKING_SEED)
+    all_tickers = ["OLN", "WMG", "PLNT", "SFM"]
+    held_tickers = ["OLN"]                 # already an open position
+    # PLNT's technicals errored this cycle -- silently dropped from
+    # `candidates` upstream, exactly like run_day's real construction.
+    candidates = [
+        {"alias": m.alias("WMG")},
+        {"alias": m.alias("SFM")},
+    ]
+    response = {"decisions": [{"alias": m.alias("WMG"), "action": "BUY"}]}
+    status = _full_candidate_status(all_tickers, held_tickers, candidates, response, m)
+    by_alias = {row["alias"]: row for row in status}
+    assert by_alias[m.alias("OLN")]["status"] == "held"
+    assert by_alias[m.alias("WMG")]["status"] == "proposed"
+    assert by_alias[m.alias("SFM")]["status"] == "no_proposal"
+    assert by_alias[m.alias("PLNT")]["status"] == "excluded"
+    assert by_alias[m.alias("PLNT")]["reason"] == "technical_fetch_error"
+    print("  ok  held/excluded/proposed/no_proposal are all distinguishable in one record")
+
+
+def _two_ticker_masking():
+    return RunMasking({"OLN": ["Olin Corporation", "Olin"], "WMG": ["Warner Music Group"]},
+                      run_start=date(2026, 2, 17), seed=DEFAULT_MASKING_SEED)
+
+
+def _run_day_with_technicals(masking, technicals, fake_ask_hermes, checkpoint_path):
+    """Shared minimal run_day harness for the B.1/B.2 integration tests
+    below -- only the I/O boundary is mocked (fetch_bars/fetch_technicals/
+    fetch_news/fetch_recent_insights/ask_hermes/record_queued_decision/
+    record_snapshot_once/log_activity/record_cycle_evidence); masking,
+    risk-checking, and the real decision loop run unmocked, same
+    discipline as test_real_lifecycle_checkpoint_commit_then_best_effort_
+    observability."""
+    watchlist = [{"symbol": "OLN", "sector": "Basic Materials"},
+                {"symbol": "WMG", "sector": "Communication Services"}]
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
+    fake_bars = {t: {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5} for t in ("OLN", "WMG")}
+    journal_calls = []
+
+    def fake_record_queued_decision(decision, real_ticker, decision_id, run_id=None,
+                                    strategy_profile=None, min_reward_risk_used=None,
+                                    data_timestamps=None, fundamentals_assessment=None):
+        journal_calls.append((real_ticker, decision_id))
+
+    with patch("run_backtest.CHECKPOINT_PATH", checkpoint_path), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=technicals), \
+         patch("run_backtest.fetch_news", return_value={"OLN": [], "WMG": []}), \
+         patch("run_backtest.fetch_recent_insights", return_value=[]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_cycle_evidence"), \
+         patch("run_backtest.record_queued_decision", side_effect=fake_record_queued_decision), \
+         patch("run_backtest.record_snapshot_once", return_value=True), \
+         patch("run_backtest.log_activity"):
+        working, summary, _do_observability = run_day(
+            date(2026, 2, 17), 0, portfolio, masking, watchlist, {}, str(uuid.uuid4()))
+    return working, summary, journal_calls
+
+
+def test_run_day_rejects_a_buy_for_an_alias_absent_from_this_cycles_candidates():
+    """Correction pass item B.1 (prior audit H1): OLN has usable
+    technicals (a real candidate this cycle); WMG's technicals errored
+    and never became a candidate. A BUY proposed for WMG's alias -- a
+    real, resolvable alias, just not one this cycle's candidate list
+    contained -- must be rejected with a §5.3 evidence-membership reason,
+    never queued or journaled."""
+    m = _two_ticker_masking()
+    technicals = {
+        "OLN": {"price": 100.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
+               "trend": "up", "outlook": "neutral", "support": [95.0], "resistance": [110.0]},
+        "WMG": {"error": "simulated maverick outage for WMG"},
+    }
+
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False,
+                        run_id=None, day_index=None):
+        return HermesResult(response={
+            "decisions": [{"alias": m.alias("WMG"), "action": "BUY", "quantity": 10,
+                          "entry_price": 100.0, "stop_price": 93.0, "target_price": 115.0}],
+            "no_action_reason": "",
+        }, attempt_count=1, retry_diagnostics=[])
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    _working, summary, journal_calls = _run_day_with_technicals(
+        m, technicals, fake_ask_hermes, tmp_dir / "cycle_checkpoint.json")
+
+    assert not journal_calls, f"a non-candidate BUY must never be journaled: {journal_calls}"
+    assert any("§5.3" in line and "not present in this cycle's candidate list" in line
+              for line in summary["blocked"]), summary["blocked"]
+    print("  ok  a BUY for an alias absent from this cycle's candidates is rejected, never queued")
+
+
+def test_run_day_still_queues_a_normal_valid_candidate_proposal_unchanged():
+    """Correction pass item B.1, required regression: a BUY for an alias
+    that WAS a real candidate this cycle is completely unaffected by the
+    new membership check -- still validated and journaled exactly as
+    before."""
+    m = _two_ticker_masking()
+    technicals = {
+        "OLN": {"price": 100.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
+               "trend": "up", "outlook": "neutral", "support": [95.0], "resistance": [110.0]},
+        "WMG": {"price": 50.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
+               "trend": "up", "outlook": "neutral", "support": [45.0], "resistance": [55.0]},
+    }
+
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False,
+                        run_id=None, day_index=None):
+        return HermesResult(response={
+            "decisions": [{"alias": m.alias("OLN"), "action": "BUY", "quantity": 200,
+                          "entry_price": 100.0, "stop_price": 93.0, "target_price": 115.0}],
+            "no_action_reason": "",
+        }, attempt_count=1, retry_diagnostics=[])
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    _working, summary, journal_calls = _run_day_with_technicals(
+        m, technicals, fake_ask_hermes, tmp_dir / "cycle_checkpoint.json")
+
+    assert len(journal_calls) == 1 and journal_calls[0][0] == "OLN", (journal_calls, summary["blocked"])
+    assert not any("§5.3" in line for line in summary["blocked"]), summary["blocked"]
+    print("  ok  a BUY for a real candidate this cycle still queues and journals unchanged")
+
+
+def test_run_day_halts_on_a_full_technicals_outage_before_any_hermes_call():
+    """Correction pass item B.2 (prior audit H2): every unheld ticker's
+    technicals erroring must halt the cycle -- exactly like fetch_bars/
+    fetch_intraday_bars' own data-failure halts -- BEFORE ask_hermes is
+    ever called, not silently continue as an ordinary quiet day."""
+    m = _two_ticker_masking()
+    technicals = {"OLN": {"error": "simulated outage"}, "WMG": {"error": "simulated outage"}}
+    hermes_calls = []
+
+    def fake_ask_hermes(*a, **k):
+        hermes_calls.append(1)
+        raise AssertionError("ask_hermes must never be called on a full technicals outage")
+
+    tmp_dir = Path(tempfile.mkdtemp())
+    try:
+        _run_day_with_technicals(m, technicals, fake_ask_hermes, tmp_dir / "cycle_checkpoint.json")
+        raise AssertionError("expected InsufficientCandidateCoverageError")
+    except InsufficientCandidateCoverageError:
+        pass
+    assert not hermes_calls, "a coverage-floor halt must happen strictly before any Hermes call"
+    print("  ok  a full technicals outage halts the cycle before any Hermes call, no silent no-trade day")
+
+
+def test_run_day_routes_recent_insights_through_the_leak_gate():
+    """Correction pass item F (prior audit M5): recent_insights bypassed
+    assert_clean entirely before this correction. A leaked absolute year
+    in a past reflection (e.g. a hallucinated "weaker since 2023") must
+    now be caught here, BEFORE it re-enters a later prompt as a retrieval
+    cue -- same fail-loud discipline candidates/positions_view already
+    have."""
+    m = _two_ticker_masking()
+    technicals = {
+        "OLN": {"price": 100.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
+               "trend": "up", "outlook": "neutral", "support": [95.0], "resistance": [110.0]},
+        "WMG": {"price": 50.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
+               "trend": "up", "outlook": "neutral", "support": [45.0], "resistance": [55.0]},
+    }
+    watchlist = [{"symbol": "OLN", "sector": "Basic Materials"},
+                {"symbol": "WMG", "sector": "Communication Services"}]
+    portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
+    fake_bars = {t: {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5} for t in ("OLN", "WMG")}
+    tmp_dir = Path(tempfile.mkdtemp())
+
+    def fake_ask_hermes(*a, **k):
+        raise AssertionError("ask_hermes must never be reached once the leak gate fires")
+
+    with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
+         patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_technicals", return_value=technicals), \
+         patch("run_backtest.fetch_news", return_value={"OLN": [], "WMG": []}), \
+         patch("run_backtest.fetch_recent_insights",
+              return_value=["performance has been weaker since 2023"]), \
+         patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
+         patch("run_backtest.record_cycle_evidence"), \
+         patch("run_backtest.record_queued_decision"), \
+         patch("run_backtest.record_snapshot_once", return_value=True), \
+         patch("run_backtest.log_activity"):
+        try:
+            run_day(date(2026, 2, 17), 0, portfolio, m, watchlist, {}, str(uuid.uuid4()))
+            raise AssertionError("expected LeakDetected on a leaked absolute year in recent_insights")
+        except LeakDetected:
+            pass
+    print("  ok  a leaked absolute year in recent_insights is caught before it re-enters a prompt")
+
+
+def test_check_reset_allowed_ordinary_new_run_workflow_is_unaffected():
+    """Correction pass item F (prior audit M3): no existing state file, or
+    an existing-but-never-advanced one, is the ordinary new-run/--reset
+    workflow -- must never require the confirmation flag."""
+    _check_reset_allowed(None, confirmed=False)
+    _check_reset_allowed({"portfolio": {"trading_days_elapsed": 0}, "run_id": "x"}, confirmed=False)
+    _check_reset_allowed({"portfolio": {}, "run_id": "x"}, confirmed=False)  # legacy, no key at all
+    print("  ok  no state file, or an unadvanced one, never needs --confirm-destructive-reset")
+
+
+def test_check_reset_allowed_fails_closed_on_real_progress_without_confirmation():
+    """The actual M3 defect: --reset used to unlink backtest_state.json's
+    only copy of a real run's progress with zero confirmation."""
+    state = {"portfolio": {"trading_days_elapsed": 50}, "run_id": "e68525f9-real-run"}
+    try:
+        _check_reset_allowed(state, confirmed=False)
+        raise AssertionError("expected SystemExit on discarding real progress")
+    except SystemExit as exc:
+        assert "50" in str(exc) and "e68525f9-real-run" in str(exc) and "--confirm-destructive-reset" in str(exc)
+    print("  ok  --reset over 50 real trading days fails closed without --confirm-destructive-reset")
+
+
+def test_check_reset_allowed_proceeds_with_explicit_confirmation():
+    """The explicit override path -- genuinely intended destructive resets
+    must still be possible, just never accidental."""
+    state = {"portfolio": {"trading_days_elapsed": 50}, "run_id": "e68525f9-real-run"}
+    _check_reset_allowed(state, confirmed=True)  # must not raise
+    print("  ok  --confirm-destructive-reset lets a genuinely intended reset proceed")
+
+
+def test_fetch_recent_closed_trades_breakeven_is_not_a_win():
+    """Correction pass item F (prior audit L1): a breakeven closed trade
+    (pnl == 0) must read as NOT won -- previously `pnl >= 0` made it a
+    'win' in the reflection material Hermes itself sees, while dashboard-
+    v2/js/calc.js and dashboard/index.html both already used `pnl > 0`,
+    a silent split-brain between what the agent learns from and what a
+    human reads."""
+    from run_backtest import fetch_recent_closed_trades
+
+    m = _two_ticker_masking()
+    rows = [
+        {"ticker": "OLN", "action": "BUY", "status": "filled", "fill_price": "100.00",
+         "fill_quantity": "10", "created_at": "2026-02-17T09:45:00Z", "updated_at": "2026-02-17T09:45:00Z",
+         "invalidation_condition": "n/a", "confidence": 3, "strategy_notes": ""},
+        {"ticker": "OLN", "action": "SELL", "status": "filled", "fill_price": "100.00",
+         "fill_quantity": "10", "created_at": "2026-02-18T09:30:00Z", "updated_at": "2026-02-18T09:30:00Z",
+         "invalidation_condition": "n/a", "confidence": 3, "strategy_notes": "Mechanical exit: time_stop"},
+    ]
+    with patch("run_backtest.run_in", return_value=json.dumps(rows)):
+        closed = fetch_recent_closed_trades(m, run_id="test-run")
+    assert len(closed) == 1
+    assert closed[0]["pnl"] == 0.0
+    assert closed[0]["won"] is False, "a breakeven (pnl == 0) trade must not read as a win"
+    print("  ok  a breakeven closed trade reads as not-won, matching both dashboards' `pnl > 0`")
+
+
+def test_fetch_bars_requests_raw_prices_not_dividend_split_adjusted():
+    """Correction pass item C (freeform red-team R1): fetch_bars' inline
+    yfinance call must always pin auto_adjust=False. yfinance's own default
+    is auto_adjust=True (dividend/split-adjusted OHLC); every other price
+    path in this project -- Alpaca execution fills and maverick-mcp's own
+    technicals fetch (market_data/fetchers.py's _default_history_fn,
+    pinned for the identical reason) -- is raw. fetch_bars feeds both
+    display AND build_decision_time_context's equity/exposure/position
+    marks, so an adjusted bar here would silently disagree with every raw
+    price around a real ex-dividend date. Fails if the pin is ever
+    dropped or the call is rewritten without it."""
+    captured = {}
+
+    def fake_run_in(service, script):
+        captured["service"] = service
+        captured["script"] = script
+        return '{"bars": {"OLN": {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0}}}'
+
+    with patch("run_backtest.run_in", side_effect=fake_run_in):
+        bars = fetch_bars(["OLN"], date(2026, 2, 18))
+    assert bars == {"OLN": {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0}}
+    assert captured["service"] == "maverick-mcp"
+    assert "auto_adjust=False" in captured["script"], (
+        "fetch_bars dropped its explicit auto_adjust=False pin -- daily "
+        "bars would silently become dividend/split-adjusted"
+    )
+    assert ".history(" in captured["script"]
+    print("  ok  fetch_bars pins auto_adjust=False on its yfinance call")
 
 
 def main():

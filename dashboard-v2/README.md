@@ -177,3 +177,19 @@ drawdown/return formulas unchanged).
   period-over-period equity change — explicitly labeled as a different
   methodology from `round2_benchmark_sensitivity.md`'s annualized figure,
   never presented as the same number.
+- **Realized P&L for runs completed before the 2026-09-15 correction pass
+  (item G) can be a few cents to low single dollars off `Equity − Cash −
+  Unrealized P&L`.** Root cause (traced, then fixed going forward —
+  `backtest-harness/run_backtest.py`'s `evaluate_opening_gap`/
+  `evaluate_bar_stop_target`/time-stop exit prices now round to the cent
+  at the source, same as entries already did): a mechanical exit's price
+  could carry a fractional-cent value from real intraday bar data; the
+  harness's own in-memory `closed_pnl` bookkeeping used that raw value
+  while `trades.fill_price` (`NUMERIC(14,2)`) rounded it on insert — the
+  same exit, represented two different ways. **This dashboard's Realized
+  P&L is computed from `trades.fill_price` — the authoritative, actually-
+  filled-at price — so it is not the side that was wrong.** The
+  discrepancy is in the harness's own equity/total-return bookkeeping for
+  runs that predate the fix (Round 2 included); those figures are
+  historical and preserved, not retroactively corrected. Never hidden by
+  rounding one figure to match the other.

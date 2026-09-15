@@ -40,8 +40,9 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_suite import (                                              # noqa: E402
-    EpisodeConfig, ManifestNotApprovedError, ManifestTamperedError,
-    ManifestGenerationError, ManifestWatchlistViabilityError, MonthMetrics,
+    EpisodeConfig, EVAL_RUN_KIND, MANIFEST_VERSION, ManifestNotApprovedError,
+    ManifestTamperedError, ManifestGenerationError, ManifestVersionError,
+    ManifestWatchlistViabilityError, MonthMetrics,
     classify_regime, compute_content_hash, month_bounds, month_range,
     propose_manifest, require_approved, run_configuration,
     select_holdout_pool, stratified_sample, verify_manifest,
@@ -323,6 +324,32 @@ def _approve(manifest: dict) -> dict:
     return approved
 
 
+def test_public_api_refuses_non_evaluation_run_kind_before_any_execution_call():
+    """Correction pass item E (prior audit M2): an approved, valid manifest
+    must still be refused if the caller passes anything other than
+    EVAL_RUN_KIND ('evaluation') -- 'training' would be indistinguishable
+    from a real run in the dashboard's training-run selector, 'smoke'
+    mislabels genuine evaluation data as an infrastructure test. Checked
+    BEFORE require_approved even runs, so zero register_run/run_day/
+    journal-access calls happen for either wrong value."""
+    m = _approve(_propose(seed=205))
+    watchlist = [{"symbol": "OLN", "name": "Olin Corporation", "sector": "Chemicals"}]
+    for wrong_kind in ("training", "smoke", "archived"):
+        register_calls, run_day_calls = [], []
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("eval_suite.register_run", side_effect=lambda *a: register_calls.append(a)), \
+             patch("eval_suite.run_day", side_effect=lambda *a, **k: run_day_calls.append(a)):
+            try:
+                run_configuration(m, EpisodeConfig("baseline"), wrong_kind, watchlist, Path(tmp))
+                raise AssertionError(f"expected run_kind={wrong_kind!r} to be refused")
+            except ValueError as exc:
+                assert "evaluation" in str(exc) and wrong_kind in str(exc)
+        check(f"zero register_run calls for run_kind={wrong_kind!r}", register_calls, [])
+        check(f"zero run_day calls for run_kind={wrong_kind!r}", run_day_calls, [])
+    print("  ok  run_configuration refuses 'training'/'smoke'/'archived' as run_kind, "
+          "before any register_run/run_day call")
+
+
 def test_public_api_refuses_proposed_manifest_before_any_execution_call():
     """Correction pass, requirement 1 -- tests the ACTUAL PUBLIC API
     (run_configuration), not require_approved() in isolation. A 'proposed'
@@ -337,7 +364,7 @@ def test_public_api_refuses_proposed_manifest_before_any_execution_call():
          patch("eval_suite.fetch_fundamentals_assessment_counts",
                side_effect=lambda rid: journal_calls.append(rid) or {}):
         try:
-            run_configuration(m, EpisodeConfig("baseline"), "smoke", watchlist, Path(tmp))
+            run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, watchlist, Path(tmp))
             raise AssertionError("expected a 'proposed' manifest to be refused by run_configuration")
         except ManifestNotApprovedError:
             pass
@@ -363,7 +390,7 @@ def test_public_api_refuses_tampered_manifest_before_any_execution_call():
          patch("eval_suite.fetch_fundamentals_assessment_counts",
                side_effect=lambda rid: journal_calls.append(rid) or {}):
         try:
-            run_configuration(tampered, EpisodeConfig("baseline"), "smoke", watchlist, Path(tmp))
+            run_configuration(tampered, EpisodeConfig("baseline"), EVAL_RUN_KIND, watchlist, Path(tmp))
             raise AssertionError("expected a tampered-but-'approved' manifest to be refused")
         except ManifestTamperedError:
             pass
@@ -372,6 +399,33 @@ def test_public_api_refuses_tampered_manifest_before_any_execution_call():
     check("zero journal-access calls for a tampered manifest", journal_calls, [])
     print("  ok  run_configuration (the public API) refuses a tampered-but-claimed-approved "
           "manifest before any register_run/run_day/journal-access call")
+
+
+def test_public_api_refuses_a_version_mismatched_manifest_before_any_execution_call():
+    """Correction pass item E.3 (prior audit L4): manifest_version is
+    written and content-hashed but was never actually COMPARED against
+    the running code's MANIFEST_VERSION anywhere -- an old-version
+    manifest (generated, reviewed, and approved under DIFFERENT
+    classification semantics) must be refused, not silently executed
+    under today's code."""
+    stale = _approve(_propose(seed=207))
+    stale["manifest_version"] = MANIFEST_VERSION - 1
+    stale["content_hash"] = compute_content_hash(stale)  # re-sign so this is a version
+    # mismatch specifically, not also a tamper/hash failure -- isolates the check.
+    watchlist = [{"symbol": "OLN", "name": "Olin Corporation", "sector": "Chemicals"}]
+    register_calls, run_day_calls = [], []
+    with tempfile.TemporaryDirectory() as tmp, \
+         patch("eval_suite.register_run", side_effect=lambda *a: register_calls.append(a)), \
+         patch("eval_suite.run_day", side_effect=lambda *a, **k: run_day_calls.append(a)):
+        try:
+            run_configuration(stale, EpisodeConfig("baseline"), EVAL_RUN_KIND, watchlist, Path(tmp))
+            raise AssertionError("expected a version-mismatched manifest to be refused")
+        except ManifestVersionError as exc:
+            assert str(MANIFEST_VERSION - 1) in str(exc) and str(MANIFEST_VERSION) in str(exc)
+    check("zero register_run calls for a version-mismatched manifest", register_calls, [])
+    check("zero run_day calls for a version-mismatched manifest", run_day_calls, [])
+    print("  ok  run_configuration refuses a manifest_version mismatch, even when "
+          "genuinely approved and hash-consistent, before any execution-side call")
 
 
 def test_run_configuration_proceeds_for_a_genuinely_approved_untampered_manifest():
@@ -390,7 +444,7 @@ def test_run_configuration_proceeds_for_a_genuinely_approved_untampered_manifest
     with tempfile.TemporaryDirectory() as tmp, \
          patch("eval_suite.register_run", side_effect=lambda *a: register_calls.append(a)), \
          patch("eval_suite.run_day", side_effect=fake_run_day):
-        report = run_configuration(m, EpisodeConfig("baseline"), "smoke", watchlist, Path(tmp))
+        report = run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, watchlist, Path(tmp))
     check_true("an approved, untampered manifest DOES reach execution (register_run called)",
                len(register_calls) > 0)
     check("aggregate report covers every comparison episode", report["aggregate"]["episode_count"],
@@ -442,7 +496,7 @@ def test_run_configuration_isolates_state_and_restores_checkpoint_path():
         checkpoint_dir = Path(tmp) / "checkpoints"
         with patch("eval_suite.run_day", side_effect=fake_run_day), \
              patch("eval_suite.register_run", side_effect=lambda rid, kind: register_calls.append((rid, kind))):
-            report = run_configuration(manifest, EpisodeConfig("baseline"), "smoke", watchlist, checkpoint_dir)
+            report = run_configuration(manifest, EpisodeConfig("baseline"), EVAL_RUN_KIND, watchlist, checkpoint_dir)
 
     per_episode = report["per_episode"]
     check("run_day was called once per episode", fake_calls["n"], 2)
@@ -455,7 +509,7 @@ def test_run_configuration_isolates_state_and_restores_checkpoint_path():
     check_true("register_run was called once per episode with that episode's own run_id",
                [c[0] for c in register_calls] == [per_episode[0]["run_id"], per_episode[1]["run_id"]])
     check_true("register_run always used the caller's run_kind, never a new classification",
-               all(c[1] == "smoke" for c in register_calls))
+               all(c[1] == EVAL_RUN_KIND for c in register_calls))
     check("no state bleeds between episodes -- each starts from the same fresh Portfolio",
           per_episode[0]["return_pct"], per_episode[1]["return_pct"])
     print("  ok  run_configuration isolates run_id/Portfolio/checkpoint per episode and restores "
@@ -480,7 +534,7 @@ def test_run_configuration_halts_cleanly_without_advancing():
         with patch("eval_suite.run_day", side_effect=fake_run_day_raises), \
              patch("eval_suite.register_run", return_value=None), \
              patch("eval_suite.fetch_fundamentals_assessment_counts", return_value={}):
-            report = run_configuration(manifest, EpisodeConfig("baseline"), "smoke", watchlist, checkpoint_dir)
+            report = run_configuration(manifest, EpisodeConfig("baseline"), EVAL_RUN_KIND, watchlist, checkpoint_dir)
 
     ep = report["per_episode"][0]
     check_true("a halted episode is reported as halted, never silently treated as complete", ep["halted"])
@@ -520,7 +574,7 @@ def _episode_report_from_fake_summaries(summaries: list[dict], *, fundamentals_e
          patch("eval_suite.register_run", return_value=None), \
          patch("eval_suite.fetch_fundamentals_assessment_counts", return_value={"supportive": 1}):
         report = run_configuration(manifest, EpisodeConfig("baseline", fundamentals_enabled=fundamentals_enabled),
-                                   "smoke", watchlist, Path(tmp))
+                                   EVAL_RUN_KIND, watchlist, Path(tmp))
     return report["per_episode"][0]
 
 
@@ -618,12 +672,76 @@ def test_aggregate_report_uses_the_corrected_fill_field():
     with tempfile.TemporaryDirectory() as tmp:
         with patch("eval_suite.run_day", side_effect=fake_run_day), \
              patch("eval_suite.register_run", return_value=None):
-            report = run_configuration(manifest, EpisodeConfig("baseline"), "smoke", watchlist, Path(tmp))
+            report = run_configuration(manifest, EpisodeConfig("baseline"), EVAL_RUN_KIND, watchlist, Path(tmp))
     check("aggregate.total_fills reflects the corrected per-episode fill_count",
           report["aggregate"]["total_fills"], 1)
     check("aggregate.total_proposals is tracked separately from fills",
           report["aggregate"]["total_proposals"], 1)
     print("  ok  aggregate totals (total_fills/total_proposals) use the corrected structured fields")
+
+
+# ===========================================================================
+# 7b. Correction pass item E.2 (prior audit M1): dangling pending orders
+#     at episode end
+# ===========================================================================
+
+def test_episode_resolves_a_dangling_pending_order_at_its_own_end():
+    """An episode never resumes -- a decision queued on its own last
+    simulated day would otherwise sit 'pending' in the journal forever,
+    since no later cycle ever comes along to resolve it (unlike the main
+    harness's own next invocation). Must be resolved honestly as rejected,
+    reusing resolve_trade_rejection, and reported in the episode's own
+    result -- never silently left dangling."""
+    from run_backtest import QueuedOrder
+
+    manifest = _approve(_propose(seed=307))
+    monday = date(2023, 1, 2)
+    manifest["episodes"] = [{"year": 2023, "month": 1, "regime": "rally",
+                            "start": monday.isoformat(), "end": monday.isoformat(),
+                            "watchlist_viability": _valid_watchlist_viability()}]
+    from eval_suite import compute_content_hash as _hash
+    manifest["content_hash"] = _hash(manifest)
+    watchlist = [{"symbol": "OLN", "name": "Olin Corporation", "sector": "Chemicals"}]
+
+    def fake_run_day(day, day_index, portfolio, masking, watchlist, limits_ctx, run_id,
+                     fundamentals_enabled=False):
+        # Mirrors what a real queued BUY on the episode's own final day
+        # leaves behind: an unresolved order in portfolio.pending_orders.
+        portfolio.pending_orders.append(QueuedOrder(
+            ticker="OLN", alias=masking.alias("OLN"), action="BUY", quantity=10,
+            stop_price=90.0, target_price=110.0, entry_price=100.0,
+            queued_day_index=day_index, decision={}, decision_id="dangling-decision-id",
+        ))
+        return portfolio, _base_summary(day), (lambda: None)
+
+    resolved_calls = []
+    with tempfile.TemporaryDirectory() as tmp, \
+         patch("eval_suite.run_day", side_effect=fake_run_day), \
+         patch("eval_suite.register_run", return_value=None), \
+         patch("eval_suite.resolve_trade_rejection",
+              side_effect=lambda decision_id, reason: resolved_calls.append((decision_id, reason))):
+        report = run_configuration(manifest, EpisodeConfig("baseline"), EVAL_RUN_KIND, watchlist, Path(tmp))
+
+    ep = report["per_episode"][0]
+    check("exactly the one dangling order is resolved", len(resolved_calls), 1)
+    check("resolved with the order's own decision_id", resolved_calls[0][0], "dangling-decision-id")
+    check_true("resolved with an honest, episode-specific reason",
+              "episode" in resolved_calls[0][1] and "ended" in resolved_calls[0][1])
+    check("the episode's own report names how many it drained",
+          ep["dangling_pending_orders_resolved"], 1)
+    print("  ok  a pending order still open at episode end is resolved as rejected "
+          "(never left dangling) and reported in the episode result")
+
+
+def test_episode_with_nothing_pending_reports_zero_dangling_orders():
+    """The ordinary case -- most episodes end with nothing queued -- must
+    report 0, not merely omit the field, so its absence is never mistaken
+    for "not checked"."""
+    day = _base_summary(date(2023, 1, 2))
+    ep = _episode_report_from_fake_summaries([day])
+    check("an ordinary episode reports zero dangling pending orders",
+          ep["dangling_pending_orders_resolved"], 0)
+    print("  ok  an episode with nothing pending explicitly reports 0, not an absent field")
 
 
 # ===========================================================================
@@ -849,7 +967,7 @@ def test_public_api_refuses_manifest_missing_valid_watchlist_viability_before_an
              patch("eval_suite.fetch_fundamentals_assessment_counts",
                    side_effect=lambda rid: journal_calls.append(rid) or {}):
             try:
-                run_configuration(bad_manifest, EpisodeConfig("baseline"), "smoke",
+                run_configuration(bad_manifest, EpisodeConfig("baseline"), EVAL_RUN_KIND,
                                   FIXTURE_WATCHLIST, Path(tmp))
                 raise AssertionError(f"expected a {label} watchlist_viability audit to be refused")
             except ManifestWatchlistViabilityError:
