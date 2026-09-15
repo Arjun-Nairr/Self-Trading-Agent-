@@ -40,6 +40,7 @@ from run_backtest import (
     validate_hermes_response, _resolve_watchlist_snapshot, _watchlist_hash,
     InsufficientCandidateCoverageError, MIN_CANDIDATE_COVERAGE_FRACTION,
     _check_candidate_coverage, _full_candidate_status, _check_reset_allowed,
+    _check_run_configuration_matches, REPO,
 )
 from anonymize import LeakDetected, RunMasking  # noqa: E402
 from risk_checker import (  # noqa: E402
@@ -3316,6 +3317,88 @@ def test_fetch_bars_requests_raw_prices_not_dividend_split_adjusted():
     )
     assert ".history(" in captured["script"]
     print("  ok  fetch_bars pins auto_adjust=False on its yfinance call")
+
+
+def _remote_config(**overrides) -> dict:
+    base = {
+        "run_id": "11111111-1111-1111-1111-111111111111",
+        "watchlist_snapshot_hash": "wh1", "alias_mapping_hash": "ah1",
+        "masking_seed": 7, "start_date": "2026-01-01", "end_date": "2026-02-01",
+        "fundamentals_enabled": False,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_check_run_configuration_matches_is_a_noop_when_everything_agrees():
+    """Correction pass item D2 (freeform red-team R2 durability): a resumed
+    run whose locally-resolved invariants agree byte-for-byte with its
+    private Neon record must proceed silently -- no exception, no output."""
+    remote = _remote_config()
+    _check_run_configuration_matches(
+        remote, watchlist_snapshot_hash="wh1", alias_mapping_hash="ah1",
+        seed=7, start_str="2026-01-01", end_str="2026-02-01",
+        fundamentals_enabled=False,
+    )
+    print("  ok  _check_run_configuration_matches is a silent no-op when local and Neon agree")
+
+
+def test_check_run_configuration_matches_fails_closed_and_names_every_mismatch():
+    """A resume must fail BEFORE any fetch/Hermes call/journal write when
+    the private Neon record disagrees with local state on ANY frozen
+    field -- and the error names every mismatched field, not just the
+    first, so a real divergence is diagnosable from the message alone."""
+    remote = _remote_config()
+    try:
+        _check_run_configuration_matches(
+            remote, watchlist_snapshot_hash="DIFFERENT", alias_mapping_hash="ah1",
+            seed=99, start_str="2026-01-01", end_str="2026-02-01",
+            fundamentals_enabled=False,
+        )
+        assert False, "a watchlist/seed mismatch against the Neon record must raise"
+    except SystemExit as e:
+        msg = str(e)
+        assert "watchlist snapshot" in msg
+        assert "seed" in msg and "99" in msg
+        assert "alias mapping" not in msg, "an agreeing field must not be reported as a mismatch"
+    print("  ok  _check_run_configuration_matches fails closed and names every real mismatch")
+
+
+def test_schema_sql_never_exposes_the_private_run_configuration_table():
+    """Static guard for correction pass item D2's security boundary: the
+    real ticker<->alias mapping in backtest_run_configuration must never
+    reach the anonymous Data API/dashboard, same as backtest_cycle_
+    evidence. Reads the real schema.sql -- fails if a future edit ever
+    adds a GRANT or an anonymous RLS policy for this table."""
+    sql = (REPO / "trade-journal-mcp" / "schema.sql").read_text(encoding="utf-8")
+    assert "CREATE TABLE IF NOT EXISTS backtest_run_configuration" in sql, (
+        "backtest_run_configuration table definition is missing from schema.sql"
+    )
+    for line in sql.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("--"):
+            continue
+        assert not (
+            "backtest_run_configuration" in stripped
+            and ("GRANT" in stripped.upper() or "anonymous_read" in stripped)
+        ), f"backtest_run_configuration must never be granted to anonymous: {stripped!r}"
+    print("  ok  schema.sql never grants backtest_run_configuration to the anonymous role")
+
+
+def test_dashboard_v2_never_references_the_private_run_configuration_table():
+    """Static guard, the frontend half of the same boundary: no
+    dashboard-v2 JS module may query or reference backtest_run_
+    configuration -- it is reproducibility/audit metadata for the trusted
+    harness/journal path only, never a dashboard data source."""
+    js_dir = REPO / "dashboard-v2" / "js"
+    offenders = [
+        p for p in js_dir.rglob("*.js")
+        if "backtest_run_configuration" in p.read_text(encoding="utf-8")
+    ]
+    assert not offenders, (
+        f"dashboard-v2 JS must never reference backtest_run_configuration: {offenders}"
+    )
+    print("  ok  no dashboard-v2 JS module references backtest_run_configuration")
 
 
 def main():

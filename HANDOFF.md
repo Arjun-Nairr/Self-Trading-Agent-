@@ -287,9 +287,8 @@ Backs this with a durable **exit provenance** field (`trades.exit_provenance`, `
 - **Neon's anonymous-role exposure** — read-only, SELECT-only; `backtest_cycle_evidence` excluded (verified live).
 - **Per-trade (vs. per-cycle) token attribution** remains only approximate.
 - **Cycles 1–25 have no exact evidence record** (see §7) — a real, permanent, accepted gap, not an oversight to fix later.
-- **Longer-hold/stop-distance-band counterfactuals still not mechanically
-  identifiable** — §7's journey report explains actual time-stop outcomes
-  only; needs re-fetched intraday bars, not a re-read.
+- **Longer-hold/stop-distance-band counterfactuals not mechanically
+  identifiable** — §7 covers actual time-stop outcomes only; needs re-fetched intraday bars.
 
 **Ground rule:** `RULES.md`'s hard limits are not up for negotiation via
 "better performance" arguments alone. Any proposed change to a hard
@@ -307,15 +306,12 @@ number needs to go through the user explicitly.
   `docs/history/SOUL_phase1_conservative_2026-08-30.md`.
 - **`quota_pacer.py`** — removed entirely (`750d80d`). Do not reference it,
   `quota_pacer_state.json`, or a "weekly quota" as current.
-- **OpenCode Go + DeepSeek V4 Flash** — investigated, abandoned (a real,
-  unresolved upstream hang). Provider is still `openai-codex` (model
-  migrated `gpt-5.4-mini`→`gpt-5.6-terra` 2026-09-12, §5/§6 — a
-  compatibility fix, not a return to this abandoned alternative).
+- **OpenCode Go + DeepSeek V4 Flash** — investigated, abandoned (a real, unresolved upstream hang). Provider is still `openai-codex` (model
+  migrated `gpt-5.4-mini`→`gpt-5.6-terra` 2026-09-12, §5/§6 — a compatibility fix, not a return to this abandoned alternative).
 - **Four Round-2 smoke-test `run_id`s** — superseded, before the real
   tranche started. **Never resume any of them.**
 - **Prior repair passes** (pre-tranche crashes/bugs) — no longer operationally
-  relevant. Full narrative: `docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md`,
-  `docs/history/HANDOFF_FULL_2026-08-28.md`.
+  relevant. Full narrative: `docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md`, `docs/history/HANDOFF_FULL_2026-08-28.md`.
 
 ---
 
@@ -389,10 +385,14 @@ Read-only-audit-driven fixes, not a strategy change; Round 2/`RULES.md`/
 SEC magnitudes in fundamentals prompts; a BUY needs its alias in that
 cycle's real candidates; a >50% technicals outage halts the cycle, not a
 quiet-day entry; `fetch_bars` pins raw prices; a run's watchlist+alias
-mapping freeze in `backtest_state.json`; `--reset` needs `--confirm-
-destructive-reset` over real progress. `run_kind` gains `evaluation`
-(`docs/PROJECT_BACKLOG.md` §4, no episode run yet). `verify.py` (§11)
-covers the non-mutating suites. Still blocked on everything §10 blocks.
+mapping freezes in `backtest_state.json` and, durably, in Neon's private
+`backtest_run_configuration` (un-granted to `anonymous`; idempotent write,
+resume verifies against it, closes the long-term half of the alias-mapping
+reproducibility finding for new runs — Round 2 predates it, untouched);
+`--reset` needs `--confirm-destructive-reset` over real progress.
+`run_kind` gains `evaluation` (`docs/PROJECT_BACKLOG.md` §4, no episode run
+yet). `verify.py` (§11) covers the non-mutating suites. Still blocked on
+everything §10 blocks.
 
 ---
 

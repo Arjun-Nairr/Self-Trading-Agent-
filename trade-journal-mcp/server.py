@@ -757,6 +757,93 @@ async def _get_run_kind(run_id: str) -> str | None:
     return row["run_kind"] if row else None
 
 
+async def _register_run_configuration(
+    run_id: str, watchlist_snapshot: list[dict[str, Any]], watchlist_snapshot_hash: str,
+    alias_mapping: dict[str, str], alias_mapping_hash: str, masking_seed: int,
+    start_date: str, end_date: str, fundamentals_enabled: bool,
+) -> dict[str, Any]:
+    """Idempotently persist a fresh backtest run's immutable frozen identity
+    -- watchlist snapshot, ticker<->alias mapping, masking seed, simulated
+    window, fundamentals setting -- into the private backtest_run_
+    configuration table (correction pass item D2 / freeform red-team R2
+    durability). This is the long-term, Neon-durable copy of what run_
+    backtest.py's own backtest_state.json already freezes locally
+    (2026-09-15 correction pass item D); it survives a later reset or a
+    lost checkout, which the local state file does not.
+
+    Same INSERT ON CONFLICT DO NOTHING + fallback SELECT + mismatch-fails-
+    loudly pattern as _register_run/_record_cycle_evidence: supplying the
+    SAME values twice for the same run_id is a safe no-op (a retried
+    harness invocation before its first successful cycle write). Supplying
+    ANY different value fails loudly naming exactly which field(s) conflict
+    -- a run's frozen identity is permanent once set, never silently
+    overwritten.
+
+    Caller must already have registered run_id in backtest_run_registry
+    (this table's run_id foreign-keys to it -- see _register_run) and must
+    call this BEFORE any market-data fetch, Hermes call, decision write, or
+    cycle-evidence write for the run -- see run_backtest.py's main()."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO backtest_run_configuration (
+            run_id, watchlist_snapshot, watchlist_snapshot_hash,
+            alias_mapping, alias_mapping_hash, masking_seed,
+            start_date, end_date, fundamentals_enabled
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        ON CONFLICT (run_id) DO NOTHING
+        RETURNING *
+        """,
+        run_id, json.dumps(watchlist_snapshot), watchlist_snapshot_hash,
+        json.dumps(alias_mapping), alias_mapping_hash, masking_seed,
+        start_date, end_date, fundamentals_enabled,
+    )
+    if row is None:
+        row = await pool.fetchrow(
+            "SELECT * FROM backtest_run_configuration WHERE run_id = $1", run_id,
+        )
+        if row is None:
+            raise ValueError(
+                f"run_id {run_id} conflicted on insert but no row exists -- unexpected state"
+            )
+        mismatches = []
+        if row["watchlist_snapshot_hash"] != watchlist_snapshot_hash:
+            mismatches.append("watchlist_snapshot_hash")
+        if row["alias_mapping_hash"] != alias_mapping_hash:
+            mismatches.append("alias_mapping_hash")
+        if row["masking_seed"] != masking_seed:
+            mismatches.append("masking_seed")
+        if row["start_date"] != start_date:
+            mismatches.append("start_date")
+        if row["end_date"] != end_date:
+            mismatches.append("end_date")
+        if row["fundamentals_enabled"] != fundamentals_enabled:
+            mismatches.append("fundamentals_enabled")
+        if mismatches:
+            raise ValueError(
+                f"run_id {run_id} already has a private run-configuration "
+                f"record that disagrees on: {', '.join(mismatches)} -- a "
+                "run's frozen identity is permanent once set, same "
+                "discipline as backtest_run_registry.run_kind."
+            )
+    return dict(row)
+
+
+async def _get_run_configuration(run_id: str) -> dict[str, Any] | None:
+    """Read-only lookup -- None if no private run-configuration record
+    exists for this run_id (never written, e.g. a run that predates this
+    migration -- the preserved Round 2 run included). run_backtest.py's
+    resume path for a run whose local state already carries a frozen
+    watchlist_snapshot treats None as a hard failure rather than silently
+    re-freezing a fresh record -- see its own get_run_configuration /
+    _check_run_configuration_matches."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM backtest_run_configuration WHERE run_id = $1", run_id,
+    )
+    return dict(row) if row else None
+
+
 _VALID_RUN_STATUSES = {"running", "completed", "failed"}
 
 

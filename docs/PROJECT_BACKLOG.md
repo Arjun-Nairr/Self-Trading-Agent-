@@ -346,7 +346,15 @@ averaging down, no widening/removing a stop, no off-watchlist trades,
 no same-ticker double position, no same-day stop-out re-entry, no cap
 overrides); Dashboard V2's public preview is anonymous, **SELECT-only**
 against Neon's Data API — `backtest_cycle_evidence` is excluded from
-that grant (verified).
+that grant (verified). **2026-09-15 correction pass (item D2, freeform
+red-team R2 durability):** each fresh run's frozen watchlist snapshot +
+full ticker↔alias mapping now also persists durably in Neon's private
+`backtest_run_configuration` (un-granted to `anonymous`, same boundary as
+`backtest_cycle_evidence`) — idempotent write before any cycle work, a
+resume verifies against it, fails closed on any disagreement. Closes the
+long-term half of the alias-mapping reproducibility finding for new runs;
+the preserved Round 2 run predates the table and is intentionally
+unchanged — its historical mapping cannot be reconstructed retroactively.
 
 - **Now:** none.
 - **Soon:** Dashboard authentication / access hardening review. Status

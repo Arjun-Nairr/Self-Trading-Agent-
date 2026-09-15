@@ -681,3 +681,54 @@ DO $$ BEGIN
     ALTER TABLE backtest_run_registry ADD CONSTRAINT backtest_run_registry_run_kind_check
         CHECK (run_kind IN ('training', 'smoke', 'archived', 'evaluation'));
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-09-15, correction pass item D2 / freeform red-team R2
+-- durability) -- backtest_run_configuration: the private, Neon-durable long
+-- term home for a run's frozen watchlist snapshot and full ticker<->alias
+-- mapping.
+--
+-- backtest_state.json (run_backtest.py's local runtime checkpoint) already
+-- freezes this identity per run (2026-09-15 correction pass item D), but it
+-- is only a LOCAL file: a later --reset (even the confirmation-gated one,
+-- item F) or a lost/replaced checkout takes it with it, and with it the
+-- only record of which real ticker each alias in that run's already-
+-- journaled trades/activity/cycle evidence stood for. This table is that
+-- durable copy -- reachable only through the same trusted trade-journal-mcp
+-- path as backtest_cycle_evidence, never the anonymous Data API, dashboard,
+-- or Cloudflare surface.
+--
+-- One row per run_id, written once (idempotent retry only -- see
+-- _register_run_configuration in server.py) BEFORE that run's first
+-- market-data fetch, Hermes call, decision write, or cycle-evidence write.
+-- A resumed run whose local backtest_state.json already carries a frozen
+-- watchlist_snapshot reads this record back and fails closed before any
+-- further work if it disagrees -- see run_backtest.py's main(),
+-- get_run_configuration, _check_run_configuration_matches. A legacy resume
+-- with no stored watchlist_snapshot at all (the preserved Round 2 run)
+-- predates this table entirely and never touches it -- its historical
+-- mapping cannot be reconstructed retroactively, and this migration does
+-- not attempt to.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS backtest_run_configuration (
+    run_id                   UUID PRIMARY KEY REFERENCES backtest_run_registry(run_id),
+    -- Full ordered watchlist snapshot and ticker<->alias mapping this run's
+    -- aliases were built from -- the actual reproducibility/de-masking
+    -- record, not just a fingerprint of it.
+    watchlist_snapshot       JSONB NOT NULL,
+    watchlist_snapshot_hash  TEXT NOT NULL,
+    alias_mapping            JSONB NOT NULL,
+    alias_mapping_hash       TEXT NOT NULL,
+    masking_seed             INTEGER NOT NULL,
+    -- Plain ISO text, not DATE: nothing here sorts or range-filters on the
+    -- simulated window, only compares it for exact equality on resume.
+    start_date               TEXT NOT NULL,
+    end_date                 TEXT NOT NULL,
+    fundamentals_enabled     BOOLEAN NOT NULL,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+-- Deliberately NOT granted to the `anonymous` role and NOT RLS-enabled
+-- (same boundary as backtest_cycle_evidence above) -- this table carries
+-- the full real ticker<->alias mapping, which must never reach the
+-- anonymous Data API, the dashboard, or a public user. No GRANT here means
+-- the anonymous role cannot see this table at all, by Postgres default.

@@ -61,7 +61,8 @@ SUITES: list[tuple[str, str, list[str], dict[str, str]]] = [
 
 SKIPPED = [
     "trade-journal-mcp: test_idempotency / test_run_isolation / "
-    "test_dashboard_fields / test_run_registry / test_run_status -- INSERT real rows into Neon",
+    "test_dashboard_fields / test_run_registry / test_run_status / "
+    "test_run_configuration -- INSERT real rows into Neon",
     "alpaca-mcp: test_historical_news -- requires a live ALPACA_API_KEY + network",
     "google-news-rss-mcp: test_news_fetch -- requires feedparser, not installed by default",
     "maverick-mcp's own suite -- vendored third-party code, not this project's source",

@@ -309,6 +309,49 @@ def _resolve_watchlist_snapshot(
     return stored_snapshot
 
 
+def _check_run_configuration_matches(
+    remote: dict, *, watchlist_snapshot_hash: str, alias_mapping_hash: str,
+    seed: int, start_str: str, end_str: str, fundamentals_enabled: bool,
+) -> None:
+    """Pure comparison for correction pass item D2 (freeform red-team R2
+    durability): a resumed run whose LOCAL backtest_state.json already
+    carries a frozen watchlist_snapshot (see _resolve_watchlist_snapshot)
+    must also agree with its private Neon run-configuration record before
+    any further work -- backtest_state.json alone is not the durable
+    long-term evidence source, and a later reset/lost checkout could
+    silently replace it with something that no longer matches what earlier
+    cycles actually used.
+
+    Same fail-closed discipline as _resolve_watchlist_snapshot/_resolve_seed
+    (SystemExit BEFORE any fetch/Hermes call/journal write), just checked
+    against the durable remote record instead of only the local file, and
+    naming every mismatched field at once rather than only the first."""
+    mismatches = []
+    if remote["watchlist_snapshot_hash"] != watchlist_snapshot_hash:
+        mismatches.append("watchlist snapshot")
+    if remote["alias_mapping_hash"] != alias_mapping_hash:
+        mismatches.append("alias mapping")
+    if remote["masking_seed"] != seed:
+        mismatches.append(f"seed (local {seed}, Neon {remote['masking_seed']})")
+    if remote["start_date"] != start_str:
+        mismatches.append(f"start date (local {start_str}, Neon {remote['start_date']})")
+    if remote["end_date"] != end_str:
+        mismatches.append(f"end date (local {end_str}, Neon {remote['end_date']})")
+    if remote["fundamentals_enabled"] != fundamentals_enabled:
+        mismatches.append(
+            f"fundamentals_enabled (local {fundamentals_enabled}, "
+            f"Neon {remote['fundamentals_enabled']})"
+        )
+    if mismatches:
+        raise SystemExit(
+            f"run_id={remote['run_id']}'s private Neon run-configuration "
+            f"record disagrees with local state on: {', '.join(mismatches)} "
+            f"-- {STATE_PATH.name} may have been replaced or edited since "
+            "this run's identity was frozen. Restore the correct local "
+            "state, or start a fresh/--reset run."
+        )
+
+
 # --------------------------------------------------------------------------
 # simulated portfolio
 # --------------------------------------------------------------------------
@@ -2013,6 +2056,71 @@ async def main():
 asyncio.run(main())
 '''
     return json_from(run_in("trade-journal", script))["run_kind"]
+
+
+def register_run_configuration(
+    run_id: str, watchlist_snapshot: list[dict], watchlist_snapshot_hash: str,
+    alias_mapping: dict[str, str], alias_mapping_hash: str, seed: int,
+    start_str: str, end_str: str, fundamentals_enabled: bool,
+) -> dict:
+    """Idempotently persist this run's frozen watchlist/alias identity into
+    the private backtest_run_configuration table -- see
+    _register_run_configuration's own docstring in trade-journal-mcp/
+    server.py for the full idempotency/collision contract (same
+    INSERT ON CONFLICT DO NOTHING + fallback SELECT + mismatch-fails-loudly
+    pattern as register_run). Called from main() ONLY for a fresh run,
+    right after register_run (backtest_run_configuration.run_id
+    foreign-keys to backtest_run_registry.run_id) and before any
+    market-data fetch, Hermes call, decision write, or cycle-evidence
+    write for this run."""
+    script = f'''
+import asyncio, json
+from server import _register_run_configuration
+
+async def main():
+    row = await _register_run_configuration(
+        {run_id!r}, {watchlist_snapshot!r}, {watchlist_snapshot_hash!r},
+        {alias_mapping!r}, {alias_mapping_hash!r}, {seed!r},
+        {start_str!r}, {end_str!r}, {fundamentals_enabled!r},
+    )
+    print(json.dumps({{"run_id": str(row["run_id"])}}))
+
+asyncio.run(main())
+'''
+    return json_from(run_in("trade-journal", script))
+
+
+def get_run_configuration(run_id: str) -> dict | None:
+    """Read-only fetch of run_id's private run-configuration record, or
+    None if it was never written (a run that predates this migration --
+    the preserved Round 2 run included -- or a genuinely unregistered id).
+    main()'s resume path for a run whose local state already carries a
+    frozen watchlist_snapshot fails closed on None rather than silently
+    re-freezing a fresh record -- see _check_run_configuration_matches. A
+    legacy resume (no stored watchlist_snapshot at all) never calls this."""
+    script = f'''
+import asyncio, json
+from server import _get_run_configuration
+
+async def main():
+    row = await _get_run_configuration({run_id!r})
+    if row is None:
+        print(json.dumps({{"found": False}}))
+    else:
+        print(json.dumps({{
+            "found": True, "run_id": str(row["run_id"]),
+            "watchlist_snapshot_hash": row["watchlist_snapshot_hash"],
+            "alias_mapping_hash": row["alias_mapping_hash"],
+            "masking_seed": row["masking_seed"],
+            "start_date": row["start_date"], "end_date": row["end_date"],
+            "fundamentals_enabled": row["fundamentals_enabled"],
+        }}))
+
+asyncio.run(main())
+'''
+    result = json_from(run_in("trade-journal", script))
+    found = result.pop("found")
+    return result if found else None
 
 
 def resolve_trade_fill(decision_id: str, fill: dict) -> None:
@@ -4358,6 +4466,41 @@ def main() -> None:
     else:
         register_run(run_id, run_kind)
         print(f"registered run_id={run_id} as kind={run_kind!r}")
+
+    # Correction pass item D2 (freeform red-team R2 durability):
+    # backtest_state.json alone is not this run's durable long-term
+    # evidence source -- a later reset (even the confirmation-gated one)
+    # or a lost checkout takes it with it. A fresh run persists its frozen
+    # watchlist/alias identity into the private Neon backtest_run_
+    # configuration table (never the anonymous Data API); a resumed run
+    # whose local state already carries a frozen watchlist_snapshot reads
+    # that record back and fails closed if it disagrees. A legacy resume
+    # with no stored watchlist_snapshot at all (the preserved Round 2 run)
+    # predates this table entirely and is left untouched -- both branches
+    # run BEFORE any market-data fetch, Hermes call, decision write, or
+    # cycle-evidence write for this run.
+    if not is_resume:
+        register_run_configuration(
+            run_id, watchlist, watchlist_snapshot_hash, alias_mapping,
+            alias_mapping_hash, seed, start_str, end_str, fundamentals_enabled,
+        )
+    elif state.get("watchlist_snapshot") is not None:
+        remote_config = get_run_configuration(run_id)
+        if remote_config is None:
+            raise SystemExit(
+                f"run_id={run_id} has a frozen watchlist snapshot in "
+                f"{STATE_PATH.name} but no private run-configuration record "
+                "in Neon -- the durable copy is missing (never written, or "
+                "written by a version of this harness that predates it). "
+                "Refusing to continue rather than silently freezing a fresh "
+                "record that may not match what earlier cycles actually used."
+            )
+        _check_run_configuration_matches(
+            remote_config, watchlist_snapshot_hash=watchlist_snapshot_hash,
+            alias_mapping_hash=alias_mapping_hash, seed=seed,
+            start_str=start_str, end_str=end_str,
+            fundamentals_enabled=fundamentals_enabled,
+        )
 
     end = date.fromisoformat(end_str)
     completed = 0
