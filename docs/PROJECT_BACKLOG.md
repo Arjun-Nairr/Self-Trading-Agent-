@@ -355,6 +355,19 @@ resume verifies against it, fails closed on any disagreement. Closes the
 long-term half of the alias-mapping reproducibility finding for new runs;
 the preserved Round 2 run predates the table and is intentionally
 unchanged — its historical mapping cannot be reconstructed retroactively.
+**Activation (2026-09-15b):** the additive migration is now applied live
+— table/columns/PK/FK confirmed, zero `anonymous`/`PUBLIC` grant, RLS
+disabled, and `trades`/`insight_log`/`agent_activity`/`portfolio_snapshots`/
+`backtest_cycle_evidence`/`backtest_run_registry` row counts unchanged
+before vs. after. `test_run_configuration.py` run live (fresh UUIDs only):
+persistence, idempotent retry, conflict rejection (names the conflicting
+field), FK enforcement, and `_get_run_configuration` read-back all
+verified; its own cleanup left zero residue (confirmed by re-querying
+after). Unrelated: 3 pre-existing `smoke`-kind registry rows with real
+`agent_activity`/`trades`/`portfolio_snapshots`/`backtest_cycle_evidence`
+data were found already present (not from this activation, not from any
+test — genuine prior smoke-run history never added to schema.sql's seeded
+historical-classification block); left untouched as out of scope here.
 
 - **Now:** none.
 - **Soon:** Dashboard authentication / access hardening review. Status

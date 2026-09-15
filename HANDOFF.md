@@ -284,11 +284,10 @@ Backs this with a durable **exit provenance** field (`trades.exit_provenance`, `
 - **Survivorship bias** — the watchlist was screened using data from inside the exact backtest window.
 - **Asyncpg statement-cache fix's narrow scope** — `statement_cache_size=0` is only applied in `trade-journal-mcp/server.py`.
 - **No benchmark series wired into the dashboard** — an offline comparison exists (§7), no live index-comparison line.
-- **Neon's anonymous-role exposure** — read-only, SELECT-only; `backtest_cycle_evidence` excluded (verified live).
+- **Neon's anonymous-role exposure** — read-only, SELECT-only; `backtest_cycle_evidence`/`backtest_run_configuration` excluded (verified live).
 - **Per-trade (vs. per-cycle) token attribution** remains only approximate.
 - **Cycles 1–25 have no exact evidence record** (see §7) — a real, permanent, accepted gap, not an oversight to fix later.
-- **Longer-hold/stop-distance-band counterfactuals not mechanically
-  identifiable** — §7 covers actual time-stop outcomes only; needs re-fetched intraday bars.
+- **Longer-hold/stop-distance-band counterfactuals not mechanically identifiable** — §7 covers actual time-stop outcomes only; needs re-fetched intraday bars.
 
 **Ground rule:** `RULES.md`'s hard limits are not up for negotiation via
 "better performance" arguments alone. Any proposed change to a hard
@@ -386,13 +385,14 @@ SEC magnitudes in fundamentals prompts; a BUY needs its alias in that
 cycle's real candidates; a >50% technicals outage halts the cycle, not a
 quiet-day entry; `fetch_bars` pins raw prices; a run's watchlist+alias
 mapping freezes in `backtest_state.json` and, durably, in Neon's private
-`backtest_run_configuration` (un-granted to `anonymous`; idempotent write,
-resume verifies against it, closes the long-term half of the alias-mapping
-reproducibility finding for new runs — Round 2 predates it, untouched);
+`backtest_run_configuration` — **ACTIVE, live-verified 2026-09-15b** (no
+`anonymous` grant/RLS, zero existing rows touched); idempotent write,
+resume verifies against it, closes the long-term alias-mapping
+reproducibility gap for new runs — Round 2 predates it, untouched.
 `--reset` needs `--confirm-destructive-reset` over real progress.
-`run_kind` gains `evaluation` (`docs/PROJECT_BACKLOG.md` §4, no episode run
-yet). `verify.py` (§11) covers the non-mutating suites. Still blocked on
-everything §10 blocks.
+`run_kind` gains `evaluation` (`docs/PROJECT_BACKLOG.md` §4 — stale v2
+manifest still correctly refused, reconfirmed live). `verify.py` (§11)
+covers the non-mutating suites. Still blocked on everything §10 blocks.
 
 ---
 
