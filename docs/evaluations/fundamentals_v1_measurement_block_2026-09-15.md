@@ -1,6 +1,8 @@
 # Fundamentals V1 measurement block (2026-09-15) — blocked before any run
 
-**Status: manifest generation infeasible under the frozen design. Zero Hermes calls, zero evaluation episodes, zero trading decisions were made under this block.** This report documents why, exactly as the block's own instructions required ("if this exact design cannot produce a valid manifest, stop before any Hermes call or evaluation run").
+**Status (2026-09-16 update): the selection RULE that caused this block's infeasibility has been corrected — see "2026-09-16 correction" at the end of this report for the new paired per-regime design and the resulting valid, verified `manifest_version: 4` manifest. Its status is still `"proposed"`, not `"approved"` — no episode has run under it. Everything below this line is the original 2026-09-15 finding, preserved unedited as the honest record of why the original design failed.**
+
+**Original status: manifest generation infeasible under the frozen design. Zero Hermes calls, zero evaluation episodes, zero trading decisions were made under this block.** This report documents why, exactly as the block's own instructions required ("if this exact design cannot produce a valid manifest, stop before any Hermes call or evaluation run").
 
 ## Objective
 
@@ -76,3 +78,45 @@ This is the honest fit, not a judgment call disguised as one of the other two op
 ## Bayesian optimization readiness
 
 **Not ready, unchanged from before this block, and this block makes the specific reason more precise than before:** the fixed-watchlist-history-vs-four-regime-plus-holdout tradeoff first surfaced 2026-09-13 is now confirmed, with real data, to be **infeasible at 2022-06-01** specifically because both real `selloff` months in the post-2022-06 window (2022-09, 2022-12) sit too early to leave any `sideways` month in a comparison pool once a holdout boundary must reach back far enough to include one of them. Widening the eligible range further back reopens the original RYAN/ALGM viability-audit failure (real IPOs in 2020/2021 lack trailing technical-service history before ~2022-06). Resolving this needs one of: (a) a start date between the original 2021-01-01 and 2022-06-01 that happens to thread both constraints (not yet checked), (b) accepting a watchlist exception/adjustment for RYAN/ALGM specifically (a real universe-composition decision, not a range tweak), or (c) relaxing the "all 4 regimes in one contiguous trailing holdout block" requirement in `select_holdout_pool` itself (a real change to the evaluation-suite's own selection algorithm, not a parameter). None of these is a small technical fix; each is a genuine tradeoff a human needs to choose, same as the range decision that produced this block. Until a manifest actually generates, is verified, and is approved, there is no comparison/holdout evidence of any kind — Bayesian optimization remains categorically premature, independent of this specific blocker.
+
+---
+
+## 2026-09-16 correction: the selection rule was the problem, not the range
+
+The user chose option (c) above: replace `select_holdout_pool`'s single globally-trailing-block holdout requirement with a **deterministic paired per-regime design** — for each of the 4 required regimes independently, one comparison episode and one strictly-later holdout episode of the *same* regime, never requiring every holdout episode to be later than every comparison episode across regimes. The fixed watchlist, eligible range (`2022-06-01`..`2026-01-31`), 4 required regimes, model/provider, and trading rules were all left exactly as they were.
+
+### Why the old rule was infeasible, restated precisely
+
+`select_holdout_pool` required ALL 4 regimes to appear inside ONE contiguous trailing calendar window. Both real `selloff` months (2022-09, 2022-12) fall early in the range, while every real `sideways` month falls no earlier than 2023-04. Any trailing window wide enough to reach back and capture a `selloff` month necessarily swallows every `sideways` month too, leaving nothing for the comparison side. No boundary position satisfies both sides at once — this was a structural property of the data under that specific rule, not a bug and not fixable by re-tuning `HOLDOUT_MONTHS_COUNT` or the eligible range (already shown in the original finding above).
+
+### Why the paired design resolves it
+
+The paired design never asks for a single shared window. Each regime's pair is chosen independently: `selloff`'s only two eligible months (2022-09, 2022-12) become its own comparison/holdout pair, in chronological order, by construction — regardless of where any *other* regime's months happen to fall. `sideways` is free to draw its own later pair from its own 2023-04-onward pool without needing to coexist with `selloff` inside one window. This is a genuine change to the selection RULE (`backtest-harness/eval_suite.py`'s `select_paired_episodes`, replacing `select_holdout_pool`), not a parameter retune, and not a relaxation of any requirement the original design actually needed (every regime still gets exactly one comparison + one later holdout of the same regime; comparison/holdout still never overlap).
+
+### The scientific limitation — stated plainly
+
+**This is not a single globally-later holdout period.** Under the old (infeasible) design, if it had worked, every holdout episode would have been drawn from calendar time strictly after every comparison episode — a clean "trained years, tested on the following year" story. Under the paired design, that global ordering does **not** hold: a regime's holdout episode is only guaranteed later than *that regime's own* comparison episode. For example, in the manifest below, `sideways`'s comparison episode (2024-10) is chronologically *after* `rally`'s holdout episode (2023-01). A reader evaluating results from this manifest must not describe the holdout set as "the later, out-of-sample period" in the aggregate sense — only per-regime. The manifest's own `holdout_design.caveat` field states this exact limitation so it travels with the data, not just this report.
+
+### The new manifest — generated and verified, not approved
+
+Generated live via `python eval_suite.py propose --seed 20260915` (real SPY + real fixed-watchlist technicals/closes through the existing `maverick-mcp`/yfinance path — the same production data path every prior manifest attempt used):
+
+- **File:** `backtest-harness/eval_suites/manifest_20260916T154923_30f4c12e0f7e.json`
+- **`manifest_version`: 4** (bumped from 3 — `require_approved` now refuses any manifest generated under the old algorithm, including the committed stale v2 file, which was already refused on version grounds and remains untouched)
+- **`status`: `"proposed"`** — **not approved**, per this block's own instruction to stop here
+- **`content_hash`**: `30f4c12e0f7ed7bb...` (verified against a fresh recomputation — `verify_manifest` passes, untampered)
+- **`selection_seed`: 20260915**
+- **`eligible_range`**: `2022-06-01` .. `2026-01-31` (unchanged)
+
+| Regime | Comparison | Holdout | Holdout later than its own comparison? |
+|---|---|---|---|
+| `high_volatility` | 2022-06 | 2022-11 | yes |
+| `rally` | 2022-07 | 2023-01 | yes |
+| `selloff` | **2022-09** | **2022-12** | yes — the only 2 eligible months, forced into the pair in chronological order, exactly as required |
+| `sideways` | 2024-10 | 2025-11 | yes |
+
+All 8 episodes passed the existing fixed-watchlist viability audit with zero unavailable tickers (confirms `2022-06-01` clears the RYAN/ALGM IPO-history floor identified 2026-09-13). Verified programmatically, not just visually: all 4 regimes present exactly once on each side; zero date overlap between comparison and holdout; every pair's holdout strictly later than its own comparison; no episode date repeated across all 8; `role`/`pair_id`/`watchlist_viability` present on every episode; `holdout_design` records the method and states the per-regime caveat verbatim.
+
+**Still not approved, still no episode run.** Fundamentals V1 remains unproven — this block only proves a valid manifest *can* now be generated and verified under the corrected design; it gathers zero comparison or holdout evidence by itself. The conclusion in this report's own "Conclusion on Fundamentals V1" section above is unchanged: **keep Fundamentals V1 as unproven context.**
+
+**The one explicit next human approval needed before any evaluation can run:** review this manifest (`manifest_20260916T154923_30f4c12e0f7e.json`) and, if satisfied, flip its `"status"` field from `"proposed"` to `"approved"` (the one edit excluded from the content hash) — then give an explicit separate go-ahead to actually execute `technical_news_baseline` and `technical_news_fundamentals_v1` against it. Neither approval nor execution happened in this block.

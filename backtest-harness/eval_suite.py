@@ -6,10 +6,12 @@ item -- a *prerequisite for* Bayesian optimization, not an approved
 experiment. Implements two DELIBERATELY SEPARATE capabilities:
 
 1. MANIFEST GENERATION -- propose_manifest(): classifies SPY's real
-   monthly return/volatility over a fixed eligible historical range,
-   stratified-samples a comparison suite plus a separate, later, untouched
-   holdout set, and returns a versioned, hashed, content-addressed
-   manifest. Its "status" is ALWAYS "proposed" here -- a human reviews it
+   monthly return/volatility over a fixed eligible historical range, then
+   selects one comparison + one later, untouched holdout episode PER
+   REQUIRED REGIME independently (select_paired_episodes -- 2026-09-16
+   correction pass; NOT one single globally-trailing holdout block, see
+   that function's own docstring for why), and returns a versioned,
+   hashed, content-addressed manifest. Its "status" is ALWAYS "proposed" -- a human reviews it
    and flips status to "approved" (a one-line edit on the saved JSON file;
    the content hash deliberately excludes "status" so approval is never
    indistinguishable from tampering -- see compute_content_hash). This
@@ -146,18 +148,8 @@ CLASSIFICATION_METHOD = (
 ) % (HIGH_VOLATILITY_THRESHOLD_PCT, RALLY_THRESHOLD_PCT, SELLOFF_THRESHOLD_PCT,
      SIDEWAYS_RETURN_BAND_PCT[0], SIDEWAYS_RETURN_BAND_PCT[1], SIDEWAYS_VOL_THRESHOLD_PCT)
 
-# The most recent HOLDOUT_MONTHS_COUNT eligible months are the DEFAULT
-# holdout pool -- expanded backward (never touched forward) only as much
-# as necessary to cover all 4 required regimes; see select_holdout_pool.
-# Never touched by the comparison-suite sampler below.
-HOLDOUT_MONTHS_COUNT = 12
-# 2026-09-15 fundamentals-measurement block: exactly one comparison episode
-# per condition (was 2) -- the frozen design's own requirement, chosen
-# before any month was classified.
-EPISODES_PER_REGIME = 1
-HOLDOUT_EPISODES_PER_REGIME = 1
-# Correction pass (2026-09-13): a valid holdout (and comparison) set must
-# cover every one of these regimes -- see select_holdout_pool.
+# Correction pass (2026-09-13): a valid comparison/holdout selection must
+# cover every one of these regimes.
 REQUIRED_REGIMES = frozenset({"rally", "selloff", "high_volatility", "sideways"})
 # v3 (was 2): classify_regime now requires "sideways" to be genuinely
 # quiet (see SIDEWAYS_RETURN_BAND_PCT/SIDEWAYS_VOL_THRESHOLD_PCT above);
@@ -166,7 +158,23 @@ REQUIRED_REGIMES = frozenset({"rally", "selloff", "high_volatility", "sideways"}
 # The manifest also gained watchlist_tickers/watchlist_audit_method/
 # watchlist_audit_version, and each episode gained a watchlist_viability
 # section -- see audit_episode_watchlist_viability / propose_manifest.
-MANIFEST_VERSION = 3
+# v4 (was 3, 2026-09-16 correction pass): select_holdout_pool's single
+# globally-trailing-block holdout (all 4 regimes inside ONE contiguous
+# trailing window) is REPLACED by select_paired_episodes -- one comparison
+# + one later holdout PER REGIME, independently. The prior design was
+# proven infeasible for this project's real eligible range (both real
+# 'selloff' months sit too early for any 'sideways' month to ever share a
+# trailing window with them -- docs/evaluations/
+# fundamentals_v1_measurement_block_2026-09-15.md). Bumped so any manifest
+# generated under the old algorithm is refused, never silently
+# reinterpreted under the new per-regime pairing (require_approved's
+# manifest_version gate, correction pass item E.3). Each episode gained
+# `role` ('comparison'/'holdout') and `pair_id`; the manifest's
+# `holdout_pool` section is replaced by `holdout_design`, which states the
+# caveat explicitly: holdout episodes are later than their OWN regime's
+# comparison episode only, never guaranteed later than every comparison
+# episode globally.
+MANIFEST_VERSION = 4
 MANIFEST_DIR = Path(__file__).resolve().parent / "eval_suites"
 
 # Correction pass item E (prior audit M2): the ONLY run_kind
@@ -199,14 +207,6 @@ def month_range(start: date, end: date) -> list[tuple[int, int]]:
         months.append((y, m))
         y, m = (y + 1, 1) if m == 12 else (y, m + 1)
     return months
-
-
-def _nth_month_from_end(end: date, n: int) -> tuple[int, int]:
-    """The (year, month) that starts the LAST n calendar months up to and
-    including end's own month -- e.g. end=2026-01, n=12 -> (2025, 2)
-    (Feb 2025 through Jan 2026 inclusive is exactly 12 months)."""
-    total = end.year * 12 + (end.month - 1) - (n - 1)
-    return total // 12, total % 12 + 1
 
 
 def _first_weekday_on_or_after(d: date) -> date:
@@ -286,91 +286,55 @@ def compute_month_metrics(closes: dict[str, float], year: int, month: int) -> Mo
     )
 
 
-def stratified_sample(months: list[MonthMetrics], per_regime: int, seed: int) -> list[MonthMetrics]:
-    """Deterministic: the same (months, per_regime, seed) always produces
-    the same selection. Groups by regime (fixed alphabetical iteration
-    order, independent of dict/hash ordering), samples WITHOUT
-    replacement within each regime via a seeded RNG, and takes every
-    available month when fewer than per_regime exist for a regime --
-    never fabricates coverage that isn't there. Returned chronologically
-    sorted, not in regime-group order."""
+def select_paired_episodes(
+    eligible_months: list[MonthMetrics], seed: int,
+) -> dict[str, tuple[MonthMetrics, MonthMetrics]]:
+    """Deterministic PER-REGIME paired selection (2026-09-16 correction
+    pass) -- REPLACES the old select_holdout_pool, which required ALL 4
+    regimes to appear inside ONE contiguous trailing window. That design
+    was proven infeasible for this project's real watchlist-viable
+    eligible range (2022-06-01..2026-01-31): both real 'selloff' months
+    (2022-09, 2022-12) sit too early for any 'sideways' month (earliest
+    2023-04) to ever share a trailing window with them -- see
+    docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md.
+
+    For each of REQUIRED_REGIMES independently: needs at least 2 eligible
+    months of that regime (one comparison, one strictly later holdout of
+    the SAME regime) -- fails clearly, naming the regime and how many
+    months it actually has, if not. When more than 2 exist, which 2 are
+    used is chosen by a seeded RNG (sample without replacement) --
+    deterministic for the same (months, seed), and can only differ
+    between seeds when a regime genuinely has more than 2 eligible
+    months to pick from. Regardless of which 2 are drawn, the
+    chronologically EARLIER of the pair is always the comparison episode
+    and the LATER is always its holdout -- so when a regime has exactly 2
+    eligible months (the real 'selloff' case today), the pair is forced
+    into chronological order by construction, never a coin flip and never
+    hand-picked.
+
+    Returns {regime: (comparison, holdout)} for exactly the 4 required
+    regimes. 'Later' here means later than its OWN regime's comparison
+    month only -- never a claim that every holdout episode is later than
+    every comparison episode across all 4 regimes. The manifest's own
+    `holdout_design` field states this caveat explicitly."""
     by_regime: dict[str, list[MonthMetrics]] = defaultdict(list)
-    for m in months:
+    for m in eligible_months:
         by_regime[m.regime].append(m)
     rng = random.Random(seed)
-    chosen: list[MonthMetrics] = []
-    for regime in sorted(by_regime):
-        pool = sorted(by_regime[regime], key=lambda m: (m.year, m.month))
-        chosen.extend(rng.sample(pool, min(per_regime, len(pool))))
-    return sorted(chosen, key=lambda m: (m.year, m.month))
-
-
-def select_holdout_pool(
-    all_months: list[MonthMetrics], eligible_end: date, initial_size: int,
-) -> tuple[tuple[int, int], list[MonthMetrics], int]:
-    """Deterministic, auditable holdout-pool selection (correction pass,
-    requirement 3). Starts at the trailing `initial_size` calendar months
-    (the documented default). If any of REQUIRED_REGIMES is missing from
-    that pool, expands ONE calendar month backward at a time -- never
-    forward, never a skip -- until all 4 are present. Never touches which
-    months are randomly SAMPLED (that stays stratified_sample's seeded
-    job); this only decides the pool's own chronological boundary.
-
-    Fails clearly (ManifestGenerationError), never silently returning an
-    incomplete holdout or hand-picking a month, in two cases:
-      1. Even the ENTIRE eligible range lacks one of the 4 regimes --
-         there is no boundary that could ever fix that.
-      2. The first boundary where the holdout reaches full coverage
-         leaves the comparison pool (every month strictly before it)
-         missing a regime. Expanding the holdout FURTHER only shrinks
-         the comparison pool more -- it can never recover a regime
-         already lost -- so this is reported immediately, not searched
-         around.
-
-    `size` counts CALENDAR months back from eligible_end (what
-    _nth_month_from_end consumes), never the number of entries in
-    `all_months` -- since the correction pass (part 1) excludes
-    "unclassified" months, `all_months` is generally a SPARSE subset of
-    the calendar range, not one entry per calendar month, so the loop
-    must keep expanding until the calendar boundary itself reaches the
-    earliest eligible month, not until `size` reaches len(all_months)
-    (that bound would stop expanding far too early whenever unclassified
-    months are interspersed -- exactly the bug this fixes).
-
-    Returns (holdout_start_month, holdout_pool sorted chronologically,
-    final_size actually used) -- all three recorded in the manifest so
-    the selection is auditable."""
-    months_sorted = sorted(all_months, key=lambda m: (m.year, m.month))
-    if not months_sorted:
-        raise ManifestGenerationError("no eligible (classified, non-'unclassified') months at all")
-    earliest = (months_sorted[0].year, months_sorted[0].month)
-    size = initial_size
-    while True:
-        holdout_start = _nth_month_from_end(eligible_end, size)
-        pool = [m for m in months_sorted if (m.year, m.month) >= holdout_start]
-        pool_regimes = {m.regime for m in pool}
-        if REQUIRED_REGIMES <= pool_regimes:
-            comparison_pool = [m for m in months_sorted if (m.year, m.month) < holdout_start]
-            comparison_regimes = {m.regime for m in comparison_pool}
-            missing = REQUIRED_REGIMES - comparison_regimes
-            if missing:
-                raise ManifestGenerationError(
-                    f"holdout pool reaches all 4 required regimes only by expanding to "
-                    f"the trailing {size} months (from {holdout_start[0]}-{holdout_start[1]:02d}), "
-                    f"but that leaves the comparison pool (every month before it) missing "
-                    f"{sorted(missing)} -- cannot satisfy full 4-regime coverage in both sets "
-                    "simultaneously from this eligible range; widen ELIGIBLE_RANGE_START or "
-                    "lower HOLDOUT_MONTHS_COUNT and regenerate. Not fabricating coverage."
-                )
-            return holdout_start, pool, size
-        if holdout_start <= earliest:
+    pairs: dict[str, tuple[MonthMetrics, MonthMetrics]] = {}
+    for regime in sorted(REQUIRED_REGIMES):
+        pool = sorted(by_regime.get(regime, []), key=lambda m: (m.year, m.month))
+        if len(pool) < 2:
             raise ManifestGenerationError(
-                f"even the entire eligible range ({len(months_sorted)} classified months, "
-                f"earliest {earliest[0]}-{earliest[1]:02d}) does not contain all 4 required "
-                f"regimes {sorted(REQUIRED_REGIMES)} -- cannot build a valid holdout pool "
-                "without fabricating coverage. Widen the eligible range and regenerate."
+                f"regime {regime!r} has only {len(pool)} eligible month(s) in this "
+                "eligible range -- a per-regime comparison/holdout pair needs at "
+                "least 2 (one comparison, one strictly later holdout of the same "
+                "regime). Widen the eligible range, or accept this range cannot "
+                "support the paired design; not fabricating a second month."
             )
-        size += 1
+        comparison, holdout = sorted(rng.sample(pool, 2), key=lambda m: (m.year, m.month))
+        pairs[regime] = (comparison, holdout)
+    return pairs
 
 
 # ---------------------------------------------------------------------
@@ -493,15 +457,22 @@ def audit_episode_watchlist_viability(episode: dict, watchlist: list[dict],
     }
 
 
-def _episodes_with_viability(episodes: list[MonthMetrics], watchlist: list[dict],
+def _episodes_with_viability(episodes: list[MonthMetrics], role: str, watchlist: list[dict],
                              fetch_tech, fetch_closes) -> list[dict]:
     """MonthMetrics -> episode dict, each carrying its own
-    watchlist_viability. Fails clearly and NAMES the ticker/month --
-    never silently drops or fabricates coverage for an episode whose
-    watchlist data isn't actually there (correction pass, part 2)."""
+    watchlist_viability plus `role` ('comparison'/'holdout') and
+    `pair_id` (2026-09-16: the per-regime paired design's matching-pair
+    identity -- exactly one comparison and one holdout episode ever share
+    a pair_id, since select_paired_episodes produces exactly one pair per
+    required regime and the regime itself is a stable, unique key for
+    that pair). Fails clearly and NAMES the ticker/month -- never silently
+    drops or fabricates coverage for an episode whose watchlist data
+    isn't actually there (correction pass, part 2)."""
     out = []
     for m in episodes:
         ep = m.to_dict()
+        ep["role"] = role
+        ep["pair_id"] = f"{m.regime}_pair"
         wv = audit_episode_watchlist_viability(ep, watchlist, fetch_tech, fetch_closes)
         if not wv["valid"]:
             raise ManifestGenerationError(
@@ -558,10 +529,10 @@ def propose_manifest(seed: int, eligible_start: date = ELIGIBLE_RANGE_START,
         )
 
     # Correction pass, part 1: "unclassified" months are excluded from
-    # BOTH pools here, at the single point every downstream selection
-    # (select_holdout_pool, stratified_sample) reads from -- they never
-    # see an "unclassified" regime bucket at all. Still recorded in
-    # all_classified_months below, for a complete, honest audit trail.
+    # selection here, at the single point select_paired_episodes reads
+    # from -- it never sees an "unclassified" regime bucket at all. Still
+    # recorded in all_classified_months below, for a complete, honest
+    # audit trail.
     eligible_months = [m for m in all_months if m.regime != "unclassified"]
     if not eligible_months:
         raise ManifestGenerationError(
@@ -570,38 +541,30 @@ def propose_manifest(seed: int, eligible_start: date = ELIGIBLE_RANGE_START,
             "sample from"
         )
 
-    holdout_start, holdout_pool, holdout_pool_size = select_holdout_pool(
-        eligible_months, eligible_end, HOLDOUT_MONTHS_COUNT)
-    comparison_pool = [m for m in eligible_months if (m.year, m.month) < holdout_start]
+    # 2026-09-16 correction pass: one comparison + one later holdout
+    # episode PER REGIME independently (select_paired_episodes), not one
+    # single globally-trailing holdout block -- see that function's own
+    # docstring for why the prior design was infeasible for this range.
+    pairs = select_paired_episodes(eligible_months, seed)
+    episodes = [pairs[regime][0] for regime in sorted(REQUIRED_REGIMES)]
+    holdout_episodes = [pairs[regime][1] for regime in sorted(REQUIRED_REGIMES)]
 
-    episodes = stratified_sample(comparison_pool, EPISODES_PER_REGIME, seed)
-    # seed + 1: independent of the comparison draw but still fully
-    # reproducible from the single top-level seed -- never a second
-    # user-facing seed to track.
-    holdout_episodes = stratified_sample(holdout_pool, HOLDOUT_EPISODES_PER_REGIME, seed + 1)
-
-    # Post-condition, not just a hope: select_holdout_pool already
-    # guarantees both pools cover all 4 regimes, so a per_regime>=1
-    # stratified draw is guaranteed to include each -- but a silent
-    # regression here must be loud, never a quietly incomplete manifest.
-    episode_regimes = {e.regime for e in episodes}
-    holdout_regimes = {e.regime for e in holdout_episodes}
-    if not (REQUIRED_REGIMES <= episode_regimes):
+    # Post-condition, not just a hope: structurally guaranteed (a month
+    # has exactly one regime, so a comparison/holdout pair from different
+    # regimes can never share a date) -- but a silent regression here
+    # must be loud, never a quietly overlapping manifest.
+    all_dates = [(e.year, e.month) for e in episodes + holdout_episodes]
+    if len(all_dates) != len(set(all_dates)):
         raise ManifestGenerationError(
-            f"internal error: comparison pool covered all 4 regimes but the sampled "
-            f"episodes only cover {sorted(episode_regimes)} -- refusing to write an "
-            "incomplete manifest"
-        )
-    if not (REQUIRED_REGIMES <= holdout_regimes):
-        raise ManifestGenerationError(
-            f"internal error: holdout pool covered all 4 regimes but the sampled "
-            f"holdout episodes only cover {sorted(holdout_regimes)} -- refusing to write "
-            "an incomplete manifest"
+            "internal error: the same (year, month) appears more than once across "
+            "comparison/holdout episodes -- refusing to write an overlapping manifest"
         )
 
     watchlist = watchlist if watchlist is not None else _load_default_watchlist()
-    episode_dicts = _episodes_with_viability(episodes, watchlist, fetch_tech, fetch_watchlist_closes)
-    holdout_episode_dicts = _episodes_with_viability(holdout_episodes, watchlist, fetch_tech, fetch_watchlist_closes)
+    episode_dicts = _episodes_with_viability(
+        episodes, "comparison", watchlist, fetch_tech, fetch_watchlist_closes)
+    holdout_episode_dicts = _episodes_with_viability(
+        holdout_episodes, "holdout", watchlist, fetch_tech, fetch_watchlist_closes)
 
     manifest = {
         "manifest_version": MANIFEST_VERSION,
@@ -619,17 +582,24 @@ def propose_manifest(seed: int, eligible_start: date = ELIGIBLE_RANGE_START,
         },
         "required_regimes": sorted(REQUIRED_REGIMES),
         "selection_seed": seed,
-        "holdout_pool": {
-            "start": f"{holdout_start[0]}-{holdout_start[1]:02d}",
-            "size_months": holdout_pool_size,
-            "initial_size_months": HOLDOUT_MONTHS_COUNT,
-            "expanded": holdout_pool_size > HOLDOUT_MONTHS_COUNT,
-            "expansion_rule": (
-                "start from the trailing initial_size_months months; if any of the 4 "
-                "required regimes is missing, expand one calendar month backward at a "
-                "time until all 4 are present; fail clearly if the full eligible range "
-                "still cannot cover all 4, or if reaching holdout coverage would leave "
-                "the comparison pool missing one"
+        "holdout_design": {
+            "method": "per_regime_paired",
+            "description": (
+                "For each required regime independently: one comparison episode "
+                "and one untouched holdout episode of the SAME regime, strictly "
+                "later than its own matching comparison episode -- see "
+                "select_paired_episodes. Deterministic sampling with the top-level "
+                "seed; when a regime has exactly 2 eligible months, they are "
+                "forced into the pair in chronological order, never hand-picked."
+            ),
+            "caveat": (
+                "This is NOT one single globally-trailing holdout period covering "
+                "all required regimes at once (the prior design, proven infeasible "
+                "for this eligible range -- see docs/evaluations/"
+                "fundamentals_v1_measurement_block_2026-09-15.md). Each holdout "
+                "episode is later only relative to its OWN regime's comparison "
+                "episode; it is never guaranteed later than a DIFFERENT regime's "
+                "comparison episode."
             ),
         },
         "watchlist_tickers": sorted(t["symbol"] for t in watchlist),
@@ -1070,20 +1040,19 @@ def main() -> None:
         print(f"wrote {path} (status=proposed -- human review required before use)")
         print(f"eligible range: {manifest['eligible_range']['start']} .. {manifest['eligible_range']['end']}")
         print(f"proxy: {manifest['proxy_ticker']}  seed: {manifest['selection_seed']}")
-        hp = manifest["holdout_pool"]
-        print(f"holdout pool: starts {hp['start']}, {hp['size_months']} months "
-              f"(initial {hp['initial_size_months']}, expanded={hp['expanded']})")
+        print(f"holdout design: {manifest['holdout_design']['method']} "
+              "(one comparison + one later holdout PER REGIME -- see caveat in the manifest)")
         n_episodes = len(manifest["episodes"]) + len(manifest["holdout_episodes"])
         print(f"watchlist viability: {len(manifest['watchlist_tickers'])} tickers, "
               f"all usable across all {n_episodes} selected episodes "
               "(propose_manifest would have failed clearly otherwise)")
         print("comparison episodes:")
         for e in manifest["episodes"]:
-            print(f"  {e['year']}-{e['month']:02d}  {e['regime']:<15} "
+            print(f"  {e['year']}-{e['month']:02d}  {e['regime']:<15} pair={e['pair_id']:<20} "
                   f"return={e['monthly_return_pct']:+.2f}%  vol={e['realized_vol_pct']:.2f}%")
         print("holdout episodes (untouched until final out-of-sample eval):")
         for e in manifest["holdout_episodes"]:
-            print(f"  {e['year']}-{e['month']:02d}  {e['regime']:<15} "
+            print(f"  {e['year']}-{e['month']:02d}  {e['regime']:<15} pair={e['pair_id']:<20} "
                   f"return={e['monthly_return_pct']:+.2f}%  vol={e['realized_vol_pct']:.2f}%")
 
 

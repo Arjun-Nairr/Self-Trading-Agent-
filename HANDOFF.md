@@ -368,21 +368,30 @@ covers the non-mutating suites. Still blocked on everything §10 blocks.
 
 ---
 
-## 14. 2026-09-15c fundamentals-measurement block — blocked before any run
+## 14. 2026-09-15/16 fundamentals-measurement block — valid manifest, unapproved
 
-`ELIGIBLE_RANGE_START=2022-06-01` (RYAN/ALGM viability floor, §6) +
-`EPISODES_PER_REGIME=1` now committed in `eval_suite.py`, per the user's
-frozen design. `propose --seed 20260915` still fails: the only 2 real
-`selloff` months (2022-09/12) force the holdout back to 2022-12, leaving
-the comparison pool with zero `sideways` months — infeasible by
-construction. **No manifest, no episode, no Hermes call.** Full
-diagnostic: `docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
-Conclusion unchanged: **keep Fundamentals V1 as unproven context**.
-Incidental fix: `test_eval_suite.py` was silently writing real
-`cycle_failed` Neon rows with Docker up (missing `fail_logger` mock) —
-fixed at the source; 3 pre-existing orphaned rows are documented, not
-deleted (blocked by this environment's own safety gate). Roadmap:
+**2026-09-15c:** `ELIGIBLE_RANGE_START=2022-06-01` (RYAN/ALGM viability
+floor) committed; `propose --seed 20260915` failed — the only 2 real
+`selloff` months (2022-09/12) forced the old single-trailing-holdout rule
+to empty the comparison pool of `sideways`. No manifest, no episode, no
+Hermes call. Incidental fix: `test_eval_suite.py` was silently writing
+real `cycle_failed` Neon rows with Docker up (missing `fail_logger`
+mock) — fixed at the source; 3 pre-existing orphaned rows documented,
+not deleted (blocked by this environment's safety gate). Roadmap:
 "Dynamic company selector" removed (cancelled, `docs/PROJECT_BACKLOG.md` §2).
+
+**2026-09-16 correction:** replaced the infeasible rule with
+`select_paired_episodes` — one comparison + one later holdout PER REGIME
+independently (`MANIFEST_VERSION` 3→4, old manifests refused). Fixed
+range/watchlist/regimes/rules untouched. `propose --seed 20260915` now
+produces a **valid, verified** manifest
+(`eval_suites/manifest_20260916T154923_30f4c12e0f7e.json`, `status:
+proposed`) — `selloff`'s only 2 months forced into chronological order
+as required; all 8 episodes pass watchlist viability. **Not approved, no
+episode run.** Caveat: per-regime-later holdouts, NOT one globally-later
+holdout period (recorded in the manifest itself). Conclusion still
+**keep Fundamentals V1 as unproven context** — nothing has run. Full
+detail: `docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
 
 ---
 

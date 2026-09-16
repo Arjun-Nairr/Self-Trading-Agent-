@@ -6,10 +6,13 @@ Covers exactly what the regime-diverse evaluation-suite block requires,
 including the 2026-09-13 correction passes (approval/fill-metric/holdout-
 coverage, then regime-model/watchlist-viability):
   1. determinism from seed (same seed + data -> same episode selection)
-  2. regime coverage (rally/selloff/high_volatility/sideways all present
-     in BOTH the comparison suite and the holdout set)
-  3. holdout separation (holdout months disjoint from, and chronologically
-     later than, every comparison-suite month)
+  2. regime coverage (rally/selloff/high_volatility/sideways each have
+     EXACTLY one comparison and one holdout episode)
+  3. holdout separation (2026-09-16: per-regime paired design -- each
+     regime's holdout episode is disjoint from, and chronologically later
+     than, its OWN matching comparison episode; never a claim that every
+     holdout month is later than every comparison month globally; no
+     episode date appears twice across all 8 selected episodes)
   4. manifest hash/tamper rejection
   5. refusal of proposed (and of tampered-but-claimed-approved) manifests
      -- through the PUBLIC API (run_configuration), proving zero calls
@@ -17,8 +20,10 @@ coverage, then regime-model/watchlist-viability):
   6. clean per-episode state isolation (fresh run_id/Portfolio per
      episode, CHECKPOINT_PATH restored after, no bleed between calls)
   7. fill_count means actual fills only, never queued proposals
-  8. deterministic holdout-pool expansion, and clear failure when valid
-     four-regime coverage is impossible
+  8. select_paired_episodes: deterministic per-regime pairing (forced
+     chronological order when a regime has exactly 2 eligible months, a
+     seeded draw among more than 2), and clear failure when a regime has
+     fewer than 2 eligible months to pair
   9. "sideways" requires a genuinely quiet month (not a residual bucket);
      a moderately drifting calm month is "unclassified" and excluded
      from both sampled sets, which still cover all 4 required regimes
@@ -45,7 +50,7 @@ from eval_suite import (                                              # noqa: E4
     ManifestWatchlistViabilityError, MonthMetrics,
     classify_regime, compute_content_hash, month_bounds, month_range,
     propose_manifest, require_approved, run_configuration,
-    select_holdout_pool, stratified_sample, verify_manifest,
+    select_paired_episodes, verify_manifest,
 )
 
 ELIGIBLE_START = date(2021, 1, 1)
@@ -172,7 +177,6 @@ def test_propose_manifest_deterministic_from_seed():
     check("same seed -> identical comparison episodes", m1["episodes"], m2["episodes"])
     check("same seed -> identical holdout episodes", m1["holdout_episodes"], m2["holdout_episodes"])
     check("same seed -> identical full classification", m1["all_classified_months"], m2["all_classified_months"])
-    check("same seed -> identical holdout pool bounds", m1["holdout_pool"], m2["holdout_pool"])
 
 
 def test_propose_manifest_different_seed_can_select_differently():
@@ -188,11 +192,11 @@ def test_propose_manifest_different_seed_can_select_differently():
     )
 
 
-def test_stratified_sample_pure_determinism():
+def test_select_paired_episodes_pure_determinism():
     months = [_mm(2021, i, REGIME_CYCLE[i % 4]) for i in range(1, 13)]
-    a = stratified_sample(months, per_regime=1, seed=42)
-    b = stratified_sample(months, per_regime=1, seed=42)
-    check("stratified_sample is a pure function of its inputs", a, b)
+    a = select_paired_episodes(months, seed=42)
+    b = select_paired_episodes(months, seed=42)
+    check("select_paired_episodes is a pure function of its inputs", a, b)
 
 
 # ===========================================================================
@@ -201,40 +205,55 @@ def test_stratified_sample_pure_determinism():
 
 def test_regime_coverage_comparison_and_holdout():
     m = _propose(seed=123)
-    comparison_regimes = {e["regime"] for e in m["episodes"]}
-    holdout_regimes = {e["regime"] for e in m["holdout_episodes"]}
+    comparison_regimes = [e["regime"] for e in m["episodes"]]
+    holdout_regimes = [e["regime"] for e in m["holdout_episodes"]]
     for regime in ("rally", "selloff", "high_volatility", "sideways"):
-        check_true(f"comparison suite includes a {regime!r} episode", regime in comparison_regimes)
-        check_true(f"holdout set includes a {regime!r} episode", regime in holdout_regimes)
+        check(f"comparison suite has EXACTLY one {regime!r} episode",
+              comparison_regimes.count(regime), 1)
+        check(f"holdout set has EXACTLY one {regime!r} episode",
+              holdout_regimes.count(regime), 1)
+    check("exactly 4 comparison episodes total", len(m["episodes"]), 4)
+    check("exactly 4 holdout episodes total", len(m["holdout_episodes"]), 4)
 
 
 # ===========================================================================
 # 3. Holdout separation
 # ===========================================================================
 
-def test_holdout_months_disjoint_and_chronologically_later():
+def test_holdout_months_disjoint_and_each_later_than_its_own_pair():
     m = _propose(seed=5)
     comparison_keys = {(e["year"], e["month"]) for e in m["episodes"]}
     holdout_keys = {(e["year"], e["month"]) for e in m["holdout_episodes"]}
     check("comparison and holdout episode months never overlap",
           comparison_keys & holdout_keys, set())
-    check_true("every holdout month is chronologically later than every comparison month",
-               max(comparison_keys) < min(holdout_keys))
+    by_pair = {e["pair_id"]: e for e in m["episodes"]}
+    for h in m["holdout_episodes"]:
+        c = by_pair[h["pair_id"]]
+        check_true(f"{h['pair_id']} holdout is strictly later than its own matching comparison",
+                   (h["year"], h["month"]) > (c["year"], c["month"]))
+    # The design deliberately does NOT require every holdout month to be
+    # later than every comparison month globally -- only proving that
+    # would silently reintroduce the old, infeasible invariant.
 
 
-def test_holdout_pool_bounds_recorded_and_auditable():
+def test_no_episode_date_appears_twice():
     m = _propose(seed=9)
-    hp = m["holdout_pool"]
-    check("holdout_pool.initial_size_months matches the module's own documented constant",
-          hp["initial_size_months"], 12)
-    check_true("holdout_pool.size_months is at least the initial size",
-               hp["size_months"] >= hp["initial_size_months"])
-    check("this fixture's own regime cycle already covers all 4 in the default window -- no expansion needed",
-          hp["expanded"], False)
-    all_months = {(mm["year"], mm["month"]) for mm in m["all_classified_months"]}
-    latest = max(all_months)
-    check_true("the holdout window's own latest month is the eligible range's latest classified month",
-               max((e["year"], e["month"]) for e in m["holdout_episodes"]) <= latest)
+    all_keys = [(e["year"], e["month"]) for e in m["episodes"] + m["holdout_episodes"]]
+    check("all 8 selected episode dates are distinct", len(all_keys), len(set(all_keys)))
+
+
+def test_holdout_design_recorded_with_the_per_regime_caveat():
+    m = _propose(seed=9)
+    hd = m["holdout_design"]
+    check("holdout_design.method records the per-regime paired approach",
+          hd["method"], "per_regime_paired")
+    check_true("holdout_design states the caveat that this is not one global trailing holdout",
+               "NOT one single globally-trailing holdout" in hd["caveat"])
+    for e in m["episodes"] + m["holdout_episodes"]:
+        check_true(f"episode {e['year']}-{e['month']:02d} records its role",
+                   e["role"] in ("comparison", "holdout"))
+        check_true(f"episode {e['year']}-{e['month']:02d} records its matching pair_id",
+                   e["pair_id"] == f"{e['regime']}_pair")
 
 
 # ===========================================================================
@@ -754,66 +773,72 @@ def test_episode_with_nothing_pending_reports_zero_dangling_orders():
 
 
 # ===========================================================================
-# 8. Deterministic holdout-pool expansion + clear failure (requirement 3)
+# 8. select_paired_episodes: deterministic per-regime pairing + clear
+#    failure on under-coverage (2026-09-16 correction pass)
 # ===========================================================================
 
-def test_select_holdout_pool_expands_backward_to_cover_a_missing_regime():
-    # 24 months of a regular 4-cycle (2020-01..2021-12) so the comparison
-    # side has plenty of every regime, then 11 months of filler "rally"
-    # (2022-01..2022-11), then ONE "selloff" at 2022-12, then 12 more
-    # months (2023) that themselves cover rally/high_volatility/sideways
-    # but deliberately never selloff. The default trailing-12 window
-    # (2023-01..2023-12) is missing selloff -> must expand by exactly 1
-    # month to reach 2022-12 and pick it up.
-    months = [_mm(2020 + (i // 12), 1 + i % 12, REGIME_CYCLE[i % 4]) for i in range(24)]
-    months += [_mm(2022, m, "rally") for m in range(1, 12)]          # 2022-01..2022-11
-    months.append(_mm(2022, 12, "selloff"))                          # the lone late selloff
-    months += [_mm(2023, m, "rally") for m in (1, 2, 3, 4, 5, 7, 8, 10, 11, 12)]
-    months.append(_mm(2023, 6, "high_volatility"))
-    months.append(_mm(2023, 9, "sideways"))
-
-    eligible_end = date(2023, 12, 31)
-    holdout_start, pool, size = select_holdout_pool(months, eligible_end, initial_size=12)
-    check("expansion needed exactly one extra month", size, 13)
-    check("holdout pool now starts at the month carrying the missing regime", holdout_start, (2022, 12))
-    check_true("the expanded pool covers all 4 required regimes",
-               {"rally", "selloff", "high_volatility", "sideways"} <= {m.regime for m in pool})
-
-    holdout_start2, pool2, size2 = select_holdout_pool(months, eligible_end, initial_size=12)
-    check("select_holdout_pool is deterministic for the same inputs", (holdout_start2, size2), (holdout_start, size))
-    print("  ok  select_holdout_pool deterministically expands backward by exactly the "
-          "months needed to cover a missing regime, and is reproducible")
+def test_select_paired_episodes_forces_the_pair_when_exactly_two_months_exist():
+    # Exactly today's real situation: only 2 real 'selloff' months exist
+    # anywhere in the eligible range, chronologically far apart, with
+    # 'sideways' months only appearing later still -- the OLD design
+    # (select_holdout_pool) made this combination infeasible; the paired
+    # design does not care where 'sideways' months fall at all.
+    months = [_mm(2021, 3, "selloff"), _mm(2022, 9, "selloff")]
+    months += [_mm(2021, i, r) for i, r in
+              zip(range(1, 7), ["rally", "rally", "high_volatility", "high_volatility",
+                                 "sideways", "sideways"])]
+    pairs = select_paired_episodes(months, seed=1)
+    comparison, holdout = pairs["selloff"]
+    check("the only 2 eligible months of a regime are forced into the pair, earlier as comparison",
+          (comparison.year, comparison.month, holdout.year, holdout.month), (2021, 3, 2022, 9))
+    pairs_other_seed = select_paired_episodes(months, seed=999)
+    check("a forced 2-month pair is identical regardless of seed -- never hand-picked",
+          pairs_other_seed["selloff"], pairs["selloff"])
+    print("  ok  select_paired_episodes forces the only 2 eligible months of a regime into the "
+          "pair, in chronological order, independent of seed")
 
 
-def test_select_holdout_pool_fails_clearly_when_regime_missing_from_entire_range():
-    months = [_mm(2023, m, "rally" if m % 2 else "sideways") for m in range(1, 13)]
+def test_select_paired_episodes_differs_for_another_seed_when_alternatives_exist():
+    # 5 eligible 'rally' months -- more than 2, so WHICH 2 get paired is
+    # genuinely seed-sensitive (10 possible pairs).
+    months = [_mm(2021, i, "rally") for i in range(1, 6)]
+    months += [_mm(2021, 6, "selloff"), _mm(2022, 6, "selloff")]
+    months += [_mm(2021, 7, "high_volatility"), _mm(2022, 7, "high_volatility")]
+    months += [_mm(2021, 8, "sideways"), _mm(2022, 8, "sideways")]
+    seen = {select_paired_episodes(months, seed=s)["rally"] for s in range(20)}
+    check_true("different seeds are capable of selecting a different pair when more than 2 "
+               "eligible months exist for a regime", len(seen) > 1)
+    print("  ok  select_paired_episodes' choice of which months to pair is seed-sensitive "
+          "when alternatives genuinely exist")
+
+
+def test_select_paired_episodes_holdout_always_later_than_its_own_comparison():
+    months = [_mm(2021, i, "rally") for i in range(1, 6)]
+    months += [_mm(2021, 6, "selloff"), _mm(2022, 6, "selloff")]
+    months += [_mm(2021, 7, "high_volatility"), _mm(2022, 7, "high_volatility")]
+    months += [_mm(2021, 8, "sideways"), _mm(2022, 8, "sideways")]
+    for seed in range(10):
+        pairs = select_paired_episodes(months, seed=seed)
+        for regime, (comparison, holdout) in pairs.items():
+            check_true(f"{regime} holdout is strictly later than its own comparison (seed={seed})",
+                       (holdout.year, holdout.month) > (comparison.year, comparison.month))
+    print("  ok  every regime's holdout episode is strictly later than its own matching "
+          "comparison episode, across every seed tried")
+
+
+def test_select_paired_episodes_fails_clearly_when_a_regime_has_fewer_than_two_months():
+    months = [_mm(2021, i, "rally") for i in range(1, 6)]
+    months += [_mm(2021, 6, "selloff")]  # only ONE selloff month -- cannot form a pair
+    months += [_mm(2021, 7, "high_volatility"), _mm(2022, 7, "high_volatility")]
+    months += [_mm(2021, 8, "sideways"), _mm(2022, 8, "sideways")]
     try:
-        select_holdout_pool(months, date(2023, 12, 31), initial_size=6)
-        raise AssertionError("expected a permanently-missing regime to fail clearly")
+        select_paired_episodes(months, seed=1)
+        raise AssertionError("expected a regime with fewer than 2 eligible months to fail clearly")
     except ManifestGenerationError as exc:
-        check_true("the error names the entire-eligible-range case", "entire eligible range" in str(exc))
-    print("  ok  select_holdout_pool fails clearly when a required regime never appears anywhere "
-          "in the eligible range, instead of silently returning incomplete coverage")
-
-
-def test_select_holdout_pool_fails_clearly_when_expansion_would_empty_the_comparison_pool():
-    # The ONLY high_volatility month is the very first month in the whole
-    # range; the other 12 months (rally/selloff/sideways only) come after
-    # it. Reaching full holdout coverage requires expanding to include
-    # month 0 -- but that consumes the ENTIRE range, leaving zero months
-    # for comparison.
-    months = [_mm(2023, 1, "high_volatility")]
-    cycle = ["rally", "selloff", "sideways"]
-    months += [_mm(2023 + (i + 1) // 12, 1 + (i + 1) % 12, cycle[i % 3]) for i in range(12)]
-
-    try:
-        select_holdout_pool(months, date(2024, 1, 31), initial_size=12)
-        raise AssertionError("expected a comparison-emptying expansion to fail clearly")
-    except ManifestGenerationError as exc:
-        check_true("the error names the comparison-pool coverage loss",
-                   "comparison pool" in str(exc) and "high_volatility" in str(exc))
-    print("  ok  select_holdout_pool fails clearly rather than expanding the holdout so far "
-          "that the comparison pool loses a required regime")
+        check_true("the error names the under-covered regime", "'selloff'" in str(exc))
+        check_true("the error states the real count found", "only 1 eligible month" in str(exc))
+    print("  ok  select_paired_episodes fails clearly, naming the regime and its real count, "
+          "when fewer than 2 eligible months exist -- never fabricates a second month")
 
 
 # ===========================================================================

@@ -556,6 +556,27 @@ document; it is implemented.**
     deleted — the delete was blocked by this environment's own
     shared-resource safety gate.
 
+    **2026-09-16 correction — infeasibility resolved, valid manifest
+    generated (still unapproved):** replaced `select_holdout_pool`'s
+    single globally-trailing-block holdout rule with
+    `select_paired_episodes` — one comparison + one strictly-later
+    holdout episode PER REGIME independently (never requiring every
+    holdout episode later than every comparison episode across regimes).
+    `MANIFEST_VERSION` bumped 3→4 so any manifest from the old algorithm
+    is refused, not silently reinterpreted. Fixed range/watchlist/regimes/
+    seed/rules untouched. `propose --seed 20260915` now generates a valid
+    manifest (`manifest_20260916T154923_30f4c12e0f7e.json`): selloff's
+    only 2 eligible months (2022-09, 2022-12) are forced into the pair in
+    chronological order exactly as required; all 8 episodes pass the
+    fixed-watchlist viability audit; zero date overlap; every regime
+    covered exactly once on each side. **Not approved, no episode run** —
+    per this block's own instruction to stop after generating and
+    verifying. Scientific limitation recorded in the manifest's own
+    `holdout_design.caveat` and in the measurement report's "2026-09-16
+    correction" section: this is per-regime-later holdouts, not one
+    single globally-later holdout period. Full detail:
+    `docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
+
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.
 

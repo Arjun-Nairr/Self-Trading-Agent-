@@ -1,0 +1,1450 @@
+{
+  "all_classified_months": [
+    {
+      "end": "2022-06-30",
+      "month": 6,
+      "monthly_return_pct": -7.4978,
+      "realized_vol_pct": 1.868,
+      "regime": "high_volatility",
+      "start": "2022-06-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-07-31",
+      "month": 7,
+      "monthly_return_pct": 8.0658,
+      "realized_vol_pct": 1.1992,
+      "regime": "rally",
+      "start": "2022-07-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-08-31",
+      "month": 8,
+      "monthly_return_pct": -3.7953,
+      "realized_vol_pct": 1.2158,
+      "regime": "unclassified",
+      "start": "2022-08-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-09-30",
+      "month": 9,
+      "monthly_return_pct": -9.5285,
+      "realized_vol_pct": 1.4963,
+      "regime": "selloff",
+      "start": "2022-09-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-10-31",
+      "month": 10,
+      "monthly_return_pct": 5.3463,
+      "realized_vol_pct": 1.6796,
+      "regime": "high_volatility",
+      "start": "2022-10-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-11-30",
+      "month": 11,
+      "monthly_return_pct": 6.0231,
+      "realized_vol_pct": 1.7506,
+      "regime": "high_volatility",
+      "start": "2022-11-01",
+      "year": 2022
+    },
+    {
+      "end": "2022-12-31",
+      "month": 12,
+      "monthly_return_pct": -5.6934,
+      "realized_vol_pct": 1.1331,
+      "regime": "selloff",
+      "start": "2022-12-01",
+      "year": 2022
+    },
+    {
+      "end": "2023-01-31",
+      "month": 1,
+      "monthly_return_pct": 6.7381,
+      "realized_vol_pct": 1.031,
+      "regime": "rally",
+      "start": "2023-01-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-02-28",
+      "month": 2,
+      "monthly_return_pct": -3.5394,
+      "realized_vol_pct": 0.9372,
+      "regime": "unclassified",
+      "start": "2023-02-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-03-31",
+      "month": 3,
+      "monthly_return_pct": 4.1071,
+      "realized_vol_pct": 1.1367,
+      "regime": "unclassified",
+      "start": "2023-03-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-04-30",
+      "month": 4,
+      "monthly_return_pct": 1.2118,
+      "realized_vol_pct": 0.7558,
+      "regime": "sideways",
+      "start": "2023-04-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-05-31",
+      "month": 5,
+      "monthly_return_pct": 0.5632,
+      "realized_vol_pct": 0.8052,
+      "regime": "sideways",
+      "start": "2023-05-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-06-30",
+      "month": 6,
+      "monthly_return_pct": 5.4779,
+      "realized_vol_pct": 0.6451,
+      "regime": "rally",
+      "start": "2023-06-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-07-31",
+      "month": 7,
+      "monthly_return_pct": 3.1547,
+      "realized_vol_pct": 0.5029,
+      "regime": "unclassified",
+      "start": "2023-07-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-08-31",
+      "month": 8,
+      "monthly_return_pct": -1.3429,
+      "realized_vol_pct": 0.7737,
+      "regime": "sideways",
+      "start": "2023-08-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-09-30",
+      "month": 9,
+      "monthly_return_pct": -4.9208,
+      "realized_vol_pct": 0.6802,
+      "regime": "unclassified",
+      "start": "2023-09-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-10-31",
+      "month": 10,
+      "monthly_return_pct": -2.1319,
+      "realized_vol_pct": 0.8806,
+      "regime": "unclassified",
+      "start": "2023-10-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-11-30",
+      "month": 11,
+      "monthly_return_pct": 7.9828,
+      "realized_vol_pct": 0.6904,
+      "regime": "rally",
+      "start": "2023-11-01",
+      "year": 2023
+    },
+    {
+      "end": "2023-12-31",
+      "month": 12,
+      "monthly_return_pct": 3.9506,
+      "realized_vol_pct": 0.5909,
+      "regime": "unclassified",
+      "start": "2023-12-01",
+      "year": 2023
+    },
+    {
+      "end": "2024-01-31",
+      "month": 1,
+      "monthly_return_pct": 2.1644,
+      "realized_vol_pct": 0.6883,
+      "regime": "unclassified",
+      "start": "2024-01-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-02-29",
+      "month": 2,
+      "monthly_return_pct": 3.8594,
+      "realized_vol_pct": 0.7234,
+      "regime": "unclassified",
+      "start": "2024-02-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-03-31",
+      "month": 3,
+      "monthly_return_pct": 2.3097,
+      "realized_vol_pct": 0.5853,
+      "regime": "unclassified",
+      "start": "2024-03-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-04-30",
+      "month": 4,
+      "monthly_return_pct": -3.8647,
+      "realized_vol_pct": 0.8302,
+      "regime": "unclassified",
+      "start": "2024-04-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-05-31",
+      "month": 5,
+      "monthly_return_pct": 5.4002,
+      "realized_vol_pct": 0.5855,
+      "regime": "rally",
+      "start": "2024-05-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-06-30",
+      "month": 6,
+      "monthly_return_pct": 3.4437,
+      "realized_vol_pct": 0.4019,
+      "regime": "unclassified",
+      "start": "2024-06-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-07-31",
+      "month": 7,
+      "monthly_return_pct": 1.0031,
+      "realized_vol_pct": 0.9036,
+      "regime": "sideways",
+      "start": "2024-07-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-08-31",
+      "month": 8,
+      "monthly_return_pct": 3.8065,
+      "realized_vol_pct": 1.1545,
+      "regime": "unclassified",
+      "start": "2024-08-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-09-30",
+      "month": 9,
+      "monthly_return_pct": 4.2457,
+      "realized_vol_pct": 0.6907,
+      "regime": "unclassified",
+      "start": "2024-09-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-10-31",
+      "month": 10,
+      "monthly_return_pct": 0.0035,
+      "realized_vol_pct": 0.6749,
+      "regime": "sideways",
+      "start": "2024-10-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-11-30",
+      "month": 11,
+      "monthly_return_pct": 5.518,
+      "realized_vol_pct": 0.7483,
+      "regime": "rally",
+      "start": "2024-11-01",
+      "year": 2024
+    },
+    {
+      "end": "2024-12-31",
+      "month": 12,
+      "monthly_return_pct": -2.5806,
+      "realized_vol_pct": 0.8992,
+      "regime": "unclassified",
+      "start": "2024-12-01",
+      "year": 2024
+    },
+    {
+      "end": "2025-01-31",
+      "month": 1,
+      "monthly_return_pct": 2.9386,
+      "realized_vol_pct": 0.8738,
+      "regime": "unclassified",
+      "start": "2025-01-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-02-28",
+      "month": 2,
+      "monthly_return_pct": -0.6006,
+      "realized_vol_pct": 0.8139,
+      "regime": "sideways",
+      "start": "2025-02-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-03-31",
+      "month": 3,
+      "monthly_return_pct": -3.8881,
+      "realized_vol_pct": 1.2592,
+      "regime": "unclassified",
+      "start": "2025-03-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-04-30",
+      "month": 4,
+      "monthly_return_pct": -1.1462,
+      "realized_vol_pct": 3.3188,
+      "regime": "high_volatility",
+      "start": "2025-04-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-05-31",
+      "month": 5,
+      "monthly_return_pct": 5.5366,
+      "realized_vol_pct": 1.0645,
+      "regime": "rally",
+      "start": "2025-05-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-06-30",
+      "month": 6,
+      "monthly_return_pct": 4.5497,
+      "realized_vol_pct": 0.6219,
+      "regime": "unclassified",
+      "start": "2025-06-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-07-31",
+      "month": 7,
+      "monthly_return_pct": 2.3363,
+      "realized_vol_pct": 0.4121,
+      "regime": "unclassified",
+      "start": "2025-07-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-08-31",
+      "month": 8,
+      "monthly_return_pct": 3.7525,
+      "realized_vol_pct": 0.6405,
+      "regime": "unclassified",
+      "start": "2025-08-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-09-30",
+      "month": 9,
+      "monthly_return_pct": 4.3352,
+      "realized_vol_pct": 0.4013,
+      "regime": "unclassified",
+      "start": "2025-09-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-10-31",
+      "month": 10,
+      "monthly_return_pct": 2.036,
+      "realized_vol_pct": 0.8615,
+      "regime": "unclassified",
+      "start": "2025-10-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-11-30",
+      "month": 11,
+      "monthly_return_pct": 0.0073,
+      "realized_vol_pct": 0.9659,
+      "regime": "sideways",
+      "start": "2025-11-01",
+      "year": 2025
+    },
+    {
+      "end": "2025-12-31",
+      "month": 12,
+      "monthly_return_pct": 0.5388,
+      "realized_vol_pct": 0.5363,
+      "regime": "sideways",
+      "start": "2025-12-01",
+      "year": 2025
+    },
+    {
+      "end": "2026-01-31",
+      "month": 1,
+      "monthly_return_pct": 1.2881,
+      "realized_vol_pct": 0.646,
+      "regime": "sideways",
+      "start": "2026-01-01",
+      "year": 2026
+    }
+  ],
+  "classification_method": "month regime, checked in this exact priority order so a month gets exactly one label: 'high_volatility' if stdev(daily % returns within the month) >= 1.5 pct pts; elif monthly_return_pct >= 5.0: 'rally'; elif monthly_return_pct <= -5.0: 'selloff'; elif -2.0 <= monthly_return_pct <= 2.0 AND stdev < 1.0 pct pts: 'sideways' (genuinely quiet -- small net move AND low daily variance, never just a month that missed the rally/selloff cutoffs); else 'unclassified' -- excluded from both the comparison and holdout pools, never sampled, never silently forced into 'sideways' or any other label.",
+  "content_hash": "30f4c12e0f7ed7bb75780b9d84f6f38cf69c84a149c58b3ab66f4d4a97d018fb",
+  "eligible_range": {
+    "end": "2026-01-31",
+    "start": "2022-06-01"
+  },
+  "episodes": [
+    {
+      "end": "2022-06-30",
+      "month": 6,
+      "monthly_return_pct": -7.4978,
+      "pair_id": "high_volatility_pair",
+      "realized_vol_pct": 1.868,
+      "regime": "high_volatility",
+      "role": "comparison",
+      "start": "2022-06-01",
+      "watchlist_viability": {
+        "checked_dates": {
+          "end": "2022-06-30",
+          "start": "2022-06-01"
+        },
+        "movement": {
+          "per_ticker": {
+            "ALGM": {
+              "return_pct": -18.3826,
+              "vol_pct": 2.8156
+            },
+            "ATI": {
+              "return_pct": -14.5598,
+              "vol_pct": 3.6727
+            },
+            "BRKR": {
+              "return_pct": 2.1983,
+              "vol_pct": 2.3781
+            },
+            "BRX": {
+              "return_pct": -15.3685,
+              "vol_pct": 2.3708
+            },
+            "DINO": {
+              "return_pct": -10.5389,
+              "vol_pct": 3.9869
+            },
+            "OLN": {
+              "return_pct": -28.0473,
+              "vol_pct": 3.305
+            },
+            "PLNT": {
+              "return_pct": -2.8151,
+              "vol_pct": 3.1581
+            },
+            "RYAN": {
+              "return_pct": 3.9798,
+              "vol_pct": 2.2465
+            },
+            "SFM": {
+              "return_pct": -5.275,
+              "vol_pct": 2.3499
+            },
+            "WMG": {
+              "return_pct": -16.9451,
+              "vol_pct": 2.7138
+            }
+          },
+          "return_pct_range": [
+            -28.0473,
+            3.9798
+          ],
+          "vol_pct_range": [
+            2.2465,
+            3.9869
+          ]
+        },
+        "per_ticker": {
+          "ALGM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "ATI": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRKR": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRX": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "DINO": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "OLN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "PLNT": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "RYAN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "SFM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "WMG": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          }
+        },
+        "unavailable_count": 0,
+        "unavailable_tickers": [],
+        "usable_count": 10,
+        "valid": true
+      },
+      "year": 2022
+    },
+    {
+      "end": "2022-07-31",
+      "month": 7,
+      "monthly_return_pct": 8.0658,
+      "pair_id": "rally_pair",
+      "realized_vol_pct": 1.1992,
+      "regime": "rally",
+      "role": "comparison",
+      "start": "2022-07-01",
+      "watchlist_viability": {
+        "checked_dates": {
+          "end": "2022-07-29",
+          "start": "2022-07-01"
+        },
+        "movement": {
+          "per_ticker": {
+            "ALGM": {
+              "return_pct": 24.3988,
+              "vol_pct": 2.6178
+            },
+            "ATI": {
+              "return_pct": 11.4644,
+              "vol_pct": 2.2564
+            },
+            "BRKR": {
+              "return_pct": 7.8848,
+              "vol_pct": 2.4069
+            },
+            "BRX": {
+              "return_pct": 12.7432,
+              "vol_pct": 1.5949
+            },
+            "DINO": {
+              "return_pct": 4.7536,
+              "vol_pct": 2.7143
+            },
+            "OLN": {
+              "return_pct": 14.6272,
+              "vol_pct": 2.1842
+            },
+            "PLNT": {
+              "return_pct": 13.7394,
+              "vol_pct": 1.9197
+            },
+            "RYAN": {
+              "return_pct": 8.1,
+              "vol_pct": 1.5124
+            },
+            "SFM": {
+              "return_pct": 7.465,
+              "vol_pct": 1.4832
+            },
+            "WMG": {
+              "return_pct": 22.1001,
+              "vol_pct": 2.5143
+            }
+          },
+          "return_pct_range": [
+            4.7536,
+            24.3988
+          ],
+          "vol_pct_range": [
+            1.4832,
+            2.7143
+          ]
+        },
+        "per_ticker": {
+          "ALGM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "ATI": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRKR": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRX": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "DINO": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "OLN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "PLNT": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "RYAN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "SFM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "WMG": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          }
+        },
+        "unavailable_count": 0,
+        "unavailable_tickers": [],
+        "usable_count": 10,
+        "valid": true
+      },
+      "year": 2022
+    },
+    {
+      "end": "2022-09-30",
+      "month": 9,
+      "monthly_return_pct": -9.5285,
+      "pair_id": "selloff_pair",
+      "realized_vol_pct": 1.4963,
+      "regime": "selloff",
+      "role": "comparison",
+      "start": "2022-09-01",
+      "watchlist_viability": {
+        "checked_dates": {
+          "end": "2022-09-30",
+          "start": "2022-09-01"
+        },
+        "movement": {
+          "per_ticker": {
+            "ALGM": {
+              "return_pct": -0.9968,
+              "vol_pct": 2.0176
+            },
+            "ATI": {
+              "return_pct": -10.6747,
+              "vol_pct": 2.3165
+            },
+            "BRKR": {
+              "return_pct": -5.7381,
+              "vol_pct": 2.457
+            },
+            "BRX": {
+              "return_pct": -15.0414,
+              "vol_pct": 2.2208
+            },
+            "DINO": {
+              "return_pct": 5.362,
+              "vol_pct": 3.2529
+            },
+            "OLN": {
+              "return_pct": -20.1936,
+              "vol_pct": 2.8353
+            },
+            "PLNT": {
+              "return_pct": -12.3175,
+              "vol_pct": 2.6179
+            },
+            "RYAN": {
+              "return_pct": -2.1912,
+              "vol_pct": 1.836
+            },
+            "SFM": {
+              "return_pct": -4.5736,
+              "vol_pct": 2.2495
+            },
+            "WMG": {
+              "return_pct": -14.7631,
+              "vol_pct": 1.9869
+            }
+          },
+          "return_pct_range": [
+            -20.1936,
+            5.362
+          ],
+          "vol_pct_range": [
+            1.836,
+            3.2529
+          ]
+        },
+        "per_ticker": {
+          "ALGM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "ATI": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRKR": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRX": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "DINO": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "OLN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "PLNT": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "RYAN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "SFM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "WMG": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          }
+        },
+        "unavailable_count": 0,
+        "unavailable_tickers": [],
+        "usable_count": 10,
+        "valid": true
+      },
+      "year": 2022
+    },
+    {
+      "end": "2024-10-31",
+      "month": 10,
+      "monthly_return_pct": 0.0035,
+      "pair_id": "sideways_pair",
+      "realized_vol_pct": 0.6749,
+      "regime": "sideways",
+      "role": "comparison",
+      "start": "2024-10-01",
+      "watchlist_viability": {
+        "checked_dates": {
+          "end": "2024-10-31",
+          "start": "2024-10-01"
+        },
+        "movement": {
+          "per_ticker": {
+            "ALGM": {
+              "return_pct": -5.4446,
+              "vol_pct": 3.2648
+            },
+            "ATI": {
+              "return_pct": -20.0879,
+              "vol_pct": 2.5493
+            },
+            "BRKR": {
+              "return_pct": -15.2037,
+              "vol_pct": 1.6031
+            },
+            "BRX": {
+              "return_pct": -2.3091,
+              "vol_pct": 1.0487
+            },
+            "DINO": {
+              "return_pct": -12.7458,
+              "vol_pct": 2.6328
+            },
+            "OLN": {
+              "return_pct": -13.8387,
+              "vol_pct": 2.0953
+            },
+            "PLNT": {
+              "return_pct": -4.0684,
+              "vol_pct": 1.5579
+            },
+            "RYAN": {
+              "return_pct": -3.4164,
+              "vol_pct": 1.8593
+            },
+            "SFM": {
+              "return_pct": 15.734,
+              "vol_pct": 1.8821
+            },
+            "WMG": {
+              "return_pct": 1.8159,
+              "vol_pct": 1.0252
+            }
+          },
+          "return_pct_range": [
+            -20.0879,
+            15.734
+          ],
+          "vol_pct_range": [
+            1.0252,
+            3.2648
+          ]
+        },
+        "per_ticker": {
+          "ALGM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "ATI": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRKR": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRX": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "DINO": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "OLN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "PLNT": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "RYAN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "SFM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "WMG": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          }
+        },
+        "unavailable_count": 0,
+        "unavailable_tickers": [],
+        "usable_count": 10,
+        "valid": true
+      },
+      "year": 2024
+    }
+  ],
+  "generated_at": "2026-09-16T15:49:23.138711+00:00",
+  "holdout_design": {
+    "caveat": "This is NOT one single globally-trailing holdout period covering all required regimes at once (the prior design, proven infeasible for this eligible range -- see docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md). Each holdout episode is later only relative to its OWN regime's comparison episode; it is never guaranteed later than a DIFFERENT regime's comparison episode.",
+    "description": "For each required regime independently: one comparison episode and one untouched holdout episode of the SAME regime, strictly later than its own matching comparison episode -- see select_paired_episodes. Deterministic sampling with the top-level seed; when a regime has exactly 2 eligible months, they are forced into the pair in chronological order, never hand-picked.",
+    "method": "per_regime_paired"
+  },
+  "holdout_episodes": [
+    {
+      "end": "2022-11-30",
+      "month": 11,
+      "monthly_return_pct": 6.0231,
+      "pair_id": "high_volatility_pair",
+      "realized_vol_pct": 1.7506,
+      "regime": "high_volatility",
+      "role": "holdout",
+      "start": "2022-11-01",
+      "watchlist_viability": {
+        "checked_dates": {
+          "end": "2022-11-30",
+          "start": "2022-11-01"
+        },
+        "movement": {
+          "per_ticker": {
+            "ALGM": {
+              "return_pct": 20.4176,
+              "vol_pct": 2.6749
+            },
+            "ATI": {
+              "return_pct": -1.8656,
+              "vol_pct": 4.3809
+            },
+            "BRKR": {
+              "return_pct": 7.1332,
+              "vol_pct": 2.6448
+            },
+            "BRX": {
+              "return_pct": 7.9646,
+              "vol_pct": 2.2028
+            },
+            "DINO": {
+              "return_pct": 1.104,
+              "vol_pct": 2.0378
+            },
+            "OLN": {
+              "return_pct": 5.0292,
+              "vol_pct": 2.9075
+            },
+            "PLNT": {
+              "return_pct": 19.6336,
+              "vol_pct": 3.0517
+            },
+            "RYAN": {
+              "return_pct": -10.9244,
+              "vol_pct": 6.194
+            },
+            "SFM": {
+              "return_pct": 19.4918,
+              "vol_pct": 3.0462
+            },
+            "WMG": {
+              "return_pct": 29.2033,
+              "vol_pct": 3.9962
+            }
+          },
+          "return_pct_range": [
+            -10.9244,
+            29.2033
+          ],
+          "vol_pct_range": [
+            2.0378,
+            6.194
+          ]
+        },
+        "per_ticker": {
+          "ALGM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "ATI": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRKR": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRX": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "DINO": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "OLN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "PLNT": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "RYAN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "SFM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "WMG": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          }
+        },
+        "unavailable_count": 0,
+        "unavailable_tickers": [],
+        "usable_count": 10,
+        "valid": true
+      },
+      "year": 2022
+    },
+    {
+      "end": "2023-01-31",
+      "month": 1,
+      "monthly_return_pct": 6.7381,
+      "pair_id": "rally_pair",
+      "realized_vol_pct": 1.031,
+      "regime": "rally",
+      "role": "holdout",
+      "start": "2023-01-01",
+      "watchlist_viability": {
+        "checked_dates": {
+          "end": "2023-01-31",
+          "start": "2023-01-02"
+        },
+        "movement": {
+          "per_ticker": {
+            "ALGM": {
+              "return_pct": 30.1842,
+              "vol_pct": 3.6288
+            },
+            "ATI": {
+              "return_pct": 23.1055,
+              "vol_pct": 2.0487
+            },
+            "BRKR": {
+              "return_pct": 1.5202,
+              "vol_pct": 2.2002
+            },
+            "BRX": {
+              "return_pct": 4.2073,
+              "vol_pct": 2.1328
+            },
+            "DINO": {
+              "return_pct": 14.6022,
+              "vol_pct": 1.8575
+            },
+            "OLN": {
+              "return_pct": 23.334,
+              "vol_pct": 2.1529
+            },
+            "PLNT": {
+              "return_pct": 8.3173,
+              "vol_pct": 1.5374
+            },
+            "RYAN": {
+              "return_pct": 2.0594,
+              "vol_pct": 1.6252
+            },
+            "SFM": {
+              "return_pct": 3.3312,
+              "vol_pct": 1.7827
+            },
+            "WMG": {
+              "return_pct": 3.1118,
+              "vol_pct": 2.9278
+            }
+          },
+          "return_pct_range": [
+            1.5202,
+            30.1842
+          ],
+          "vol_pct_range": [
+            1.5374,
+            3.6288
+          ]
+        },
+        "per_ticker": {
+          "ALGM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "ATI": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRKR": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRX": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "DINO": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "OLN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "PLNT": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "RYAN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "SFM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "WMG": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          }
+        },
+        "unavailable_count": 0,
+        "unavailable_tickers": [],
+        "usable_count": 10,
+        "valid": true
+      },
+      "year": 2023
+    },
+    {
+      "end": "2022-12-31",
+      "month": 12,
+      "monthly_return_pct": -5.6934,
+      "pair_id": "selloff_pair",
+      "realized_vol_pct": 1.1331,
+      "regime": "selloff",
+      "role": "holdout",
+      "start": "2022-12-01",
+      "watchlist_viability": {
+        "checked_dates": {
+          "end": "2022-12-30",
+          "start": "2022-12-01"
+        },
+        "movement": {
+          "per_ticker": {
+            "ALGM": {
+              "return_pct": -3.6276,
+              "vol_pct": 2.0901
+            },
+            "ATI": {
+              "return_pct": -0.533,
+              "vol_pct": 2.5991
+            },
+            "BRKR": {
+              "return_pct": 0.9899,
+              "vol_pct": 1.7722
+            },
+            "BRX": {
+              "return_pct": -1.306,
+              "vol_pct": 1.0707
+            },
+            "DINO": {
+              "return_pct": -14.7107,
+              "vol_pct": 3.1377
+            },
+            "OLN": {
+              "return_pct": -6.3672,
+              "vol_pct": 1.7605
+            },
+            "PLNT": {
+              "return_pct": -0.8431,
+              "vol_pct": 1.684
+            },
+            "RYAN": {
+              "return_pct": 1.4914,
+              "vol_pct": 1.4235
+            },
+            "SFM": {
+              "return_pct": -5.1011,
+              "vol_pct": 1.3659
+            },
+            "WMG": {
+              "return_pct": 2.3677,
+              "vol_pct": 1.5156
+            }
+          },
+          "return_pct_range": [
+            -14.7107,
+            2.3677
+          ],
+          "vol_pct_range": [
+            1.0707,
+            3.1377
+          ]
+        },
+        "per_ticker": {
+          "ALGM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "ATI": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRKR": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRX": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "DINO": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "OLN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "PLNT": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "RYAN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "SFM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "WMG": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          }
+        },
+        "unavailable_count": 0,
+        "unavailable_tickers": [],
+        "usable_count": 10,
+        "valid": true
+      },
+      "year": 2022
+    },
+    {
+      "end": "2025-11-30",
+      "month": 11,
+      "monthly_return_pct": 0.0073,
+      "pair_id": "sideways_pair",
+      "realized_vol_pct": 0.9659,
+      "regime": "sideways",
+      "role": "holdout",
+      "start": "2025-11-01",
+      "watchlist_viability": {
+        "checked_dates": {
+          "end": "2025-11-28",
+          "start": "2025-11-03"
+        },
+        "movement": {
+          "per_ticker": {
+            "ALGM": {
+              "return_pct": -7.7747,
+              "vol_pct": 2.9942
+            },
+            "ATI": {
+              "return_pct": 2.2209,
+              "vol_pct": 1.3474
+            },
+            "BRKR": {
+              "return_pct": 26.0915,
+              "vol_pct": 2.3043
+            },
+            "BRX": {
+              "return_pct": -0.1909,
+              "vol_pct": 1.0841
+            },
+            "DINO": {
+              "return_pct": -0.0086,
+              "vol_pct": 1.8152
+            },
+            "OLN": {
+              "return_pct": 6.2601,
+              "vol_pct": 2.8103
+            },
+            "PLNT": {
+              "return_pct": 21.8124,
+              "vol_pct": 3.3639
+            },
+            "RYAN": {
+              "return_pct": 9.175,
+              "vol_pct": 1.3907
+            },
+            "SFM": {
+              "return_pct": -0.0119,
+              "vol_pct": 2.2628
+            },
+            "WMG": {
+              "return_pct": -7.7872,
+              "vol_pct": 2.0779
+            }
+          },
+          "return_pct_range": [
+            -7.7872,
+            26.0915
+          ],
+          "vol_pct_range": [
+            1.0841,
+            3.3639
+          ]
+        },
+        "per_ticker": {
+          "ALGM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "ATI": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRKR": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "BRX": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "DINO": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "OLN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "PLNT": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "RYAN": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "SFM": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          },
+          "WMG": {
+            "end_error": null,
+            "start_error": null,
+            "usable": true
+          }
+        },
+        "unavailable_count": 0,
+        "unavailable_tickers": [],
+        "usable_count": 10,
+        "valid": true
+      },
+      "year": 2025
+    }
+  ],
+  "manifest_version": 4,
+  "proxy_ticker": "SPY",
+  "required_regimes": [
+    "high_volatility",
+    "rally",
+    "selloff",
+    "sideways"
+  ],
+  "selection_seed": 20260915,
+  "status": "proposed",
+  "thresholds": {
+    "high_volatility_pct": 1.5,
+    "rally_pct": 5.0,
+    "selloff_pct": -5.0,
+    "sideways_max_vol_pct": 1.0,
+    "sideways_return_band_pct": [
+      -2.0,
+      2.0
+    ]
+  },
+  "watchlist_audit_method": "data-availability only, never a tradability/movement judgement: for each fixed-watchlist ticker, call the EXISTING production technical-analysis path (run_backtest.fetch_technicals -> maverick's TechnicalService.get_full_analysis) at the episode's first and last real (weekday) trading day -- the two extremes of the technical service's own trailing-lookback window, which only grows with time, so a pass at both ends implies at least as much history on every day between (not independently re-checked). A ticker erroring at either end is 'unavailable' for that episode (insufficient/missing listing history, delisting, or a ticker-identity failure). A separate, purely descriptive monthly return/volatility range for the full watchlist (the same compute_month_metrics used for SPY, applied per ticker) is recorded alongside for visibility only -- it never affects validity; a quiet, low-movement name is valid evidence, especially in a sideways regime, never a reason to fail an episode.",
+  "watchlist_audit_version": 1,
+  "watchlist_tickers": [
+    "ALGM",
+    "ATI",
+    "BRKR",
+    "BRX",
+    "DINO",
+    "OLN",
+    "PLNT",
+    "RYAN",
+    "SFM",
+    "WMG"
+  ]
+}
