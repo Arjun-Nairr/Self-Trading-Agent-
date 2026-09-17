@@ -390,6 +390,8 @@ path exists to extend — documented, not built speculatively. Conclusion
 unchanged: **keep Fundamentals V1 as unproven context**. Detail:
 `docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
 
+**2026-09-17c:** `fetch_news` trusted every article and cut to 4 headlines *before* checking timestamps — a bad `created_at` could reach the prompt. Fixed: pure `_articles_at_or_before_cutoff` validates + cuts to at-or-before `decision_cutoff_at` first (fail-closed on any bad timestamp); `_to_utc_rfc3339` rejects naive input. 6 new tests; gate/risk untouched.
+
 ---
 
 *Repo: `github.com/Arjun-Nairr/Self-Trading-Agent-`.*

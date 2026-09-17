@@ -174,3 +174,27 @@ The section above's own documentation claimed the pre-fill window started "stric
 `python verify.py`: **12/12 non-mutating suites pass** (backtest-harness pytest 213 → 219, plus the new alpaca-mcp pagination suite). Neon row counts and `backtest_state.json` (Round 2) confirmed byte-identical before and after this entire correction. No training, evaluation, smoke test, holdout, or live-paper process executed. The manifest remains at `status: "proposed"` (already reverted there by the prior 2026-09-17 pass; this correction never touched it, no field changed, content hash unaffected).
 
 **Nothing has run under either configuration. Conclusion unchanged: keep Fundamentals V1 as unproven context.**
+
+---
+
+## 2026-09-17c: the ordinary decision-time fetch never independently checked what it got back — corrected
+
+### The defect
+
+2026-09-17b closed the pre-fill gate's own window precisely, and gave `fetch_news` (the ordinary same-day Day-T fetch, unrelated to the gate) an exact RFC-3339 `end_at = decision_cutoff_at`. But `fetch_news` never verified what Alpaca actually returned against that boundary: it trusted every article in the response and truncated to the first four headlines before checking any `created_at`. A provider article outside the requested range, or one with a missing, malformed, or timezone-naive timestamp, could have reached the Day-T prompt — the same "trust the provider's own boundary interpretation" gap `_articles_in_window` already closed for the pre-fill gate's window, just never applied to this fetch.
+
+### The correction
+
+A new pure helper, `_articles_at_or_before_cutoff(articles, cutoff)` (`backtest-harness/run_backtest.py`), validates every article's `created_at` via the existing `_parse_news_timestamp` and keeps only those at-or-before `cutoff` — a single inclusive upper bound, no lower bound (the 7-day lookback stays an advisory scoping window, not an integrity boundary). It returns `None` — fail-closed — the instant any article's timestamp is missing, malformed, or naive. `fetch_news`'s generated script now returns every raw article per ticker (untruncated); the function applies this helper on the host, before the existing 4-headline prompt cap, and raises if validation fails for any ticker — halting the cycle through the exact same failure path the pre-existing incomplete-pagination check already uses. `_to_utc_rfc3339` was also hardened to raise `ValueError` on a naive `datetime` instead of silently converting it via the host machine's own local timezone (previously a real risk: the same naive input would produce a different, wrong UTC boundary on a different machine).
+
+### Architecture unchanged, as required
+
+The pre-fill gate, `risk_checker.py` (pure math, zero tool access), sizing, rules, watchlist, fundamentals, dashboard, and evaluation design are all untouched. Positive news still cannot create a buy; exits remain unaffected — this correction touches only `fetch_news`'s own internal validation.
+
+### Tests
+
+6 new zero-network tests in `test_execution_semantics.py` (225 total in `backtest-harness`): a post-close article excluded from the ordinary decision-time filter; an article exactly at the cutoff included; malformed and timezone-naive timestamps failing the filter closed, both as a direct helper test and end-to-end through `fetch_news` (raises, halting the cycle); `fetch_news` forwarding the exact RFC-3339 cutoff and 7-day-back start while validating before truncating; and `_to_utc_rfc3339` rejecting a naive `datetime`.
+
+`python verify.py`: **12/12 non-mutating suites pass** (backtest-harness pytest 219 → 225). Neon row counts and `backtest_state.json` (Round 2) unchanged — no run, training, evaluation, smoke test, holdout, or live-paper process executed. Manifest remains `status: "proposed"`, untouched.
+
+**Nothing has run under either configuration. Conclusion unchanged: keep Fundamentals V1 as unproven context.**

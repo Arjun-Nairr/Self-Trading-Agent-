@@ -46,7 +46,7 @@ from run_backtest import (
     PRE_FILL_NEWS_VETO_REASON, PRE_FILL_NEWS_UNAVAILABLE_REASON,
     _pre_fill_news_window, _parse_news_timestamp, _articles_in_window,
     _build_pre_fill_confirmation_prompt, _parse_pre_fill_confirmation,
-    _session_close_at, _to_utc_rfc3339,
+    _session_close_at, _to_utc_rfc3339, _articles_at_or_before_cutoff,
 )
 from anonymize import LeakDetected, RunMasking  # noqa: E402
 from risk_checker import (  # noqa: E402
@@ -3944,6 +3944,109 @@ def test_pre_fill_gate_incomplete_pagination_fails_the_buy_closed():
     assert events[0]["reason"] == PRE_FILL_NEWS_UNAVAILABLE_REASON
     print("  ok  incomplete pagination coverage fails the affected queued BUY closed, "
           "same as any other unavailable-feed case")
+
+
+def test_decision_time_filter_excludes_a_post_close_article():
+    """Requirement 1 (2026-09-17c): a headline published AFTER
+    decision_cutoff_at must never enter the ordinary Day-T context -- the
+    exact leak fetch_news used to risk by trusting every returned article
+    before truncating to 4 headlines."""
+    cutoff = datetime(2026, 2, 17, 21, 0, 0, tzinfo=timezone.utc)  # 16:00 ET close, in UTC
+    post_close = {"headline": "after close", "created_at": "2026-02-17T21:00:01+00:00"}
+    assert _articles_at_or_before_cutoff([post_close], cutoff) == []
+    print("  ok  a post-close article is excluded from the ordinary decision-time filter")
+
+
+def test_decision_time_filter_includes_an_article_exactly_at_the_cutoff():
+    """Requirement 1: the boundary is inclusive at decision_cutoff_at --
+    include at-or-before, exclude strictly after."""
+    cutoff = datetime(2026, 2, 17, 21, 0, 0, tzinfo=timezone.utc)
+    at_cutoff = {"headline": "right at close", "created_at": "2026-02-17T21:00:00+00:00"}
+    result = _articles_at_or_before_cutoff([at_cutoff], cutoff)
+    assert result is not None and [a["headline"] for a in result] == ["right at close"]
+    print("  ok  an article exactly at decision_cutoff_at is included (inclusive upper bound)")
+
+
+def test_decision_time_filter_fails_closed_on_malformed_or_naive_timestamps():
+    """Requirement 1: a missing, malformed, or timezone-naive created_at
+    must fail the whole ordinary-fetch filter closed (None) -- the bad
+    article is never silently dropped while the rest are trusted."""
+    cutoff = datetime(2026, 2, 17, 21, 0, 0, tzinfo=timezone.utc)
+    good = {"headline": "fine", "created_at": "2026-02-17T20:00:00+00:00"}
+    malformed = {"headline": "bad", "created_at": "not-a-timestamp"}
+    naive = {"headline": "naive", "created_at": "2026-02-17T20:00:00"}
+    assert _articles_at_or_before_cutoff([good, malformed], cutoff) is None
+    assert _articles_at_or_before_cutoff([good, naive], cutoff) is None
+    print("  ok  malformed and timezone-naive created_at values fail the ordinary "
+          "decision-time filter closed, never silently omitted or trusted")
+
+
+def test_fetch_news_forwards_the_exact_rfc3339_cutoff_and_validates_before_truncating():
+    """Requirements 2/3 end-to-end: fetch_news must send the exact
+    RFC-3339 decision_cutoff_at (and 7-day-back start) to the provider,
+    and must validate + cut every returned article to at-or-before that
+    cutoff BEFORE truncating to 4 headlines -- proven by returning 5
+    in-window articles plus one post-cutoff leak, and checking the leak
+    never survives into the result while the 4-headline cap still holds."""
+    captured = {}
+    articles = [
+        {"headline": f"h{i}", "created_at": f"2026-02-17T1{i}:00:00+00:00",
+         "summary": "s", "symbols": ["OLN"]}
+        for i in range(5)
+    ]
+    leak = {"headline": "leak", "created_at": "2026-02-17T21:00:01+00:00",
+            "summary": "s", "symbols": ["OLN"]}
+
+    def fake_run_in(service, script):
+        captured["service"] = service
+        captured["script"] = script
+        return json.dumps({"news": {"OLN": articles + [leak]}})
+
+    decision_cutoff_at = datetime(2026, 2, 17, 16, 0, 0, tzinfo=_ET).isoformat()  # 21:00 UTC
+    with patch("run_backtest.run_in", side_effect=fake_run_in):
+        result = fetch_news(["OLN"], date(2026, 2, 17), decision_cutoff_at)
+    assert captured["service"] == "alpaca-mcp"
+    assert "2026-02-17T21:00:00Z" in captured["script"], captured["script"]
+    assert "2026-02-10T21:00:00Z" in captured["script"], captured["script"]  # 7 days back
+    headlines = [a["headline"] for a in result["OLN"]]
+    assert "leak" not in headlines
+    assert len(result["OLN"]) == 4
+    print("  ok  fetch_news forwards the exact RFC-3339 cutoff and validates every "
+          "article's timestamp before truncating to 4 headlines")
+
+
+def test_fetch_news_fails_the_cycle_closed_on_a_malformed_article_timestamp():
+    """Requirement 2: a provider article with an unverifiable timestamp
+    must halt the cycle through fetch_news's own existing failure path,
+    the same way incomplete pagination already does -- never silently
+    omitted, never trusted into the prompt."""
+    def fake_run_in(service, script):
+        return json.dumps({"news": {"OLN": [
+            {"headline": "bad", "created_at": "not-a-timestamp", "summary": "", "symbols": []},
+        ]}})
+
+    decision_cutoff_at = datetime(2026, 2, 17, 16, 0, 0, tzinfo=_ET).isoformat()
+    with patch("run_backtest.run_in", side_effect=fake_run_in):
+        try:
+            fetch_news(["OLN"], date(2026, 2, 17), decision_cutoff_at)
+            raise AssertionError("expected fetch_news to raise on a malformed article timestamp")
+        except RuntimeError:
+            pass
+    print("  ok  fetch_news halts the cycle rather than silently omitting or trusting "
+          "a malformed article timestamp")
+
+
+def test_to_utc_rfc3339_rejects_a_naive_datetime():
+    """Requirement 3: a naive datetime must never be silently interpreted
+    against the host machine's own local timezone."""
+    naive = datetime(2026, 2, 17, 16, 0, 0)
+    try:
+        _to_utc_rfc3339(naive)
+        raise AssertionError("expected _to_utc_rfc3339 to reject a naive datetime")
+    except ValueError:
+        pass
+    print("  ok  _to_utc_rfc3339 rejects a timezone-naive datetime instead of silently "
+          "using the host machine's local timezone")
 
 
 def main():

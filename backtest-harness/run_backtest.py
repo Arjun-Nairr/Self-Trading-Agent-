@@ -1568,7 +1568,20 @@ def fetch_news(tickers: list[str], day: date, decision_cutoff_at: str) -> dict[s
     instead of a bare date. Raises (fails the whole cycle, the existing
     behavior for any news-fetch problem -- this wrapper has no per-ticker
     catch, unlike fetch_news_window's own) if pagination could not be
-    proven complete for any ticker."""
+    proven complete for any ticker.
+
+    2026-09-17c correction: the remote fetch used to trust every returned
+    article and truncate straight to 4 BEFORE any client-side timestamp
+    check -- the same "provider query is only ever a superset" gap the
+    pre-fill gate's own _articles_in_window already closed for ITS window,
+    just never applied here. The remote script below now returns every
+    raw article per ticker, untruncated; _articles_at_or_before_cutoff
+    then validates and cuts to decision_cutoff_at ON THE HOST, before the
+    4-headline prompt cap is ever applied -- a provider response outside
+    the requested range, or one with a missing/malformed/naive timestamp,
+    now raises here and halts the cycle through this function's own
+    existing failure path, exactly like the incomplete-pagination check
+    below already does, instead of silently entering the Day-T prompt."""
     end_dt = datetime.fromisoformat(decision_cutoff_at)
     start_dt = end_dt - timedelta(days=7)
     start_utc, end_utc = _to_utc_rfc3339(start_dt), _to_utc_rfc3339(end_dt)
@@ -1585,14 +1598,27 @@ async def main():
                 f"incomplete pagination coverage for {{t}} in [{start_utc}, {end_utc}] "
                 "-- cannot guarantee no headline was missed"
             )
-        out[t] = [{{"headline": a["headline"], "created_at": a["created_at"],
-                    "summary": a.get("summary", "")[:200], "symbols": a.get("symbols", [])}}
-                  for a in result["articles"][:4]]
+        out[t] = result["articles"]
     print(json.dumps({{"news": out}}))
 
 asyncio.run(main())
 '''
-    return json_from(run_in("alpaca-mcp", script))["news"]
+    raw = json_from(run_in("alpaca-mcp", script))["news"]
+    out: dict[str, list] = {}
+    for t in tickers:
+        validated = _articles_at_or_before_cutoff(raw.get(t, []), end_dt)
+        if validated is None:
+            raise RuntimeError(
+                f"{t}: a decision-time news article has a missing, malformed, or "
+                "timezone-naive created_at -- failing the cycle closed rather than "
+                "trusting an unverifiable timestamp into the Day-T prompt"
+            )
+        out[t] = [
+            {"headline": a["headline"], "created_at": a["created_at"],
+             "summary": a.get("summary", "")[:200], "symbols": a.get("symbols", [])}
+            for a in validated[:4]
+        ]
+    return out
 
 
 # ---------------------------------------------------------------------
@@ -1729,13 +1755,45 @@ def _articles_in_window(
     return out
 
 
+def _articles_at_or_before_cutoff(articles: list[dict], cutoff: datetime) -> list[dict] | None:
+    """Pure. The ordinary Day-T decision-time boundary (2026-09-17c),
+    distinct from the pre-fill gate's own _articles_in_window: keeps only
+    articles AT OR BEFORE `cutoff` (the same real decision_cutoff_at this
+    cycle freezes into every order it queues today), no lower bound --
+    an article published exactly at the decision cutoff was genuinely
+    knowable at that instant, so it belongs to the decision; anything
+    after it is excluded, never included, since it wasn't knowable yet.
+
+    Returns None -- the fail-closed signal -- the instant ANY article has
+    a missing, malformed, or timezone-naive created_at (via
+    _parse_news_timestamp), same as _articles_in_window: an unverifiable
+    timestamp is never silently omitted or trusted, it fails the whole
+    fetch closed."""
+    out = []
+    for a in articles:
+        dt = _parse_news_timestamp(a.get("created_at", ""))
+        if dt is None:
+            return None
+        if dt <= cutoff:
+            out.append(a)
+    return out
+
+
 def _to_utc_rfc3339(dt: datetime) -> str:
     """Pure. A tz-aware `dt` (any offset, e.g. America/New_York -- DST-
     correct via zoneinfo's own lazy offset resolution, never a fixed
     -4/-5 assumption) as an exact RFC-3339 UTC timestamp
     ("2026-06-01T20:00:00Z"), the format both get_historical_news's
     `start_at`/`end_at` params expect and the format this project always
-    sends them in -- never a date-only string."""
+    sends them in -- never a date-only string.
+
+    Raises ValueError on a naive `dt` (2026-09-17c) instead of silently
+    letting `.astimezone()` interpret it against whatever the HOST
+    MACHINE's own local timezone happens to be -- a naive input here
+    would otherwise produce a DIFFERENT, wrong UTC boundary depending on
+    the deploying machine, never a decision-time-safe one."""
+    if dt.tzinfo is None:
+        raise ValueError(f"_to_utc_rfc3339 requires a timezone-aware datetime, got naive {dt!r}")
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 

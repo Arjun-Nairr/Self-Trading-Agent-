@@ -678,6 +678,30 @@ document; it is implemented.**
       prior pass; this pass never touched it). No run, training,
       evaluation, smoke test, holdout, or live-paper process executed.
 
+    **2026-09-17c — a further, narrower gap: the ordinary decision-time
+    fetch never independently checked what it got back.** Review found
+    `fetch_news` (the same-day Day-T fetch above, not the gate) sent an
+    exact RFC-3339 cutoff to Alpaca but trusted every returned article and
+    truncated to 4 headlines BEFORE validating any timestamp — a provider
+    article outside the requested range, or with a missing/malformed/
+    timezone-naive `created_at`, could have reached the Day-T prompt.
+    Corrected: a new pure helper, `_articles_at_or_before_cutoff`
+    (`run_backtest.py`), validates every article's `created_at` and keeps
+    only those at-or-before `decision_cutoff_at` (single inclusive upper
+    bound — no lower bound, since the 7-day lookback is already an
+    advisory scoping concern, not an integrity boundary); returns `None`
+    — fail-closed — on any missing/malformed/naive timestamp, which
+    `fetch_news` now raises on before ever truncating to the 4-headline
+    prompt cap. `_to_utc_rfc3339` now rejects a naive `datetime` outright
+    instead of silently converting it via the host machine's own local
+    timezone. 6 new zero-network tests (`test_execution_semantics.py`):
+    post-close exclusion, exact-cutoff inclusion, malformed/naive fail-
+    closed (helper + end-to-end `fetch_news`), exact-cutoff forwarding,
+    naive-datetime rejection. Pre-fill gate, risk checker, sizing,
+    watchlist, and evaluation design all unchanged. Manifest still
+    `proposed`, untouched; no run/training/evaluation/smoke/holdout/
+    live-paper process executed; no Neon writes.
+
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.
 
