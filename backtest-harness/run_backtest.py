@@ -61,7 +61,7 @@ import sys
 import tempfile
 import uuid
 from dataclasses import dataclass, field, replace as dataclass_replace
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -417,13 +417,19 @@ class QueuedOrder:
     queued_day_index: int
     decision: dict
     decision_id: str
-    # 2026-09-17 (pre-fill news gate): the real calendar date this order was
-    # queued on (ISO, "" for a pre-migration order resumed from an old state
-    # file -- see Portfolio.from_dict). This is what makes the overnight
-    # pre-fill news window (see apply_pre_fill_news_gate) durable and
-    # independently auditable per order, rather than only inferable from
-    # queued_day_index + the run's own start date.
-    queued_date: str = ""
+    # 2026-09-17 (pre-fill news gate, corrected same day): the REAL,
+    # timezone-aware timestamp of the actual regular-session close on the
+    # day this order was queued (ISO-8601, e.g.
+    # "2026-06-01T16:00:00-04:00" ordinary, "...T13:00:00-05:00" a half
+    # day -- see _session_close_at/fetch_trading_calendar_day, never a
+    # hard-coded 16:00). "" for a pre-migration order resumed from an old
+    # state file that predates this field, or one written under the
+    # FIRST version of this gate (which stored only a bare calendar date)
+    # -- both fail closed for BUY execution rather than guessing a cutoff
+    # (see _pre_fill_news_window). This is what makes the overnight
+    # pre-fill news window durable and independently auditable per order,
+    # never inferred later from queued_day_index or a calendar date.
+    decision_cutoff_at: str = ""
     strategy_profile: str = PROFILE_BASE
     min_reward_risk_used: float = PROFILE_MIN_REWARD_RISK[PROFILE_BASE]
 
@@ -546,7 +552,16 @@ class Portfolio:
                 # misrepresent what it was actually validated against. See
                 # PROFILE_LEGACY.
                 QueuedOrder(**{
-                    **o, "decision_id": o.get("decision_id", ""),
+                    **{k: v for k, v in o.items() if k != "queued_date"},
+                    # queued_date: the FIRST pre-fill-gate version's own
+                    # field (a bare calendar date), superseded same-day by
+                    # decision_cutoff_at (a real timestamp) -- dropped
+                    # here rather than passed through, since QueuedOrder
+                    # no longer accepts it at all. A resumed order that
+                    # only ever had queued_date correctly falls back to
+                    # decision_cutoff_at's own "" dataclass default
+                    # (fails closed for BUY execution), never crashes.
+                    "decision_id": o.get("decision_id", ""),
                     "strategy_profile": o.get("strategy_profile", PROFILE_LEGACY),
                     "min_reward_risk_used": o.get(
                         "min_reward_risk_used", PROFILE_MIN_REWARD_RISK[PROFILE_LEGACY]),
@@ -1538,7 +1553,25 @@ asyncio.run(main())
     return json_from(run_in("maverick-mcp", script))["tech"]
 
 
-def fetch_news(tickers: list[str], day: date) -> dict[str, list]:
+def fetch_news(tickers: list[str], day: date, decision_cutoff_at: str) -> dict[str, list]:
+    """The cycle's own decision-time news fetch -- distinct from the
+    pre-fill gate's own fetch_news_window. `decision_cutoff_at` (2026-09-17
+    correction) is the SAME real, timezone-aware session-close timestamp
+    this cycle freezes into every order it queues today (see run_day) --
+    passed here explicitly as this fetch's own real END boundary, RFC-3339
+    UTC, so an end-of-day decision can never accidentally receive a
+    same-day headline published AFTER that close (a date-only `end`
+    param risked exactly that: Alpaca's own day-boundary interpretation,
+    not this project's real decision cutoff, silently decided what
+    counted as "today"). `lookback_days=7`'s own meaning is unchanged --
+    still 7 real days back from the cutoff, just now an exact timestamp
+    instead of a bare date. Raises (fails the whole cycle, the existing
+    behavior for any news-fetch problem -- this wrapper has no per-ticker
+    catch, unlike fetch_news_window's own) if pagination could not be
+    proven complete for any ticker."""
+    end_dt = datetime.fromisoformat(decision_cutoff_at)
+    start_dt = end_dt - timedelta(days=7)
+    start_utc, end_utc = _to_utc_rfc3339(start_dt), _to_utc_rfc3339(end_dt)
     script = f'''
 import asyncio, json
 from server import get_historical_news
@@ -1546,10 +1579,15 @@ from server import get_historical_news
 async def main():
     out = {{}}
     for t in {tickers!r}:
-        arts = await get_historical_news(t, "{day}", lookback_days=7)
+        result = await get_historical_news(t, {start_utc!r}, {end_utc!r})
+        if not result["complete"]:
+            raise RuntimeError(
+                f"incomplete pagination coverage for {{t}} in [{start_utc}, {end_utc}] "
+                "-- cannot guarantee no headline was missed"
+            )
         out[t] = [{{"headline": a["headline"], "created_at": a["created_at"],
                     "summary": a.get("summary", "")[:200], "symbols": a.get("symbols", [])}}
-                  for a in arts[:4]]
+                  for a in result["articles"][:4]]
     print(json.dumps({{"news": out}}))
 
 asyncio.run(main())
@@ -1587,33 +1625,58 @@ _PRE_FILL_FILL_HOUR, _PRE_FILL_FILL_MINUTE = 9, 45
 _EASTERN = ZoneInfo("America/New_York")
 
 
-def _pre_fill_news_window(queued_date_iso: str, fill_day: date) -> tuple[datetime, datetime] | None:
-    """Pure. The overnight/pre-fill news window for one queued BUY:
-    STRICTLY AFTER the original decision day's close (the start of the
-    very next calendar day, 00:00 ET) through the actual 09:45 ET fill
-    cutoff on `fill_day`.
+def _session_close_at(day: date, close_hhmm: str) -> str:
+    """Pure. `close_hhmm`: Alpaca's real ET-local 'HH:MM' session close for
+    `day` (e.g. "16:00" an ordinary session, "13:00" a half day -- see
+    fetch_trading_calendar_day, never a hard-coded assumption). Returns
+    the real, timezone-aware ISO-8601 timestamp of that exact close --
+    this, not a bare calendar date, is what a queued BUY's
+    decision_cutoff_at stores (2026-09-17 correction: the first version
+    of this gate stored only a date and started its window at the
+    following midnight, silently skipping any headline published between
+    the REAL close and midnight -- exactly when earnings/major
+    announcements often land)."""
+    hour, minute = (int(p) for p in close_hhmm.split(":"))
+    return datetime(day.year, day.month, day.day, hour, minute, 0, tzinfo=_EASTERN).isoformat()
 
-    Any headline dated on or before the decision day was already visible
-    to that day's own decision-time fetch (fetch_news, as_of=that day) --
-    this window begins the INSTANT after it, so nothing is double-counted
-    (requirement 6: an already-seen article never re-enters the delta
-    check) and nothing is skipped. Spans a weekend/holiday gap correctly
-    by construction, with no special-casing needed: queued Friday, filled
-    Monday still yields exactly [Saturday 00:00 ET, Monday 09:45 ET].
+
+def _pre_fill_news_window(
+    decision_cutoff_iso: str, fill_day: date,
+) -> tuple[datetime, datetime] | None:
+    """Pure. The overnight/pre-fill news window for one queued BUY:
+    STRICTLY AFTER the order's own real `decision_cutoff_at` (the actual
+    regular-session close on the decision day, half-day-aware -- see
+    _session_close_at) THROUGH the actual 09:45 ET fill cutoff on
+    `fill_day`, inclusive.
+
+    Any headline published at or before the real decision cutoff was
+    already visible to that day's own decision-time fetch (fetch_news,
+    end_at=that same cutoff -- see run_day) -- this window begins the
+    INSTANT after it, so nothing is double-counted (requirement 6: an
+    already-seen headline never re-enters the delta check) and nothing
+    in between is skipped, including same-day after-close headlines a
+    date-only boundary would have missed. Spans a weekend/holiday gap
+    correctly by construction: queued Friday (close, say, 16:00 ET),
+    filled Monday still yields exactly (Friday 16:00 ET, Monday 09:45
+    ET] -- covering Friday evening, the whole weekend, and Monday
+    pre-market/first-15-minutes, never just from midnight.
 
     Returns None -- the caller's fail-closed signal -- when
-    `queued_date_iso` is empty or unparseable (a pre-migration order
-    resumed from a state file that predates this field, or genuine
-    corruption); never guesses a boundary from queued_day_index or
-    anything else."""
-    if not queued_date_iso:
+    `decision_cutoff_iso` is empty, unparseable, or NAIVE (no timezone at
+    all -- exactly as ambiguous as unparseable, since there is no way to
+    know what it means). Covers both a pre-migration order (no field at
+    all, "") and one written under this gate's FIRST version (a bare
+    calendar date -- `datetime.fromisoformat` parses that successfully
+    but as a NAIVE midnight, which the tzinfo check below then catches)
+    -- neither ever guesses a real boundary."""
+    if not decision_cutoff_iso:
         return None
     try:
-        queued_date = date.fromisoformat(queued_date_iso)
+        window_start = datetime.fromisoformat(decision_cutoff_iso)
     except ValueError:
         return None
-    gap_start = queued_date + timedelta(days=1)
-    window_start = datetime(gap_start.year, gap_start.month, gap_start.day, 0, 0, 0, tzinfo=_EASTERN)
+    if window_start.tzinfo is None:
+        return None
     window_end = datetime(
         fill_day.year, fill_day.month, fill_day.day,
         _PRE_FILL_FILL_HOUR, _PRE_FILL_FILL_MINUTE, 0, tzinfo=_EASTERN,
@@ -1666,29 +1729,45 @@ def _articles_in_window(
     return out
 
 
-def fetch_news_window(tickers: list[str], gap_start: date, fill_day: date) -> dict[str, dict]:
+def _to_utc_rfc3339(dt: datetime) -> str:
+    """Pure. A tz-aware `dt` (any offset, e.g. America/New_York -- DST-
+    correct via zoneinfo's own lazy offset resolution, never a fixed
+    -4/-5 assumption) as an exact RFC-3339 UTC timestamp
+    ("2026-06-01T20:00:00Z"), the format both get_historical_news's
+    `start_at`/`end_at` params expect and the format this project always
+    sends them in -- never a date-only string."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def fetch_news_window(tickers: list[str], start_at: datetime, end_at: datetime) -> dict[str, dict]:
     """Real I/O -- the gate's own news fetch, DISTINCT from fetch_news
-    (that cycle's own decision-time fetch, as_of the decision day itself).
-    Reuses the SAME existing alpaca-mcp `get_historical_news` tool
-    UNMODIFIED (no new MCP tool) -- `lookback_days` is computed so its own
-    date-based [start, end] range covers [gap_start, fill_day] inclusive
-    for every ticker in one round trip.
+    (that cycle's own decision-time fetch). `start_at`/`end_at` are the
+    EXACT, tz-aware boundaries (a queued BUY's own real decision_cutoff_at
+    through the actual 09:45 ET fill cutoff) -- converted to RFC-3339 UTC
+    (_to_utc_rfc3339) and sent straight through to alpaca-mcp's
+    `get_historical_news`, which now paginates internally and reports
+    `complete` (2026-09-17 correction: previously a date-only [gap_start,
+    fill_day] range was sent, which could silently include or exclude
+    same-day headlines depending on which side of midnight/close they
+    landed -- see this file's own header comment above).
 
     Per-ticker resilient (like fetch_technicals, UNLIKE fetch_news's own
-    all-or-nothing script): one ticker's fetch failure is caught and
-    returned as that ticker's own {"error": ...} entry, never an
-    exception that kills every other ticker's result too -- so a real
-    outage only ever cancels the order(s) it actually affects (requirement
-    3's "unavailable feed"), never the whole batch.
+    all-or-nothing script): one ticker's fetch failure -- INCLUDING
+    incomplete pagination, `complete: False` -- is caught and returned as
+    that ticker's own {"error": ...} entry, never an exception that kills
+    every other ticker's result too. A real outage OR unproven-complete
+    coverage only ever cancels the order(s) it actually affects
+    (requirement 3's "unavailable feed" / "if pagination... cannot
+    establish complete coverage, fail... closed"), never the whole batch.
 
     Every returned article keeps its FULL raw `created_at` (never
     fetch_news's 4-article/200-char prompt-size truncation) because this
     gate cuts precisely by real timestamp afterward (_articles_in_window)
-    -- a date-only provider query can only ever return a SUPERSET of the
-    true window; the exact cut always happens client-side against each
-    article's own created_at, never trusted from the query's date bounds
-    alone (requirement 2)."""
-    lookback_days = max((fill_day - gap_start).days, 0)
+    -- even an exact-timestamp provider query is only ever trusted as a
+    superset; the exact cut always happens client-side against each
+    article's own created_at (requirement 2)."""
+    start_utc = _to_utc_rfc3339(start_at)
+    end_utc = _to_utc_rfc3339(end_at)
     script = f'''
 import asyncio, json
 from server import get_historical_news
@@ -1697,11 +1776,16 @@ async def main():
     out = {{}}
     for t in {tickers!r}:
         try:
-            arts = await get_historical_news(t, "{fill_day}", lookback_days={lookback_days})
+            result = await get_historical_news(t, {start_utc!r}, {end_utc!r})
+            if not result["complete"]:
+                raise RuntimeError(
+                    f"incomplete pagination coverage for {{t}} in "
+                    f"[{start_utc}, {end_utc}] -- cannot guarantee no headline was missed"
+                )
             out[t] = {{"articles": [
                 {{"headline": a["headline"], "created_at": a.get("created_at", ""),
                   "summary": a.get("summary", ""), "symbols": a.get("symbols", [])}}
-                for a in arts
+                for a in result["articles"]
             ]}}
         except Exception as e:
             out[t] = {{"error": str(e)[:200]}}
@@ -1792,11 +1876,11 @@ def apply_pre_fill_news_gate(
     by news availability (requirement 7 of the tests).
 
     Per queued BUY:
-      1. `_pre_fill_news_window(order.queued_date, fill_day)` -- None
-         (missing/unparseable queued_date) fails that order closed
-         immediately, no fetch even attempted.
-      2. One shared `fetch_news_fn(tickers, gap_start, fill_day)` call
-         covers every windowed BUY's own ticker (real Docker call in
+      1. `_pre_fill_news_window(order.decision_cutoff_at, fill_day)` --
+         None (missing/naive/unparseable decision_cutoff_at) fails that
+         order closed immediately, no fetch even attempted.
+      2. One shared `fetch_news_fn(tickers, window_start, fill_cutoff_at)`
+         call covers every windowed BUY's own ticker (real Docker call in
          production; per-ticker resilient -- see fetch_news_window). A
          ticker's own {"error": ...} entry fails that order closed
          (requirement 3's "unavailable feed").
@@ -1847,7 +1931,7 @@ def apply_pre_fill_news_gate(
     windows: dict[str, tuple[datetime, datetime]] = {}
     gate_events: list[dict] = []
     for order in buys:
-        window = _pre_fill_news_window(order.queued_date, fill_day)
+        window = _pre_fill_news_window(order.decision_cutoff_at, fill_day)
         if window is None:
             gate_events.append({
                 "order": order, "outcome": "cancel", "reason": PRE_FILL_NEWS_UNAVAILABLE_REASON,
@@ -1861,9 +1945,16 @@ def apply_pre_fill_news_gate(
     surviving_buys: list["QueuedOrder"] = []
 
     if windowed_orders:
-        gap_start = min(windows[o.decision_id][0] for o in windowed_orders).date()
+        # Every order's own window_end is identically fill_day's 09:45 ET
+        # (fill_day is one shared parameter) -- only window_start can
+        # genuinely differ between orders (different decision_cutoff_at),
+        # so the shared fetch spans the EARLIEST start through that one
+        # common end, and each order is still cut to its OWN precise
+        # start afterward (_articles_in_window, per order below).
+        earliest_start = min(windows[o.decision_id][0] for o in windowed_orders)
+        shared_end = windows[windowed_orders[0].decision_id][1]
         tickers = sorted({o.ticker for o in windowed_orders})
-        news = fetch_news_fn(tickers, gap_start, fill_day)
+        news = fetch_news_fn(tickers, earliest_start, shared_end)
 
         to_confirm: list["QueuedOrder"] = []
         batch: list[dict] = []
@@ -3873,6 +3964,25 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # below reads it, so a position opened today is at trading-day-offset 0,
     # not -1.
     working.trading_days_elapsed += 1
+
+    # 2026-09-17 (pre-fill news gate, corrected same day): today's REAL
+    # session close, fetched unconditionally (not only inside `if needed:`
+    # below) -- any decision queued today needs its own real
+    # decision_cutoff_at regardless of whether today also happens to
+    # resolve a pending order. `bars` is already confirmed non-empty
+    # above, so `day` IS a real trading day; a None calendar entry here is
+    # a genuine contradiction between data sources, not something to
+    # guess past (same discipline as the `if needed:` block below, which
+    # now reuses this same fetch instead of repeating it).
+    today_calendar = fetch_trading_calendar_day(day)
+    if today_calendar is None:
+        raise RuntimeError(
+            f"{day}: daily market data exists but Alpaca's trading calendar "
+            "says this is not a trading day -- contradictory data sources, "
+            "failing closed rather than guessing which one is right"
+        )
+    decision_cutoff_at = _session_close_at(day, today_calendar["close"])
+
     # 2026-08-29 correctness pass #4 (item 1): reset UNCONDITIONALLY, every
     # real trading day, regardless of whether `needed` (below) turns out
     # non-empty. The old reset lived INSIDE `if needed:`, so on any later
@@ -3920,18 +4030,11 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     if needed:
         # 2026-08-29 correctness pass #4 (item 4): the real session's own
         # open/close (supports a genuine half day, e.g. close "13:00")
-        # instead of assuming a fixed 09:30-16:00 grid. `bars` was already
-        # non-empty above, so `day` IS a real trading day -- a None here
-        # would be a genuine contradiction between fetch_bars and the
-        # calendar, not something to guess past.
-        calendar_day = fetch_trading_calendar_day(day)
-        if calendar_day is None:
-            raise RuntimeError(
-                f"{day}: daily market data exists but Alpaca's trading calendar "
-                "says this is not a trading day -- contradictory data sources, "
-                "failing closed rather than guessing which one is right"
-            )
-        full_session = _expected_session_bar_times(calendar_day["open"], calendar_day["close"])
+        # instead of assuming a fixed 09:30-16:00 grid. Reuses today_
+        # calendar (fetched unconditionally above, 2026-09-17) instead of
+        # repeating the same real call -- same contradiction-check, now
+        # performed once per cycle instead of twice.
+        full_session = _expected_session_bar_times(today_calendar["open"], today_calendar["close"])
         # Extended coverage (item 4): the FULL session grid, not just the
         # 09:30/09:45 boundaries -- a feed silently missing afternoon bars
         # used to let the walk stage iterate only what was there and the
@@ -4141,7 +4244,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     held_tickers = list(working.holdings)
     unheld_tickers = [t for t in tickers if t not in working.holdings]
     all_technicals = fetch_technicals(unheld_tickers + held_tickers, day)
-    news = fetch_news(unheld_tickers + held_tickers, day)
+    news = fetch_news(unheld_tickers + held_tickers, day, decision_cutoff_at)
     technicals = {t: all_technicals[t] for t in unheld_tickers if t in all_technicals}
     held_technicals = {t: all_technicals[t] for t in held_tickers if t in all_technicals}
     # Correction pass item B.2 (prior audit H2): a technicals outage must
@@ -4563,7 +4666,12 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             strategy_profile=working.profile_level, min_reward_risk_used=active_min_rr,
             data_timestamps={
                 "technical_as_of": day.isoformat(),
-                "news_as_of": day.isoformat(),
+                # 2026-09-17 correction: the REAL decision cutoff (exact
+                # session-close timestamp), not just the calendar date --
+                # this is the SAME boundary frozen onto the queued order
+                # itself (decision_cutoff_at) and the one the pre-fill
+                # gate's own window starts strictly after.
+                "news_as_of": decision_cutoff_at,
                 "latest_news_created_at": max(
                     (a.get("created_at") for a in news.get(real_ticker, []) if a.get("created_at")),
                     default=None,
@@ -4576,7 +4684,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             stop_price=proposal.stop_price, target_price=proposal.target_price,
             entry_price=entry_price,  # audit only, never used to fill
             queued_day_index=day_index, decision=decision, decision_id=decision_id,
-            queued_date=day.isoformat(),
+            decision_cutoff_at=decision_cutoff_at,
             strategy_profile=working.profile_level, min_reward_risk_used=active_min_rr,
         )
         working.pending_orders.append(order)

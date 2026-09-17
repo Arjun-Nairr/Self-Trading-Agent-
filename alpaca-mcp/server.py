@@ -454,10 +454,13 @@ async def get_order_status(decision_id: str) -> dict[str, Any]:
     }
 
 
+MAX_NEWS_PAGES = 20
+
+
 @mcp.tool()
 async def get_historical_news(
-    ticker: str, as_of: str, lookback_days: int = 7
-) -> list[dict[str, Any]]:
+    ticker: str, start_at: str, end_at: str
+) -> dict[str, Any]:
     """
     Point-in-time historical headlines for `ticker` -- the news half of the
     backtest harness's no-future-data gate (the other half is maverick-mcp's
@@ -465,42 +468,72 @@ async def get_historical_news(
     sourced and covers back to 2015 using this same account/credentials --
     no separate news source needed for backtesting.
 
-    as_of (YYYY-MM-DD): the simulated "now" for this backtest cycle. Only
-    headlines published on or before this date are ever returned -- nothing
-    after it can leak into a decision about this date. lookback_days: how
-    far back from as_of to search (default 7, matching a typical decision
-    cycle's news window). This tool is backtest-only; live cycles should
-    keep using google-news-rss-mcp, not this one, since Alpaca's News API
-    has its own separate rate limits we haven't load-tested for live use.
-    """
-    end = date.fromisoformat(as_of)
-    start = end - timedelta(days=lookback_days)
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{DATA_URL}/v1beta1/news",
-            params={
-                "symbols": ticker.upper(),
-                "start": start.isoformat(),
-                "end": end.isoformat(),
-                "limit": 50,
-                "sort": "desc",
-            },
-            headers=_headers(),
-            timeout=10,
-        )
-        resp.raise_for_status()
-        articles = resp.json().get("news", [])
+    2026-09-17 correction: `start_at`/`end_at` are now EXACT RFC-3339
+    timestamps (any valid offset -- callers in this project always send
+    UTC), not calendar dates. A date-only `end` risked silently including
+    same-day headlines published AFTER a decision's real cutoff (e.g. an
+    earnings release minutes later) -- exactly the lookahead class this
+    tool exists to prevent. This tool passes both bounds straight through
+    to Alpaca's own `start`/`end` query params and returns every matching
+    article for the caller to cut precisely against its own real boundary
+    semantics (`start_at < created_at <= end_at` in this project's own
+    callers) -- see run_backtest.py's fetch_news/fetch_news_window, which
+    do that exact cut themselves rather than trusting this endpoint's own
+    inclusivity either way.
 
-    return [
-        {
-            "headline": a["headline"],
-            "summary": a.get("summary", ""),
-            "created_at": a["created_at"],
-            "symbols": a.get("symbols", []),
-            "source_url": a.get("url", ""),
+    Paginates via Alpaca's `next_page_token` until exhausted, capped at
+    MAX_NEWS_PAGES. A real per-ticker window this narrow realistically
+    returns a handful of articles; hitting the cap means something is
+    genuinely wrong (a malformed/looping token, an unexpectedly huge
+    result) -- reported as INCOMPLETE rather than silently returning a
+    partial set that looks like the whole answer.
+
+    Returns {"articles": [...], "complete": bool}. `complete` is False
+    only when pagination could not be proven exhausted (the page cap was
+    hit while a `next_page_token` was still present) -- every caller in
+    this project treats complete=False as a hard failure for the ticker
+    it concerns, never as "good enough," per RULES.md/AGENTS.md's
+    unavailable-news-fails-closed requirement. This tool is backtest-only;
+    live cycles keep using google-news-rss-mcp, not this one.
+    """
+    async def _fetch_page(page_token: str | None) -> dict[str, Any]:
+        params = {
+            "symbols": ticker.upper(), "start": start_at, "end": end_at,
+            "limit": 50, "sort": "desc",
         }
-        for a in articles
-    ]
+        if page_token:
+            params["page_token"] = page_token
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{DATA_URL}/v1beta1/news", params=params, headers=_headers(), timeout=10,
+            )
+            resp.raise_for_status()
+            return resp.json()
+
+    articles: list[dict[str, Any]] = []
+    page_token: str | None = None
+    complete = False
+    for _ in range(MAX_NEWS_PAGES):
+        body = await _fetch_page(page_token)
+        articles.extend(body.get("news", []))
+        page_token = body.get("next_page_token")
+        if not page_token:
+            complete = True
+            break
+
+    return {
+        "articles": [
+            {
+                "headline": a["headline"],
+                "summary": a.get("summary", ""),
+                "created_at": a["created_at"],
+                "symbols": a.get("symbols", []),
+                "source_url": a.get("url", ""),
+            }
+            for a in articles
+        ],
+        "complete": complete,
+    }
 
 
 @mcp.tool()

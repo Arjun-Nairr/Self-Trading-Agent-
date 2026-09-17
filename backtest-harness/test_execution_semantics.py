@@ -42,10 +42,11 @@ from run_backtest import (
     InsufficientCandidateCoverageError, MIN_CANDIDATE_COVERAGE_FRACTION,
     _check_candidate_coverage, _full_candidate_status, _check_reset_allowed,
     _check_run_configuration_matches, REPO,
-    apply_pre_fill_news_gate, fetch_news_window,
+    apply_pre_fill_news_gate, fetch_news_window, fetch_news,
     PRE_FILL_NEWS_VETO_REASON, PRE_FILL_NEWS_UNAVAILABLE_REASON,
     _pre_fill_news_window, _parse_news_timestamp, _articles_in_window,
     _build_pre_fill_confirmation_prompt, _parse_pre_fill_confirmation,
+    _session_close_at, _to_utc_rfc3339,
 )
 from anonymize import LeakDetected, RunMasking  # noqa: E402
 from risk_checker import (  # noqa: E402
@@ -499,6 +500,8 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
 
     with patch("run_backtest.CHECKPOINT_PATH", checkpoint_path), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": str(run_start), "open": "09:30", "close": "16:00"}), \
          patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
          patch("run_backtest.fetch_news", return_value=fake_news), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
@@ -1407,6 +1410,8 @@ def test_stopped_out_today_resets_unconditionally_even_on_a_quiet_day():
 
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": str(run_start), "open": "09:30", "close": "16:00"}), \
          patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
          patch("run_backtest.fetch_news", return_value={"OLN": []}), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
@@ -2089,7 +2094,10 @@ def test_decision_time_sizing_rejects_placeholder_accepts_exact_and_journals_tim
     ts = queued2[0]["data_timestamps"]
     assert ts is not None, "an accepted decision must journal a non-null data_timestamps object"
     assert ts["technical_as_of"] == run_start.isoformat()
-    assert ts["news_as_of"] == run_start.isoformat()
+    # 2026-09-17 correction: news_as_of is now the REAL decision cutoff
+    # timestamp (the day's actual session close), not just a bare date --
+    # matches _run_backtest_scenario's own fake_calendar_day close "16:00".
+    assert ts["news_as_of"] == _session_close_at(run_start, "16:00")
     assert ts["latest_news_created_at"] == "2026-02-16T14:30:00+00:00", (
         f"must be the REAL latest of the actual news payload, not fabricated: {ts}"
     )
@@ -2386,6 +2394,8 @@ def _evidence_scenario(decisions_to_propose, tmp_dir):
 
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": str(run_start), "open": "09:30", "close": "16:00"}), \
          patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
          patch("run_backtest.fetch_news", return_value=fake_news), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
@@ -2661,6 +2671,8 @@ def test_evidence_write_failure_then_replay_does_not_call_hermes_twice():
 
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": str(run_start), "open": "09:30", "close": "16:00"}), \
          patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
          patch("run_backtest.fetch_news", return_value={"OLN": []}), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
@@ -2745,6 +2757,8 @@ def test_checkpoint_replay_derives_candidate_status_from_the_checkpoint_not_a_fr
 
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": str(run_start), "open": "09:30", "close": "16:00"}), \
          patch("run_backtest.fetch_technicals", return_value=both_technicals), \
          patch("run_backtest.fetch_news", return_value={"OLN": [], "DINO": []}), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
@@ -2823,6 +2837,8 @@ def test_checkpoint_replay_reuses_fundamentals_provenance_never_refetches():
 
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": str(run_start), "open": "09:30", "close": "16:00"}), \
          patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
          patch("run_backtest.fetch_news", return_value={"OLN": []}), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
@@ -2878,6 +2894,8 @@ def test_active_limits_reflects_a_non_default_risklimits_instance():
 
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": str(run_start), "open": "09:30", "close": "16:00"}), \
          patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
          patch("run_backtest.fetch_news", return_value={"OLN": []}), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
@@ -3098,6 +3116,8 @@ def _run_day_with_technicals(masking, technicals, fake_ask_hermes, checkpoint_pa
 
     with patch("run_backtest.CHECKPOINT_PATH", checkpoint_path), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": "2026-02-17", "open": "09:30", "close": "16:00"}), \
          patch("run_backtest.fetch_technicals", return_value=technicals), \
          patch("run_backtest.fetch_news", return_value={"OLN": [], "WMG": []}), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
@@ -3221,6 +3241,8 @@ def test_run_day_routes_recent_insights_through_the_leak_gate():
 
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": "2026-02-17", "open": "09:30", "close": "16:00"}), \
          patch("run_backtest.fetch_technicals", return_value=technicals), \
          patch("run_backtest.fetch_news", return_value={"OLN": [], "WMG": []}), \
          patch("run_backtest.fetch_recent_insights",
@@ -3414,25 +3436,30 @@ def test_dashboard_v2_never_references_the_private_run_configuration_table():
 # Docker/Neon/Hermes/broker I/O anywhere below (requirement 9).
 # ===========================================================================
 
-def _pre_fill_buy_order(ticker="OLN", alias="ALPHA", decision_id="dec-buy", queued_date="2026-02-17"):
+def _pre_fill_buy_order(ticker="OLN", alias="ALPHA", decision_id="dec-buy",
+                        decision_cutoff_at="2026-02-17T16:00:00-05:00"):
     """Distinct name from the existing _buy_order (line ~672, a completely
     different fixture shape for simulate_trading_day's own tests) --
     Python module-level defs share one namespace, so reusing that name
     here would silently OVERWRITE it, retroactively breaking every
     earlier test that calls it (found live: it did, on the first run of
-    this section)."""
+    this section). decision_cutoff_at defaults to a real ordinary-session
+    16:00 ET close (EST, February) -- see _session_close_at."""
     return QueuedOrder(
         ticker=ticker, alias=alias, action="BUY", quantity=10,
         stop_price=90.0, target_price=110.0, entry_price=100.0,
-        queued_day_index=0, decision={}, decision_id=decision_id, queued_date=queued_date,
+        queued_day_index=0, decision={}, decision_id=decision_id,
+        decision_cutoff_at=decision_cutoff_at,
     )
 
 
-def _pre_fill_sell_order(ticker="WMG", alias="BRAVO", decision_id="dec-sell", queued_date="2026-02-17"):
+def _pre_fill_sell_order(ticker="WMG", alias="BRAVO", decision_id="dec-sell",
+                         decision_cutoff_at="2026-02-17T16:00:00-05:00"):
     return QueuedOrder(
         ticker=ticker, alias=alias, action="SELL", quantity=5,
         stop_price=None, target_price=None, entry_price=50.0,
-        queued_day_index=0, decision={}, decision_id=decision_id, queued_date=queued_date,
+        queued_day_index=0, decision={}, decision_id=decision_id,
+        decision_cutoff_at=decision_cutoff_at,
     )
 
 
@@ -3638,7 +3665,7 @@ def test_pre_fill_gate_cancelled_order_resolves_once_and_is_deterministic_across
     dt = datetime(2026, 2, 18, 8, 0, tzinfo=_ET)
     article = {"headline": "adverse", "summary": "", "created_at": dt.isoformat()}
 
-    def fake_fetch(tickers, gap_start, fill_day):
+    def fake_fetch(tickers, start_at, end_at):
         return {"OLN": {"articles": [article]}}
 
     def fake_hermes(prompt):
@@ -3660,8 +3687,7 @@ def test_pre_fill_gate_cancelled_order_resolves_once_and_is_deterministic_across
     watchlist = [{"symbol": "OLN", "sector": "Basic Materials"},
                 {"symbol": "WMG", "sector": "Communication Services"}]
     portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
-    portfolio.pending_orders = [_pre_fill_buy_order(alias=m.alias("OLN"), decision_id="dec-retry-2",
-                                          queued_date="2026-02-17")]
+    portfolio.pending_orders = [_pre_fill_buy_order(alias=m.alias("OLN"), decision_id="dec-retry-2")]
     rejection_calls = []
 
     def fake_resolve_rejection(decision_id, reason):
@@ -3681,6 +3707,8 @@ def test_pre_fill_gate_cancelled_order_resolves_once_and_is_deterministic_across
     tmp_dir = Path(tempfile.mkdtemp())
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value=fake_bars), \
+         patch("run_backtest.fetch_trading_calendar_day",
+               return_value={"date": "2026-02-18", "open": "09:30", "close": "16:00"}), \
          patch("run_backtest.fetch_intraday_bars", return_value={}), \
          patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
          patch("run_backtest.fetch_news", return_value={"OLN": [], "WMG": []}), \
@@ -3737,21 +3765,185 @@ def test_parse_pre_fill_confirmation_fails_closed_on_malformed_or_partial_replie
 
 def test_pre_fill_news_window_spans_a_weekend_correctly():
     """A Friday decision's overnight window must span the whole weekend
-    through Monday's 09:45 ET fill, not just one calendar day."""
-    window = _pre_fill_news_window("2026-02-13", date(2026, 2, 16))  # Fri -> Mon
+    through Monday's 09:45 ET fill, starting strictly after the REAL
+    Friday close, not midnight."""
+    friday_close = _session_close_at(date(2026, 2, 13), "16:00")
+    window = _pre_fill_news_window(friday_close, date(2026, 2, 16))  # Fri close -> Mon
     assert window is not None
     window_start, window_end = window
-    assert window_start == datetime(2026, 2, 14, 0, 0, tzinfo=_ET)  # Saturday 00:00 ET
-    assert window_end == datetime(2026, 2, 16, 9, 45, tzinfo=_ET)   # Monday 09:45 ET
-    print("  ok  the pre-fill window correctly spans a full weekend gap")
+    assert window_start == datetime(2026, 2, 13, 16, 0, tzinfo=_ET)  # Friday 16:00 ET close
+    assert window_end == datetime(2026, 2, 16, 9, 45, tzinfo=_ET)    # Monday 09:45 ET
+    print("  ok  the pre-fill window correctly spans a full weekend gap, starting at the "
+          "real Friday close")
 
 
-def test_pre_fill_news_window_fails_closed_on_missing_or_unparseable_queued_date():
+def test_pre_fill_news_window_half_day_uses_the_actual_earlier_close():
+    """A half-day session (e.g. the day after Thanksgiving) must use its
+    OWN real, earlier close -- never a hard-coded 16:00 guess."""
+    half_day_close = _session_close_at(date(2026, 11, 27), "13:00")
+    window = _pre_fill_news_window(half_day_close, date(2026, 11, 30))
+    assert window is not None
+    window_start, _ = window
+    assert window_start == datetime(2026, 11, 27, 13, 0, tzinfo=_ET)
+    print("  ok  a half day's real, earlier close is used as the window's lower bound, "
+          "not a hard-coded 16:00")
+
+
+def test_pre_fill_news_window_fails_closed_on_missing_unparseable_or_naive_cutoff():
     """A pre-migration order resumed from an old state file (no
-    queued_date at all) must fail closed, never guess a boundary."""
+    decision_cutoff_at at all), one written under this gate's FIRST
+    version (a bare calendar date, naive once parsed), or genuine
+    corruption must all fail closed, never guess a boundary."""
     assert _pre_fill_news_window("", date(2026, 2, 18)) is None
-    assert _pre_fill_news_window("not-a-date", date(2026, 2, 18)) is None
-    print("  ok  a missing or unparseable queued_date fails the window computation closed")
+    assert _pre_fill_news_window("not-a-timestamp", date(2026, 2, 18)) is None
+    assert _pre_fill_news_window("2026-02-17", date(2026, 2, 18)) is None  # bare date -> naive
+    assert _pre_fill_news_window("2026-02-17T16:00:00", date(2026, 2, 18)) is None  # no tz
+    print("  ok  a missing, unparseable, or naive (timezone-less) decision_cutoff_at fails "
+          "the window computation closed")
+
+
+def test_to_utc_rfc3339_reflects_daylight_saving_correctly():
+    """EDT (summer, UTC-4) vs EST (winter, UTC-5) must produce different
+    real UTC hours for the SAME 16:00 ET wall-clock close -- a fixed
+    offset would silently misconvert one of the two."""
+    summer_close = datetime(2026, 6, 1, 16, 0, tzinfo=_ET)   # EDT, UTC-4
+    winter_close = datetime(2026, 2, 17, 16, 0, tzinfo=_ET)  # EST, UTC-5
+    assert _to_utc_rfc3339(summer_close) == "2026-06-01T20:00:00Z"
+    assert _to_utc_rfc3339(winter_close) == "2026-02-17T21:00:00Z"
+    print("  ok  UTC conversion correctly reflects EDT vs EST depending on the real date, "
+          "never a fixed offset")
+
+
+def test_fetch_news_window_sends_rfc3339_utc_timestamps_not_date_only_strings():
+    """Requirement 3: the provider request must receive exact RFC-3339
+    timestamps, never a bare calendar date -- captures the real generated
+    script (no Docker call made) and inspects its literal start/end
+    values, the same pattern test_fetch_bars_requests_raw_prices... uses."""
+    captured = {}
+
+    def fake_run_in(service, script):
+        captured["service"] = service
+        captured["script"] = script
+        return '{"news": {"OLN": {"articles": [], "complete": true}}}'
+
+    start_at = datetime(2026, 2, 17, 16, 0, 0, tzinfo=_ET)   # EST close
+    end_at = datetime(2026, 2, 18, 9, 45, 0, tzinfo=_ET)     # next-day 09:45 ET
+    with patch("run_backtest.run_in", side_effect=fake_run_in):
+        fetch_news_window(["OLN"], start_at, end_at)
+    assert captured["service"] == "alpaca-mcp"
+    assert "2026-02-17T21:00:00Z" in captured["script"], captured["script"]
+    assert "2026-02-18T14:45:00Z" in captured["script"], captured["script"]
+    # Not a bare date anywhere the real boundaries are used.
+    assert "'2026-02-17'" not in captured["script"] and '"2026-02-17"' not in captured["script"]
+    print("  ok  fetch_news_window sends exact RFC-3339 UTC timestamps to the provider, "
+          "never date-only strings")
+
+
+def test_pre_fill_gate_a_1605_et_headline_is_included_and_can_cancel_the_buy():
+    """Required test 1: a headline published at 16:05 ET on decision day T
+    (5 minutes after a 16:00 ET close, squarely in the overnight gap the
+    original date-only window silently skipped) must be included in the
+    delta check and be capable of cancelling the queued BUY."""
+    m = _two_ticker_masking()
+    decision_cutoff = _session_close_at(date(2026, 2, 17), "16:00")
+    order = _pre_fill_buy_order(alias=m.alias("OLN"), decision_id="dec-1605",
+                                decision_cutoff_at=decision_cutoff)
+    just_after_close = datetime(2026, 2, 17, 16, 5, tzinfo=_ET)
+    article = {"headline": "Olin misses earnings badly", "summary": "adverse",
+              "created_at": just_after_close.isoformat()}
+
+    def fake_fetch(tickers, start_at, end_at):
+        return {"OLN": {"articles": [article]}}
+
+    def fake_hermes(prompt):
+        return json.dumps({order.alias: "CANCEL"}), {}
+
+    surviving, events = apply_pre_fill_news_gate(
+        [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fake_hermes,
+    )
+    assert surviving == []
+    assert events[0]["outcome"] == "cancel" and events[0]["article_count"] == 1
+    print("  ok  a 16:05 ET headline (5 minutes after a 16:00 ET close) is included in the "
+          "delta check and can cancel the queued BUY")
+
+
+def test_pre_fill_window_excludes_a_headline_exactly_at_the_decision_cutoff():
+    """Required test 2, at the exact boundary: a headline timestamped
+    EXACTLY at the real decision cutoff (not merely "earlier that day")
+    was already visible to that day's own decision-time fetch and must
+    be excluded -- window_start is exclusive."""
+    m = _two_ticker_masking()
+    decision_cutoff = _session_close_at(date(2026, 2, 17), "16:00")
+    order = _pre_fill_buy_order(alias=m.alias("OLN"), decision_id="dec-at-cutoff",
+                                decision_cutoff_at=decision_cutoff)
+    exactly_at_cutoff = datetime(2026, 2, 17, 16, 0, 0, tzinfo=_ET)
+    article = {"headline": "already-seen at the exact cutoff", "summary": "",
+              "created_at": exactly_at_cutoff.isoformat()}
+
+    def fake_fetch(tickers, start_at, end_at):
+        return {"OLN": {"articles": [article]}}
+
+    def fail_hermes(prompt):
+        raise AssertionError("a headline AT the decision cutoff must never reach Hermes")
+
+    surviving, events = apply_pre_fill_news_gate(
+        [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fail_hermes,
+    )
+    assert surviving == [order]
+    assert events[0]["article_count"] == 0
+    print("  ok  a headline timestamped EXACTLY at the decision cutoff is excluded "
+          "(window_start is exclusive)")
+
+
+def test_pre_fill_gate_legacy_order_without_decision_cutoff_at_fails_closed():
+    """Required test: a queued BUY resumed from a state file that
+    predates this field entirely (decision_cutoff_at == "", the
+    dataclass default) must fail closed through the FULL gate, not just
+    the pure window function in isolation."""
+    m = _two_ticker_masking()
+    order = _pre_fill_buy_order(alias=m.alias("OLN"), decision_id="dec-legacy",
+                                decision_cutoff_at="")
+
+    def fail_fetch(tickers, start_at, end_at):
+        raise AssertionError("a legacy order with no decision_cutoff_at must never reach a fetch")
+
+    def fail_hermes(prompt):
+        raise AssertionError("a legacy order with no decision_cutoff_at must never reach Hermes")
+
+    surviving, events = apply_pre_fill_news_gate(
+        [order], date(2026, 2, 18), m, {}, fetch_news_fn=fail_fetch, call_hermes_fn=fail_hermes,
+    )
+    assert surviving == []
+    assert events[0]["outcome"] == "cancel" and events[0]["reason"] == PRE_FILL_NEWS_UNAVAILABLE_REASON
+    print("  ok  a legacy queued BUY with no decision_cutoff_at at all fails closed through "
+          "the full gate, without any fetch or Hermes call")
+
+
+def test_pre_fill_gate_incomplete_pagination_fails_the_buy_closed():
+    """Required test: fetch_news_window's own caller-side check ('if not
+    result[\"complete\"]: raise') surfaces as an ordinary per-ticker
+    {\"error\": ...} entry to the gate -- proven here by injecting exactly
+    that shape (what a real incomplete-pagination signal from
+    get_historical_news becomes once fetch_news_window's script wraps
+    it), confirming the affected BUY fails closed exactly like any other
+    unavailable-feed case, with zero Hermes call."""
+    m = _two_ticker_masking()
+    order = _pre_fill_buy_order(alias=m.alias("OLN"), decision_id="dec-incomplete")
+
+    def fake_fetch(tickers, start_at, end_at):
+        return {"OLN": {"error": "incomplete pagination coverage for OLN -- cannot guarantee "
+                                 "no headline was missed"}}
+
+    def fail_hermes(prompt):
+        raise AssertionError("incomplete pagination coverage must fail closed without calling Hermes")
+
+    surviving, events = apply_pre_fill_news_gate(
+        [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fail_hermes,
+    )
+    assert surviving == []
+    assert events[0]["reason"] == PRE_FILL_NEWS_UNAVAILABLE_REASON
+    print("  ok  incomplete pagination coverage fails the affected queued BUY closed, "
+          "same as any other unavailable-feed case")
 
 
 def main():

@@ -43,6 +43,8 @@ SUITES: list[tuple[str, str, list[str], dict[str, str]]] = [
      [sys.executable, "test_account_math.py"], {"PYTHONPATH": str(REPO / "risk-checker")}),
     ("alpaca-mcp: status_mapping", "alpaca-mcp",
      [sys.executable, "test_status_mapping.py"], {"PYTHONPATH": str(REPO / "risk-checker")}),
+    ("alpaca-mcp: historical_news_pagination", "alpaca-mcp",
+     [sys.executable, "test_historical_news_pagination.py"], {"PYTHONPATH": str(REPO / "risk-checker")}),
     ("execution-sim-mcp: fill_logic", "execution-sim-mcp",
      [sys.executable, "test_fill_logic.py"], {}),
     ("trade-journal-mcp: decision_fields", "trade-journal-mcp",

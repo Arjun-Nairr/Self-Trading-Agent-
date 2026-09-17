@@ -152,31 +152,30 @@ restatement of every threshold.
 - **SEC EDGAR Fundamentals V1** (`fundamentals/`, 2026-09-12) — four
   distinct states, do not conflate: (1) **data foundation** —
   `get_fundamentals_snapshot(ticker, as_of_date)`, CIK resolution,
-  cached/rate-limited SEC fetch, point-in-time-safe US-GAAP
-  normalization, full provenance; (2) **accepted** for integration
-  design (`docs/evaluations/fundamentals_v1_acceptance.md`: WMG/AAPL/JPM/BABA
-  live, 0 provenance/as-of violations); (3) **backtest-only integration
-  implemented, then correction-pass hardened (2026-09-12)** —
+  cached/rate-limited SEC fetch, point-in-time-safe US-GAAP normalization,
+  full provenance; (2) **accepted** for integration design
+  (`docs/evaluations/fundamentals_v1_acceptance.md`: WMG/AAPL/JPM/BABA
+  live, 0 provenance/as-of violations); (3) **backtest-only integration,
+  then correction-pass hardened (2026-09-12)** —
   `run_backtest.py --enable-fundamentals` (opt-in, default off, zero
   effect on any existing/default run incl. preserved Round 2), contextual
   evidence only, never an independent buy trigger or mandatory veto
   (`AGENTS.md`). Correction pass added: a durable per-run invariant
-  (`_resolve_fundamentals_enabled`, persisted in `backtest_state.json`,
-  fails closed on a resume conflict, legacy state defaults disabled); a
-  private non-agent-facing raw-SEC-provenance audit column
-  (`backtest_cycle_evidence.fundamentals_provenance`, narrow nullable
-  schema addition, reused from checkpoint on replay); enforced technical
+  (`_resolve_fundamentals_enabled`, persisted, fails closed on a resume
+  conflict, legacy defaults disabled); a private non-agent-facing raw-SEC-
+  provenance audit column (`backtest_cycle_evidence.fundamentals_
+  provenance`, reused from checkpoint on replay); enforced technical
   primacy (a fundamentals-enabled BUY must declare `primary_signal`
   technical/both, `other` rejected). **Operational validation (2026-09-12,
-  4 attempts, 1–3 blocked on env/image/model-account issues, all
-  root-caused and fixed — see `docs/history/` for the full narrative):
-  attempt 4 SUCCEEDED** after migrating the runtime model to
-  `gpt-5.6-terra`. Smoke run `31bd7421-...` completed 3/3 cycles: 3 BUY
-  proposals, all rejected at execution-time risk checks, 0 fills.
-  Confirmed: real SEC provenance recorded privately, zero real
-  ticker/CIK/filing identity anywhere agent-facing, `anonymous` still zero
-  grants, Round 2 untouched throughout (sha256-verified each attempt). (4)
-  **still not done:** live mode; any training/evaluation run — the path
+  4 attempts, 1–3 blocked on env/image/model-account issues, root-caused
+  and fixed — `docs/history/` for the full narrative): attempt 4
+  SUCCEEDED** after migrating the runtime model to `gpt-5.6-terra`. Smoke
+  run `31bd7421-...` completed 3/3 cycles: 3 BUY proposals, all rejected
+  at execution-time risk checks, 0 fills. Confirmed: real SEC provenance
+  recorded privately, zero real ticker/CIK/filing identity agent-facing,
+  `anonymous` still zero grants, Round 2 untouched (sha256-verified each
+  attempt). (4) **still not done:** live mode; any training/evaluation
+  run — the path
   works end-to-end but no BUY has ever filled under it — frozen pending
   that decision.
 - **Regime-diverse evaluation suite** (`backtest-harness/eval_suite.py`,
@@ -222,15 +221,8 @@ restatement of every threshold.
 Two different levels of detail exist across the 50 completed cycles —
 **do not conflate them**:
 
-- **Cycles 1–25 (tranche 1): complete trade/outcome data**, but **no
-  exact per-cycle prompt/input/response evidence** — `backtest_cycle_evidence`
-  didn't exist yet, deliberately never backfilled.
-- **Cycles 26–50: exact masked-prompt/input/response evidence for every
-  one** — `backtest_cycle_evidence` holds the verbatim rendered prompt,
-  exact masked inputs, final validated response, every candidate's
-  proposed/no_proposal status, and rules-file hashes per cycle — lets a
-  later audit check the trading agent actually read what it was shown,
-  which tranche 1 cannot support.
+- **Cycles 1–25 (tranche 1): complete trade/outcome data**, but **no exact per-cycle prompt/input/response evidence** — `backtest_cycle_evidence` didn't exist yet, deliberately never backfilled.
+- **Cycles 26–50: exact masked-prompt/input/response evidence for every one** — `backtest_cycle_evidence` holds the verbatim rendered prompt, exact masked inputs, final validated response, every candidate's proposed/no_proposal status, and rules-file hashes per cycle — lets a later audit check the trading agent actually read what it was shown, which tranche 1 cannot support.
 - Real runtime `model`/`provider`/`reasoning_effort` fields on evidence rows are `NULL` so far (never reported by the real usage payload) — populates automatically once reported.
 
 **Evaluation status:** the full 50-cycle run has been evaluated on two
@@ -271,8 +263,7 @@ number needs to go through the user explicitly.
 
 - **Round 1's conservative rules profile** — superseded by the aggressive Phase 1 profile. `docs/evaluations/run1_evaluation_extract.md`.
 - **A first, conservative Round-2 draft** and **`SOUL.md`'s Phase 1 temperament** — both superseded before/at Round 2's start. Archived: `docs/history/round2-conservative-draft/run2_prep_analysis.md`, `docs/history/SOUL_phase1_conservative_2026-08-30.md`.
-- **`quota_pacer.py`** — removed entirely (`750d80d`). Do not reference it,
-  `quota_pacer_state.json`, or a "weekly quota" as current.
+- **`quota_pacer.py`** — removed entirely (`750d80d`). Do not reference it, `quota_pacer_state.json`, or a "weekly quota" as current.
 - **OpenCode Go + DeepSeek V4 Flash** — investigated, abandoned (a real, unresolved upstream hang). Provider is still `openai-codex` (model migrated `gpt-5.4-mini`→`gpt-5.6-terra` 2026-09-12, §5/§6 — a compatibility fix, not a return to this abandoned alternative).
 - **Four Round-2 smoke-test `run_id`s** — superseded, before the real tranche started. **Never resume any of them.**
 - **Prior repair passes** (pre-tranche crashes/bugs) — no longer operationally relevant. Full narrative: `docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md`, `docs/history/HANDOFF_FULL_2026-08-28.md`.
@@ -382,15 +373,20 @@ were never re-checked against overnight news before their 09:45 ET fill.
 Audit confirmed no holdout/live-paper touch, Round 2 untouched —
 **excluded from all analysis**, detail in the measurement report.
 
-**2026-09-17:** implemented the missing gate
-(`apply_pre_fill_news_gate`, `run_backtest.py`) — every queued BUY is
-re-checked against headlines in `(decision-day close, T+1 09:45 ET]`
-before `simulate_trading_day` sees it; adverse/unavailable/malformed-
-timestamp news cancels closed; SELLs/exits untouched; `risk_checker.py`
-stays pure math. Manifest **status reverted proposed→approved→proposed**
-(hash unchanged) pending review of this fix. Live parity: no queued/
-delayed live BUY path exists to extend — documented as required before
-any future delayed live execution, not built speculatively. Conclusion
+**2026-09-17:** implemented the missing gate (`apply_pre_fill_news_gate`,
+`run_backtest.py`) before `simulate_trading_day`; SELLs/exits untouched,
+`risk_checker.py` stays pure math. **Same-day correction (2026-09-17b):**
+the FIRST version's window started at next-day *midnight*, not the real
+decision cutoff — skipping the after-close/pre-midnight gap earnings
+often land in. Fixed: `QueuedOrder.decision_cutoff_at` is now the REAL,
+half-day-aware session close (`fetch_trading_calendar_day`, never
+inferred from a date); window is exactly `(decision_cutoff_at, T+1 09:45
+ET]`; `get_historical_news` now takes RFC-3339 UTC `start_at`/`end_at`,
+paginates for real, reports `complete` (incomplete fails the order
+closed); the decision-time fetch gained the same explicit cutoff. 20
+new/updated tests. Manifest status reverted proposed→approved→proposed
+(hash unchanged) pending review. Live parity: no queued/delayed live BUY
+path exists to extend — documented, not built speculatively. Conclusion
 unchanged: **keep Fundamentals V1 as unproven context**. Detail:
 `docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
 

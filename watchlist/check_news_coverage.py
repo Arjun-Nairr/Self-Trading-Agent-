@@ -19,6 +19,7 @@ Run:
 """
 import asyncio
 import sys
+from datetime import date, datetime, timedelta, timezone
 
 from server import get_historical_news
 
@@ -34,10 +35,20 @@ WATCHLIST = [
 
 
 async def coverage(symbol: str) -> list[int]:
-    return [
-        len(await get_historical_news(symbol, as_of, lookback_days=LOOKBACK_DAYS))
-        for as_of in PROBE_DATES
-    ]
+    # 2026-09-17 correction: get_historical_news now takes exact RFC-3339
+    # start_at/end_at, not a date + lookback_days -- end_at is the probe
+    # date's own end of day (UTC), preserving this script's original
+    # "up through as_of" coverage-counting semantics.
+    counts = []
+    for as_of in PROBE_DATES:
+        d = date.fromisoformat(as_of)
+        end_at = datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=timezone.utc)
+        start_at = end_at - timedelta(days=LOOKBACK_DAYS)
+        result = await get_historical_news(symbol, start_at.isoformat(), end_at.isoformat())
+        if not result["complete"]:
+            print(f"WARNING: {symbol} {as_of}: incomplete pagination, count may undershoot")
+        counts.append(len(result["articles"]))
+    return counts
 
 
 async def main() -> None:

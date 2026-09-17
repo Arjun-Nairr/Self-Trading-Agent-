@@ -631,6 +631,53 @@ document; it is implemented.**
     this gate to extend — documented here as a real prerequisite before
     any future delayed live-execution design, not invented ahead of need.
 
+    **2026-09-17b — same-day correction: the timestamp boundary itself
+    was wrong.** The block above's own claim ("headlines timestamped
+    strictly after the original decision day's close") was not actually
+    true: the FIRST version recorded only a bare `queued_date` (a
+    calendar date) and started its window at the FOLLOWING midnight —
+    silently skipping every headline published between the real close
+    and midnight, exactly the window earnings and major announcements
+    often land in. Corrected:
+    - `QueuedOrder.queued_date` replaced by `decision_cutoff_at` — the
+      REAL, timezone-aware regular-session-close timestamp
+      (`_session_close_at`, sourced from `fetch_trading_calendar_day`,
+      half-day-aware — never a hard-coded 16:00). A pre-migration order,
+      or one written under the first (buggy) version, has no valid value
+      here and fails closed for BUY execution rather than guessing.
+    - The window is now exactly `decision_cutoff_at < headline.created_at
+      <= fill_cutoff_at` (fill_cutoff_at = Day T+1 09:45 ET) — proven via
+      a new test asserting a 16:05 ET Day-T headline (5 minutes after a
+      16:00 close) IS included and can cancel the order, and a headline
+      timestamped exactly AT the cutoff is excluded.
+    - `alpaca-mcp`'s `get_historical_news` now takes exact RFC-3339
+      `start_at`/`end_at` (previously a date + `lookback_days`), paginates
+      for real via Alpaca's `next_page_token` (capped at
+      `MAX_NEWS_PAGES=20`), and returns an explicit `complete` flag —
+      hitting the page cap with a token still pending reports
+      `complete: False`, which both `fetch_news` (the ordinary decision-
+      time fetch) and `fetch_news_window` (the gate's own fetch) treat as
+      a hard failure for the affected ticker, never a partial-but-usable
+      result. The ordinary decision-time fetch (`fetch_news`) also gained
+      the same explicit `end_at` cutoff, closing a related leak: a
+      date-only `end` could previously let an end-of-day decision
+      silently receive a same-day headline published AFTER that day's
+      real close.
+    - `watchlist/check_news_coverage.py` and `alpaca-mcp/
+      test_historical_news.py` (a real, credentialed proof-of-life,
+      never run by `verify.py`) updated to the new signature. A new pure
+      test file, `alpaca-mcp/test_historical_news_pagination.py` (mocks
+      `httpx` entirely, zero real network), proves the pagination/
+      completeness contract directly and is now in `verify.py`'s suite
+      list. 6 more tests added to `test_execution_semantics.py` (20
+      total across both correction passes) covering the exact-cutoff
+      boundary, DST-correct UTC conversion, RFC-3339-not-date-only
+      request construction, incomplete-pagination fail-closed, and a
+      legacy order with no `decision_cutoff_at` at all.
+    - Manifest **left at `proposed`** (was already reverted there by the
+      prior pass; this pass never touched it). No run, training,
+      evaluation, smoke test, holdout, or live-paper process executed.
+
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.
 
