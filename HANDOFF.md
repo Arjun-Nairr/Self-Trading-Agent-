@@ -390,7 +390,7 @@ path exists to extend — documented, not built speculatively. Conclusion
 unchanged: **keep Fundamentals V1 as unproven context**. Detail:
 `docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
 
-**2026-09-17c:** `fetch_news` trusted every article and cut to 4 headlines *before* checking timestamps — a bad `created_at` could reach the prompt. Fixed: pure `_articles_at_or_before_cutoff` validates + cuts to at-or-before `decision_cutoff_at` first (fail-closed on any bad timestamp); `_to_utc_rfc3339` rejects naive input. 6 new tests; gate/risk untouched.
+**2026-09-17c/d:** `fetch_news` trusted every article and cut to 4 headlines *before* checking timestamps — a bad `created_at`, or one outside the requested range on either edge, could reach the prompt. Fixed: pure `_articles_in_decision_window(articles, start_at, end_at)` validates + cuts to `start_at < created_at <= end_at` first (fail-closed on any bad timestamp, both edges enforced, not just the cutoff); `_is_tz_aware` (shared by this, `_parse_news_timestamp`, `_pre_fill_news_window`, `_to_utc_rfc3339`) now requires `utcoffset()` to actually resolve, not just `tzinfo is not None`. 12 new tests; gate/risk untouched.
 
 ---
 

@@ -1570,18 +1570,23 @@ def fetch_news(tickers: list[str], day: date, decision_cutoff_at: str) -> dict[s
     catch, unlike fetch_news_window's own) if pagination could not be
     proven complete for any ticker.
 
-    2026-09-17c correction: the remote fetch used to trust every returned
-    article and truncate straight to 4 BEFORE any client-side timestamp
-    check -- the same "provider query is only ever a superset" gap the
-    pre-fill gate's own _articles_in_window already closed for ITS window,
-    just never applied here. The remote script below now returns every
-    raw article per ticker, untruncated; _articles_at_or_before_cutoff
-    then validates and cuts to decision_cutoff_at ON THE HOST, before the
-    4-headline prompt cap is ever applied -- a provider response outside
-    the requested range, or one with a missing/malformed/naive timestamp,
-    now raises here and halts the cycle through this function's own
-    existing failure path, exactly like the incomplete-pagination check
-    below already does, instead of silently entering the Day-T prompt."""
+    2026-09-17c/d correction: the remote fetch used to trust every
+    returned article and truncate straight to 4 BEFORE any client-side
+    timestamp check -- the same "provider query is only ever a superset"
+    gap the pre-fill gate's own _articles_in_window already closed for
+    ITS window, just never applied here. 2026-09-17c closed only the
+    upper (cutoff) side; 2026-09-17d closes the lower (lookback-start)
+    side too -- a provider is untrusted on BOTH edges of the requested
+    range, not just the one a same-day leak happens to threaten. The
+    remote script below now returns every raw article per ticker,
+    untruncated; _articles_in_decision_window then validates and cuts to
+    `start_dt < created_at <= end_dt` ON THE HOST, before the 4-headline
+    prompt cap is ever applied -- a provider response outside the
+    requested range on either side, or one with a missing/malformed/
+    non-timezone-aware timestamp, now raises here and halts the cycle
+    through this function's own existing failure path, exactly like the
+    incomplete-pagination check below already does, instead of silently
+    entering the Day-T prompt."""
     end_dt = datetime.fromisoformat(decision_cutoff_at)
     start_dt = end_dt - timedelta(days=7)
     start_utc, end_utc = _to_utc_rfc3339(start_dt), _to_utc_rfc3339(end_dt)
@@ -1606,11 +1611,11 @@ asyncio.run(main())
     raw = json_from(run_in("alpaca-mcp", script))["news"]
     out: dict[str, list] = {}
     for t in tickers:
-        validated = _articles_at_or_before_cutoff(raw.get(t, []), end_dt)
+        validated = _articles_in_decision_window(raw.get(t, []), start_dt, end_dt)
         if validated is None:
             raise RuntimeError(
                 f"{t}: a decision-time news article has a missing, malformed, or "
-                "timezone-naive created_at -- failing the cycle closed rather than "
+                "non-timezone-aware created_at -- failing the cycle closed rather than "
                 "trusting an unverifiable timestamp into the Day-T prompt"
             )
         out[t] = [
@@ -1688,20 +1693,22 @@ def _pre_fill_news_window(
     pre-market/first-15-minutes, never just from midnight.
 
     Returns None -- the caller's fail-closed signal -- when
-    `decision_cutoff_iso` is empty, unparseable, or NAIVE (no timezone at
-    all -- exactly as ambiguous as unparseable, since there is no way to
-    know what it means). Covers both a pre-migration order (no field at
-    all, "") and one written under this gate's FIRST version (a bare
-    calendar date -- `datetime.fromisoformat` parses that successfully
-    but as a NAIVE midnight, which the tzinfo check below then catches)
-    -- neither ever guesses a real boundary."""
+    `decision_cutoff_iso` is empty, unparseable, or not genuinely
+    timezone-aware per _is_tz_aware (no timezone at all, or a broken
+    tzinfo whose own utcoffset() is None -- exactly as ambiguous as
+    unparseable, since there is no way to know what it means). Covers
+    both a pre-migration order (no field at all, "") and one written
+    under this gate's FIRST version (a bare calendar date --
+    `datetime.fromisoformat` parses that successfully but as a NAIVE
+    midnight, which the check below then catches) -- neither ever
+    guesses a real boundary."""
     if not decision_cutoff_iso:
         return None
     try:
         window_start = datetime.fromisoformat(decision_cutoff_iso)
     except ValueError:
         return None
-    if window_start.tzinfo is None:
+    if not _is_tz_aware(window_start):
         return None
     window_end = datetime(
         fill_day.year, fill_day.month, fill_day.day,
@@ -1710,20 +1717,35 @@ def _pre_fill_news_window(
     return window_start, window_end
 
 
+def _is_tz_aware(dt: datetime) -> bool:
+    """Pure (2026-09-17d). The one real test of "timezone-aware" this
+    whole news timeline uses: `dt.tzinfo` alone is not enough -- a
+    pathological or mis-implemented custom `tzinfo` can be attached to a
+    datetime while its own `utcoffset()` still returns `None`, which
+    every timezone-dependent operation downstream (`astimezone`,
+    comparison against another aware datetime) treats exactly like a
+    naive datetime, silently. Both must hold: `tzinfo is not None` AND
+    `utcoffset() is not None`. Ordinary aware datetimes (a fixed
+    `timezone.utc` offset, or a real `zoneinfo.ZoneInfo`) are unaffected
+    -- their `utcoffset()` always resolves."""
+    return dt.tzinfo is not None and dt.utcoffset() is not None
+
+
 def _parse_news_timestamp(raw: str) -> datetime | None:
     """Pure. `raw` (Alpaca's `created_at`) as a real, timezone-aware
     datetime -- None (never a guess) if it's missing, empty, doesn't parse
-    as ISO-8601, or parses but carries NO timezone at all. A naive
-    timestamp is exactly the "ambiguous" case requirement 3 requires
-    failing closed on: there is no way to know if it means ET, UTC, or
-    something else."""
+    as ISO-8601, or parses but is not genuinely timezone-aware per
+    _is_tz_aware (no timezone at all, or a broken tzinfo whose own
+    utcoffset() is None). A naive or unresolvable timestamp is exactly
+    the "ambiguous" case requirement 3 requires failing closed on: there
+    is no way to know if it means ET, UTC, or something else."""
     if not raw:
         return None
     try:
         dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError:
         return None
-    if dt.tzinfo is None:
+    if not _is_tz_aware(dt):
         return None
     return dt
 
@@ -1755,17 +1777,28 @@ def _articles_in_window(
     return out
 
 
-def _articles_at_or_before_cutoff(articles: list[dict], cutoff: datetime) -> list[dict] | None:
-    """Pure. The ordinary Day-T decision-time boundary (2026-09-17c),
-    distinct from the pre-fill gate's own _articles_in_window: keeps only
-    articles AT OR BEFORE `cutoff` (the same real decision_cutoff_at this
-    cycle freezes into every order it queues today), no lower bound --
-    an article published exactly at the decision cutoff was genuinely
+def _articles_in_decision_window(
+    articles: list[dict], start_at: datetime, end_at: datetime,
+) -> list[dict] | None:
+    """Pure. The ordinary Day-T decision-time boundary (2026-09-17d),
+    distinct from the pre-fill gate's own _articles_in_window (which
+    shares this same shape but different real boundaries): keeps only
+    articles STRICTLY AFTER `start_at` (the fetch's own real 7-day
+    lookback start) and AT OR BEFORE `end_at` (`decision_cutoff_at`) --
+    `start_at < created_at <= end_at`. The provider's own [start, end]
+    request is only ever trusted as a superset on BOTH sides: an article
+    older than the requested lookback start is just as much a provider-
+    boundary leak as one published after the cutoff, so both ends are
+    enforced client-side, never assumed from the request alone. An
+    article published exactly at the decision cutoff was genuinely
     knowable at that instant, so it belongs to the decision; anything
-    after it is excluded, never included, since it wasn't knowable yet.
+    after it is excluded, since it wasn't knowable yet. An article
+    exactly at the lookback start was NOT yet inside the requested
+    window and is excluded too (matches _articles_in_window's own
+    strictly-after lower bound).
 
     Returns None -- the fail-closed signal -- the instant ANY article has
-    a missing, malformed, or timezone-naive created_at (via
+    a missing, malformed, or non-timezone-aware created_at (via
     _parse_news_timestamp), same as _articles_in_window: an unverifiable
     timestamp is never silently omitted or trusted, it fails the whole
     fetch closed."""
@@ -1774,7 +1807,7 @@ def _articles_at_or_before_cutoff(articles: list[dict], cutoff: datetime) -> lis
         dt = _parse_news_timestamp(a.get("created_at", ""))
         if dt is None:
             return None
-        if dt <= cutoff:
+        if start_at < dt <= end_at:
             out.append(a)
     return out
 
@@ -1787,13 +1820,15 @@ def _to_utc_rfc3339(dt: datetime) -> str:
     `start_at`/`end_at` params expect and the format this project always
     sends them in -- never a date-only string.
 
-    Raises ValueError on a naive `dt` (2026-09-17c) instead of silently
-    letting `.astimezone()` interpret it against whatever the HOST
-    MACHINE's own local timezone happens to be -- a naive input here
-    would otherwise produce a DIFFERENT, wrong UTC boundary depending on
-    the deploying machine, never a decision-time-safe one."""
-    if dt.tzinfo is None:
-        raise ValueError(f"_to_utc_rfc3339 requires a timezone-aware datetime, got naive {dt!r}")
+    Raises ValueError on a `dt` that is not genuinely timezone-aware per
+    _is_tz_aware -- naive, or carrying a broken tzinfo whose own
+    utcoffset() is None -- instead of silently letting `.astimezone()`
+    interpret it against whatever the HOST MACHINE's own local timezone
+    happens to be (2026-09-17c/d): such an input would otherwise produce
+    a DIFFERENT, wrong UTC boundary depending on the deploying machine,
+    never a decision-time-safe one."""
+    if not _is_tz_aware(dt):
+        raise ValueError(f"_to_utc_rfc3339 requires a timezone-aware datetime, got {dt!r}")
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 

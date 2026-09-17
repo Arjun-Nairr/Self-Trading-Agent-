@@ -13,7 +13,7 @@ Run: python test_execution_semantics.py
 import json
 import tempfile
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -46,7 +46,7 @@ from run_backtest import (
     PRE_FILL_NEWS_VETO_REASON, PRE_FILL_NEWS_UNAVAILABLE_REASON,
     _pre_fill_news_window, _parse_news_timestamp, _articles_in_window,
     _build_pre_fill_confirmation_prompt, _parse_pre_fill_confirmation,
-    _session_close_at, _to_utc_rfc3339, _articles_at_or_before_cutoff,
+    _session_close_at, _to_utc_rfc3339, _articles_in_decision_window, _is_tz_aware,
 )
 from anonymize import LeakDetected, RunMasking  # noqa: E402
 from risk_checker import (  # noqa: E402
@@ -3947,60 +3947,121 @@ def test_pre_fill_gate_incomplete_pagination_fails_the_buy_closed():
 
 
 def test_decision_time_filter_excludes_a_post_close_article():
-    """Requirement 1 (2026-09-17c): a headline published AFTER
-    decision_cutoff_at must never enter the ordinary Day-T context -- the
-    exact leak fetch_news used to risk by trusting every returned article
-    before truncating to 4 headlines."""
-    cutoff = datetime(2026, 2, 17, 21, 0, 0, tzinfo=timezone.utc)  # 16:00 ET close, in UTC
+    """Requirement 1 (2026-09-17c/d): a headline published AFTER
+    decision_cutoff_at (end_at) must never enter the ordinary Day-T
+    context -- the exact leak fetch_news used to risk by trusting every
+    returned article before truncating to 4 headlines."""
+    start_at = datetime(2026, 2, 10, 21, 0, 0, tzinfo=timezone.utc)  # 7 days back
+    end_at = datetime(2026, 2, 17, 21, 0, 0, tzinfo=timezone.utc)    # 16:00 ET close, in UTC
     post_close = {"headline": "after close", "created_at": "2026-02-17T21:00:01+00:00"}
-    assert _articles_at_or_before_cutoff([post_close], cutoff) == []
+    assert _articles_in_decision_window([post_close], start_at, end_at) == []
     print("  ok  a post-close article is excluded from the ordinary decision-time filter")
 
 
-def test_decision_time_filter_includes_an_article_exactly_at_the_cutoff():
-    """Requirement 1: the boundary is inclusive at decision_cutoff_at --
-    include at-or-before, exclude strictly after."""
-    cutoff = datetime(2026, 2, 17, 21, 0, 0, tzinfo=timezone.utc)
-    at_cutoff = {"headline": "right at close", "created_at": "2026-02-17T21:00:00+00:00"}
-    result = _articles_at_or_before_cutoff([at_cutoff], cutoff)
-    assert result is not None and [a["headline"] for a in result] == ["right at close"]
-    print("  ok  an article exactly at decision_cutoff_at is included (inclusive upper bound)")
+def test_decision_time_filter_excludes_an_article_older_than_the_lookback_start():
+    """Requirement 2026-09-17d: the provider's own [start, end] request is
+    untrusted on BOTH sides, not just the cutoff -- an article older than
+    the requested 7-day lookback start must never enter the ordinary
+    Day-T context either."""
+    start_at = datetime(2026, 2, 10, 21, 0, 0, tzinfo=timezone.utc)
+    end_at = datetime(2026, 2, 17, 21, 0, 0, tzinfo=timezone.utc)
+    too_old = {"headline": "ancient", "created_at": "2026-02-10T20:59:59+00:00"}
+    assert _articles_in_decision_window([too_old], start_at, end_at) == []
+    print("  ok  an article older than the 7-day lookback start is excluded from the "
+          "ordinary decision-time filter")
+
+
+def test_decision_time_filter_boundaries_are_start_exclusive_end_inclusive():
+    """Requirement 2026-09-17d: the exact interval is
+    start_at < created_at <= end_at -- an article exactly at start_at is
+    excluded (not yet inside the requested window), and one exactly at
+    end_at is included (genuinely knowable at the decision cutoff)."""
+    start_at = datetime(2026, 2, 10, 21, 0, 0, tzinfo=timezone.utc)
+    end_at = datetime(2026, 2, 17, 21, 0, 0, tzinfo=timezone.utc)
+    at_start = {"headline": "at start", "created_at": "2026-02-10T21:00:00+00:00"}
+    at_end = {"headline": "at end", "created_at": "2026-02-17T21:00:00+00:00"}
+    result = _articles_in_decision_window([at_start, at_end], start_at, end_at)
+    assert result is not None and [a["headline"] for a in result] == ["at end"]
+    print("  ok  the ordinary decision-time filter is start-exclusive, end-inclusive "
+          "(start_at < created_at <= end_at)")
 
 
 def test_decision_time_filter_fails_closed_on_malformed_or_naive_timestamps():
     """Requirement 1: a missing, malformed, or timezone-naive created_at
     must fail the whole ordinary-fetch filter closed (None) -- the bad
     article is never silently dropped while the rest are trusted."""
-    cutoff = datetime(2026, 2, 17, 21, 0, 0, tzinfo=timezone.utc)
+    start_at = datetime(2026, 2, 10, 21, 0, 0, tzinfo=timezone.utc)
+    end_at = datetime(2026, 2, 17, 21, 0, 0, tzinfo=timezone.utc)
     good = {"headline": "fine", "created_at": "2026-02-17T20:00:00+00:00"}
     malformed = {"headline": "bad", "created_at": "not-a-timestamp"}
     naive = {"headline": "naive", "created_at": "2026-02-17T20:00:00"}
-    assert _articles_at_or_before_cutoff([good, malformed], cutoff) is None
-    assert _articles_at_or_before_cutoff([good, naive], cutoff) is None
+    assert _articles_in_decision_window([good, malformed], start_at, end_at) is None
+    assert _articles_in_decision_window([good, naive], start_at, end_at) is None
     print("  ok  malformed and timezone-naive created_at values fail the ordinary "
           "decision-time filter closed, never silently omitted or trusted")
+
+
+class _BrokenUtcOffsetTzinfo(tzinfo):
+    """Test-only tzinfo: `tzinfo is not None` but its own utcoffset() is
+    None -- the pathological case _is_tz_aware exists to catch (a naive-
+    like datetime disguised as aware)."""
+    def utcoffset(self, dt):
+        return None
+
+    def dst(self, dt):
+        return None
+
+    def tzname(self, dt):
+        return "BROKEN"
+
+
+def test_is_tz_aware_rejects_a_tzinfo_whose_utcoffset_is_none():
+    """Requirement 4: tzinfo is not None alone is not sufficient -- a
+    broken tzinfo whose own utcoffset() is None must be rejected too."""
+    broken = datetime(2026, 2, 17, 16, 0, 0, tzinfo=_BrokenUtcOffsetTzinfo())
+    assert _is_tz_aware(broken) is False
+    assert _is_tz_aware(datetime(2026, 2, 17, 16, 0, 0, tzinfo=timezone.utc)) is True
+    assert _is_tz_aware(datetime(2026, 2, 17, 16, 0, 0)) is False
+    print("  ok  _is_tz_aware rejects a tzinfo whose own utcoffset() is None, "
+          "not just an outright naive datetime")
+
+
+def test_to_utc_rfc3339_rejects_a_tzinfo_whose_utcoffset_is_none():
+    """Requirement 4, exercised through a real call site: _to_utc_rfc3339
+    must reject this the same way it rejects an outright naive datetime,
+    never silently falling through to .astimezone()."""
+    broken = datetime(2026, 2, 17, 16, 0, 0, tzinfo=_BrokenUtcOffsetTzinfo())
+    try:
+        _to_utc_rfc3339(broken)
+        raise AssertionError("expected _to_utc_rfc3339 to reject a broken-utcoffset tzinfo")
+    except ValueError:
+        pass
+    print("  ok  _to_utc_rfc3339 rejects a tzinfo whose own utcoffset() is None")
 
 
 def test_fetch_news_forwards_the_exact_rfc3339_cutoff_and_validates_before_truncating():
     """Requirements 2/3 end-to-end: fetch_news must send the exact
     RFC-3339 decision_cutoff_at (and 7-day-back start) to the provider,
-    and must validate + cut every returned article to at-or-before that
-    cutoff BEFORE truncating to 4 headlines -- proven by returning 5
-    in-window articles plus one post-cutoff leak, and checking the leak
-    never survives into the result while the 4-headline cap still holds."""
+    and must validate + cut every returned article to
+    start_dt < created_at <= end_dt BEFORE truncating to 4 headlines --
+    proven by returning 5 in-window articles plus a post-cutoff leak AND
+    an older-than-lookback leak, and checking neither survives into the
+    result while the 4-headline cap still holds."""
     captured = {}
     articles = [
         {"headline": f"h{i}", "created_at": f"2026-02-17T1{i}:00:00+00:00",
          "summary": "s", "symbols": ["OLN"]}
         for i in range(5)
     ]
-    leak = {"headline": "leak", "created_at": "2026-02-17T21:00:01+00:00",
-            "summary": "s", "symbols": ["OLN"]}
+    post_cutoff_leak = {"headline": "leak-after", "created_at": "2026-02-17T21:00:01+00:00",
+                         "summary": "s", "symbols": ["OLN"]}
+    pre_lookback_leak = {"headline": "leak-before", "created_at": "2026-02-10T20:59:59+00:00",
+                          "summary": "s", "symbols": ["OLN"]}
 
     def fake_run_in(service, script):
         captured["service"] = service
         captured["script"] = script
-        return json.dumps({"news": {"OLN": articles + [leak]}})
+        return json.dumps({"news": {"OLN": [pre_lookback_leak] + articles + [post_cutoff_leak]}})
 
     decision_cutoff_at = datetime(2026, 2, 17, 16, 0, 0, tzinfo=_ET).isoformat()  # 21:00 UTC
     with patch("run_backtest.run_in", side_effect=fake_run_in):
@@ -4009,10 +4070,11 @@ def test_fetch_news_forwards_the_exact_rfc3339_cutoff_and_validates_before_trunc
     assert "2026-02-17T21:00:00Z" in captured["script"], captured["script"]
     assert "2026-02-10T21:00:00Z" in captured["script"], captured["script"]  # 7 days back
     headlines = [a["headline"] for a in result["OLN"]]
-    assert "leak" not in headlines
+    assert "leak-after" not in headlines
+    assert "leak-before" not in headlines
     assert len(result["OLN"]) == 4
-    print("  ok  fetch_news forwards the exact RFC-3339 cutoff and validates every "
-          "article's timestamp before truncating to 4 headlines")
+    print("  ok  fetch_news forwards the exact RFC-3339 cutoff and 7-day-back start, and "
+          "validates every article's timestamp on both edges before truncating to 4 headlines")
 
 
 def test_fetch_news_fails_the_cycle_closed_on_a_malformed_article_timestamp():

@@ -702,6 +702,28 @@ document; it is implemented.**
     `proposed`, untouched; no run/training/evaluation/smoke/holdout/
     live-paper process executed; no Neon writes.
 
+    **2026-09-17d — the same fetch was still only checking one edge.**
+    2026-09-17c closed the upper (cutoff) boundary but still trusted the
+    provider's own 7-day lookback start. Corrected: `_articles_at_or_
+    before_cutoff` replaced by `_articles_in_decision_window(articles,
+    start_at, end_at)`, enforcing `start_at < created_at <= end_at` on
+    BOTH edges — an article older than the requested lookback, not only
+    one after the cutoff, now fails the same closed path. `fetch_news`
+    passes its own already-computed `start_dt`/`end_dt` straight through.
+    Also hardened every timezone-awareness check on this timeline
+    (`_parse_news_timestamp`, `_pre_fill_news_window`, `_to_utc_rfc3339`)
+    via one new shared pure helper, `_is_tz_aware`: a datetime now needs
+    `tzinfo is not None` AND a resolving `utcoffset()` — a mis-implemented
+    custom tzinfo that returns `None` from `utcoffset()` is rejected the
+    same as an outright naive datetime, not silently treated as aware. 6
+    more tests (12 total across 09-17c/d) covering the older-than-start
+    exclusion, the exact `start_at < created_at <= end_at` boundary, and
+    a broken-tzinfo rejection both directly and through `_to_utc_rfc3339`.
+    Pre-fill gate semantics, risk checker, sizing, watchlist, fundamentals,
+    dashboard, and provider API untouched. Manifest still `proposed`; no
+    run/training/evaluation/smoke/holdout/live-paper process executed; no
+    Neon writes.
+
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.
 

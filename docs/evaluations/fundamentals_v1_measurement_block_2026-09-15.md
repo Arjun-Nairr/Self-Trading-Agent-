@@ -198,3 +198,27 @@ The pre-fill gate, `risk_checker.py` (pure math, zero tool access), sizing, rule
 `python verify.py`: **12/12 non-mutating suites pass** (backtest-harness pytest 219 → 225). Neon row counts and `backtest_state.json` (Round 2) unchanged — no run, training, evaluation, smoke test, holdout, or live-paper process executed. Manifest remains `status: "proposed"`, untouched.
 
 **Nothing has run under either configuration. Conclusion unchanged: keep Fundamentals V1 as unproven context.**
+
+---
+
+## 2026-09-17d: the ordinary decision-time filter was still only checking one edge — corrected
+
+### The defect
+
+2026-09-17c's `_articles_at_or_before_cutoff` closed the leak on the cutoff (upper) side of `fetch_news`'s requested window, but still implicitly trusted the provider's own 7-day lookback start: an article older than that requested start would have passed the filter untouched. The provider's `[start_at, end_at]` request must be treated as an untrusted superset on *both* edges, not just the one a same-day leak happens to threaten.
+
+### The correction
+
+`_articles_at_or_before_cutoff` is replaced by `_articles_in_decision_window(articles, start_at, end_at)` (`backtest-harness/run_backtest.py`), enforcing the exact interval `start_at < created_at <= end_at` — strictly after the lookback start, at or before the decision cutoff, matching the pre-fill gate's own `_articles_in_window` shape. `fetch_news` now passes its own already-computed `start_dt`/`end_dt` straight into this helper before the 4-headline prompt cap, instead of only `end_dt`. Separately, every timezone-awareness check this news timeline relies on (`_parse_news_timestamp`, `_pre_fill_news_window`, `_to_utc_rfc3339`) now routes through one new shared pure helper, `_is_tz_aware(dt)`: a datetime is accepted only when `tzinfo is not None` *and* `dt.utcoffset()` actually resolves to a value — a mis-implemented custom `tzinfo` whose own `utcoffset()` returns `None` is rejected exactly like an outright naive datetime, rather than silently passing the old `tzinfo is None` check.
+
+### Architecture unchanged, as required
+
+The pre-fill gate's own boundary semantics, `risk_checker.py`, sizing, rules, watchlist, fundamentals, dashboard, and the provider API are all untouched — this correction only replaces `fetch_news`'s own filtering helper and hardens the shared timezone check three existing functions already used.
+
+### Tests
+
+6 more zero-network tests added to `test_execution_semantics.py` (228 total in `backtest-harness`, 12 across both 2026-09-17c/d passes): an article older than the lookback start excluded; the exact `start_at < created_at <= end_at` boundary (start excluded, end included) proven in one test; a custom tzinfo whose `utcoffset()` returns `None` rejected both directly (`_is_tz_aware`) and through a real call site (`_to_utc_rfc3339`); and `fetch_news`'s end-to-end test extended with a second, older-than-lookback leak article alongside the existing post-cutoff one, proving both edges are enforced before truncation.
+
+`python verify.py`: **12/12 non-mutating suites pass** (backtest-harness pytest 225 → 228). Neon row counts and `backtest_state.json` (Round 2) unchanged — no run, training, evaluation, smoke test, holdout, or live-paper process executed. Manifest remains `status: "proposed"`, untouched.
+
+**Nothing has run under either configuration. Conclusion unchanged: keep Fundamentals V1 as unproven context.**
