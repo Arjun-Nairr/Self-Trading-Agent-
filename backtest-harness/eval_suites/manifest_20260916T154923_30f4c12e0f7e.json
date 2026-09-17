@@ -1422,7 +1422,7 @@
     "sideways"
   ],
   "selection_seed": 20260915,
-  "status": "approved",
+  "status": "proposed",
   "thresholds": {
     "high_volatility_pct": 1.5,
     "rally_pct": 5.0,

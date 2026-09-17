@@ -577,6 +577,60 @@ document; it is implemented.**
     single globally-later holdout period. Full detail:
     `docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
 
+    **2026-09-16b — approved, comparison-stage run started, interrupted:**
+    the manifest above was reviewed and approved (commit `be1b4b9`). A
+    real infra gap surfaced on the first execution attempt:
+    `backtest_run_registry`'s `run_kind` CHECK constraint had never
+    actually been widened live to permit `'evaluation'`, despite the
+    schema.sql migration existing since the September correction pass
+    (only `backtest_run_configuration` was activated then, not this
+    sibling constraint) — applied live, verified (row count unchanged,
+    every existing `run_id`/`run_kind` pair byte-identical before/after).
+    Retried; the `technical_news_baseline` config then ran for real
+    (`run_id e9e5644e-fd56-4be8-a8b6-5132be7a71c7`, the `high_volatility`
+    comparison episode, 2022-06) before being **deliberately interrupted
+    by the user after 12 of ~22 simulated trading days** (29 journaled
+    decisions, 19 fills, 0 left pending) once a real gap was identified:
+    queued BUYs were never re-checked against headlines published
+    overnight between their decision-time news check and their 09:45 ET
+    fill. A strictly read-only audit (no resume/retry/delete/approve/
+    revert) confirmed: zero holdout episodes touched, zero non-evaluation
+    runs created, zero live-paper/broker orders, Round 2 completely
+    unchanged; the interrupted run's Neon rows were left in place
+    (separate cleanup task) but this run is **excluded from all
+    performance analysis** — its own incompleteness plus the missing gate
+    make it invalid for comparison by construction, not by judgment call.
+
+    **2026-09-17 correction — the missing gate implemented:**
+    `apply_pre_fill_news_gate` (`backtest-harness/run_backtest.py`) closes
+    exactly the gap the interrupted run surfaced. Every queued BUY is
+    re-checked, immediately before `simulate_trading_day`, against real
+    headlines timestamped strictly after the original decision day's
+    close through the actual 09:45 ET fill cutoff (timezone-aware,
+    `America/New_York`, both boundaries validated — a naive/unparseable
+    timestamp fails the affected order closed rather than approximating).
+    Materially adverse news, an unavailable feed, or a malformed
+    confirmation reply all resolve the order rejected
+    (`pre_fill_news_veto` / `pre_fill_news_unavailable`) via the SAME
+    idempotent `resolve_trade_rejection` path every other rejection
+    already uses — never a new journal mechanism. Queued SELLs and
+    mechanical exits are structurally untouched (the gate only ever
+    inspects `action == "BUY"` orders). `risk_checker.py` remains pure
+    math/rules, zero external tool access — the classification judgment
+    stays with Hermes, via one small, constrained, batched confirmation
+    call per cycle (never a second full trading cycle) that can only ever
+    return `CONFIRM`/`CANCEL`, with headline/summary text explicitly
+    treated as untrusted data in the prompt itself. 14 new focused tests
+    (`test_execution_semantics.py`), zero real Docker/Neon/Hermes/broker
+    I/O in any of them. The approved manifest's `status` was reverted
+    `approved` → `proposed` (single-field edit, content hash unchanged,
+    verified) — a fresh comparison-stage run needs a fresh human review
+    and approval of this exact fix first. **Live parity, explicitly not
+    built speculatively:** live mode currently has no queued/delayed BUY
+    path at all (`alpaca-mcp`'s `place_order` executes immediately) for
+    this gate to extend — documented here as a real prerequisite before
+    any future delayed live-execution design, not invented ahead of need.
+
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.
 

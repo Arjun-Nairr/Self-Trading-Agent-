@@ -269,20 +269,13 @@ number needs to go through the user explicitly.
 
 ## 9. Superseded decisions — brief pointers only
 
-- **Round 1's conservative rules profile** — superseded by the aggressive
-  Phase 1 profile. `docs/evaluations/run1_evaluation_extract.md`.
-- **A first, conservative Round-2 draft** and **`SOUL.md`'s Phase 1
-  temperament** — both superseded before/at Round 2's start. Archived:
-  `docs/history/round2-conservative-draft/run2_prep_analysis.md`,
-  `docs/history/SOUL_phase1_conservative_2026-08-30.md`.
+- **Round 1's conservative rules profile** — superseded by the aggressive Phase 1 profile. `docs/evaluations/run1_evaluation_extract.md`.
+- **A first, conservative Round-2 draft** and **`SOUL.md`'s Phase 1 temperament** — both superseded before/at Round 2's start. Archived: `docs/history/round2-conservative-draft/run2_prep_analysis.md`, `docs/history/SOUL_phase1_conservative_2026-08-30.md`.
 - **`quota_pacer.py`** — removed entirely (`750d80d`). Do not reference it,
   `quota_pacer_state.json`, or a "weekly quota" as current.
-- **OpenCode Go + DeepSeek V4 Flash** — investigated, abandoned (a real, unresolved upstream hang). Provider is still `openai-codex` (model
-  migrated `gpt-5.4-mini`→`gpt-5.6-terra` 2026-09-12, §5/§6 — a compatibility fix, not a return to this abandoned alternative).
-- **Four Round-2 smoke-test `run_id`s** — superseded, before the real
-  tranche started. **Never resume any of them.**
-- **Prior repair passes** (pre-tranche crashes/bugs) — no longer operationally
-  relevant. Full narrative: `docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md`, `docs/history/HANDOFF_FULL_2026-08-28.md`.
+- **OpenCode Go + DeepSeek V4 Flash** — investigated, abandoned (a real, unresolved upstream hang). Provider is still `openai-codex` (model migrated `gpt-5.4-mini`→`gpt-5.6-terra` 2026-09-12, §5/§6 — a compatibility fix, not a return to this abandoned alternative).
+- **Four Round-2 smoke-test `run_id`s** — superseded, before the real tranche started. **Never resume any of them.**
+- **Prior repair passes** (pre-tranche crashes/bugs) — no longer operationally relevant. Full narrative: `docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md`, `docs/history/HANDOFF_FULL_2026-08-28.md`.
 
 ---
 
@@ -368,30 +361,38 @@ covers the non-mutating suites. Still blocked on everything §10 blocks.
 
 ---
 
-## 14. 2026-09-15/16 fundamentals-measurement block — valid manifest, unapproved
+## 14. 2026-09-15/17 fundamentals-measurement block — gate fix, unapproved
 
-**2026-09-15c:** `ELIGIBLE_RANGE_START=2022-06-01` (RYAN/ALGM viability
-floor) committed; `propose --seed 20260915` failed — the only 2 real
-`selloff` months (2022-09/12) forced the old single-trailing-holdout rule
-to empty the comparison pool of `sideways`. No manifest, no episode, no
-Hermes call. Incidental fix: `test_eval_suite.py` was silently writing
-real `cycle_failed` Neon rows with Docker up (missing `fail_logger`
-mock) — fixed at the source; 3 pre-existing orphaned rows documented,
-not deleted (blocked by this environment's safety gate). Roadmap:
-"Dynamic company selector" removed (cancelled, `docs/PROJECT_BACKLOG.md` §2).
+**2026-09-15c:** old single-trailing-holdout rule proven infeasible (2
+real `selloff` months emptied `sideways` from comparison). No manifest/
+episode/Hermes call. Incidental fix: `test_eval_suite.py` silently wrote
+real Neon rows with Docker up — fixed. Roadmap: "Dynamic company
+selector" removed (cancelled, `docs/PROJECT_BACKLOG.md` §2).
 
-**2026-09-16 correction:** replaced the infeasible rule with
-`select_paired_episodes` — one comparison + one later holdout PER REGIME
-independently (`MANIFEST_VERSION` 3→4, old manifests refused). Fixed
-range/watchlist/regimes/rules untouched. `propose --seed 20260915` now
-produces a **valid, verified** manifest
-(`eval_suites/manifest_20260916T154923_30f4c12e0f7e.json`, `status:
-proposed`) — `selloff`'s only 2 months forced into chronological order
-as required; all 8 episodes pass watchlist viability. **Not approved, no
-episode run.** Caveat: per-regime-later holdouts, NOT one globally-later
-holdout period (recorded in the manifest itself). Conclusion still
-**keep Fundamentals V1 as unproven context** — nothing has run. Full
-detail: `docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
+**2026-09-16:** `select_paired_episodes` (one comparison + one later
+holdout PER REGIME, `MANIFEST_VERSION` 3→4) produced a **valid** manifest
+(`eval_suites/manifest_20260916T154923_30f4c12e0f7e.json`). Approved
+(`be1b4b9`); comparison-stage run started (baseline) — hit a real infra
+gap (`backtest_run_registry`'s CHECK constraint never actually widened
+live for `evaluation`; fixed live, verified), retried, then **user
+interrupted after 12 simulated days** (run
+`e9e5644e-fd56-4be8-a8b6-5132be7a71c7`, `high_volatility`/2022-06,
+29 decisions/19 fills/0 pending) once a real gap was found: queued BUYs
+were never re-checked against overnight news before their 09:45 ET fill.
+Audit confirmed no holdout/live-paper touch, Round 2 untouched —
+**excluded from all analysis**, detail in the measurement report.
+
+**2026-09-17:** implemented the missing gate
+(`apply_pre_fill_news_gate`, `run_backtest.py`) — every queued BUY is
+re-checked against headlines in `(decision-day close, T+1 09:45 ET]`
+before `simulate_trading_day` sees it; adverse/unavailable/malformed-
+timestamp news cancels closed; SELLs/exits untouched; `risk_checker.py`
+stays pure math. Manifest **status reverted proposed→approved→proposed**
+(hash unchanged) pending review of this fix. Live parity: no queued/
+delayed live BUY path exists to extend — documented as required before
+any future delayed live execution, not built speculatively. Conclusion
+unchanged: **keep Fundamentals V1 as unproven context**. Detail:
+`docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
 
 ---
 
