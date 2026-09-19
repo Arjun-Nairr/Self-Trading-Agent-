@@ -13,11 +13,23 @@
   <strong>DEV FIXTURE PREVIEW</strong> — not part of the shipped app, not linked from index.html
   <label>Fixture: <select id="fx"><option value="FIXTURE_BACKTEST">Populated backtest run</option><option value="FIXTURE_LIVE_EMPTY">Empty live-paper account</option><option value="FIXTURE_STALE">Stale data</option></select></label>
   <label>Page: <select id="pg"><option value="overview">Overview</option><option value="trades">Trades</option><option value="decisions">Decisions</option><option value="runs">Runs</option><option value="roadmap">Roadmap</option></select></label>
-  <button type="button" id="theme-toggle" aria-label="Toggle dark mode" aria-pressed="false">🌙 Dark</button>
 </div>
 <div class="shell">
+  <header class="topbar">
+    <div class="topbar-main">
+      <div class="brand"><h1>Trading Agent</h1></div>
+      <div class="controls">
+        <select class="run-select" aria-label="Preview run"><option>Fixture run · Day 41</option></select>
+        <button type="button" id="theme-toggle" class="theme-toggle" aria-label="Toggle dark mode" aria-pressed="false">🌙 Dark</button>
+      </div>
+    </div>
+    <p class="topbar-meta"><span class="mode-note">Local fixture preview</span><span class="status">No network data</span></p>
+  </header>
+  <nav class="pages" id="preview-nav" aria-label="Preview pages"></nav>
   <main id="page-root"></main>
+  <footer class="appfoot">Synthetic fixtures · for layout verification only</footer>
 </div>
+<nav class="bottom-nav" id="preview-mobile-nav" aria-label="Preview pages (mobile)"></nav>
 <script type="module">
 import * as fixtures from "../js/fixtures.js";
 import { render as renderOverview } from "../js/pages/overview.js";
@@ -42,6 +54,14 @@ function draw() {
     : [];
   root.innerHTML = "";
   PAGES[pgSel.value](root, { ...data, mode, run_id: data.run_id }, { runs });
+  for (const id of ["preview-nav", "preview-mobile-nav"]) {
+    const nav = document.getElementById(id);
+    nav.innerHTML = Array.from(pgSel.options, option => `<button type="button" data-page="${option.value}" aria-current="${option.value === pgSel.value ? "page" : "false"}">${option.text}</button>`).join("");
+    nav.querySelectorAll("button").forEach(button => button.addEventListener("click", () => {
+      pgSel.value = button.dataset.page;
+      draw();
+    }));
+  }
 }
 fxSel.addEventListener("change", draw);
 pgSel.addEventListener("change", draw);

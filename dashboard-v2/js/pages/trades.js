@@ -63,7 +63,7 @@ export function render(el, data) {
       ? `<span class="muted-cell">—</span>`
       : (daysHeld === 0 ? `<span class="muted-cell">0</span>` : String(daysHeld));
 
-    return `<tr data-key="${esc(key(t))}" class="responsive">
+    return `<tr data-key="${esc(key(t))}" class="responsive ${selectedKey === key(t) ? "is-selected" : ""}" tabindex="0" aria-label="View ${esc(t.ticker)} position details">
       <td data-label="Ticker" class="ticker">${esc(t.ticker)}</td>
       <td data-label="Status">${statusCell}</td>
       <td data-label="P&L" class="num cell-primary ${pnl == null ? "" : pnl >= 0 ? "pos" : "neg"}">${pnl == null ? "—" : `${pnl >= 0 ? "+" : ""}${money(pnl)} (${pctSigned(pnlPct)})`}</td>
@@ -100,6 +100,14 @@ export function render(el, data) {
   `;
 
   el.querySelectorAll("tbody tr").forEach(tr => {
+    tr.addEventListener("keydown", e => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      tr.click();
+      const nextFocus = el.querySelector(".close-detail") ||
+        Array.from(el.querySelectorAll("tr[data-key]")).find(row => row.dataset.key === tr.dataset.key);
+      nextFocus?.focus();
+    });
     tr.addEventListener("click", () => {
       selectedKey = selectedKey === tr.dataset.key ? null : tr.dataset.key;
       render(el, data);
@@ -152,6 +160,8 @@ function renderDetail(el, r, activity) {
     </div>
   `;
   el.querySelector(".close-detail").addEventListener("click", () => {
+    const row = el.parentElement.querySelector("tr.is-selected");
+    if (row) { row.classList.remove("is-selected"); row.focus(); }
     selectedKey = null; el.innerHTML = "";
   });
 }

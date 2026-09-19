@@ -1,8 +1,6 @@
-/* Dashboard V2 — research tearsheet.
-   Hierarchy comes from the page ground, whitespace and single hairlines,
-   not from boxes. A bordered surface is spent only where the thing really
-   is a separate object: Roadmap sector cards, warning/error boxes, the
-   run-status banner, the detail panel. Everything else sits on the page.
+/* Dashboard V2 — research workspace.
+   A prominent portfolio summary, inset section surfaces, and quiet table
+   headers separate the reading levels. Keep all financial colors semantic.
 
    Self-hosted Archivo (UI/body) + IBM Plex Mono (numerals/data) — no
    external runtime font request. One accent (blue); green/red/amber stay
@@ -90,14 +88,14 @@
   --chart-pos-fill: rgba(18, 105, 62, 0.10);
   --chart-neg-fill: rgba(179, 38, 38, 0.10);
 
-  --radius: 6px;
+  --radius: 10px;
 
   /* 4px spacing scale — the only vertical/horizontal rhythm used. */
   --s1: 4px;  --s2: 8px;   --s3: 12px;  --s4: 16px;
   --s6: 24px; --s8: 32px;  --s12: 48px;
 
   /* Type scale. Nothing visible sits below --fs-label. */
-  --fs-hero: 32px;
+  --fs-hero: clamp(32px, 3.5vw, 48px);
   --fs-h2: 20px;
   --fs-major: 17px;
   --fs-body: 15px;
@@ -199,11 +197,11 @@ code { font-family: var(--mono); font-size: inherit; color: var(--text-dim); ove
 
 /* ---------------------------------------------------------------- shell */
 
-.shell { max-width: 1180px; margin: 0 auto; padding: 0 var(--s6) var(--s12); }
+.shell { max-width: 1328px; margin: 0 auto; padding: 0 var(--s8) var(--s12); }
 
 /* Masthead: one identity row, then one quiet metadata band. The band is
    12px and never competes with the product name. */
-header.topbar { padding: var(--s6) 0 0; }
+header.topbar { padding: var(--s8) 0 0; }
 
 .topbar-main {
   display: flex; align-items: center; justify-content: space-between;
@@ -212,6 +210,12 @@ header.topbar { padding: var(--s6) 0 0; }
 .brand h1 {
   font-size: var(--fs-h2); font-weight: 600; letter-spacing: -0.02em;
   white-space: nowrap;   /* never let the name wrap at 375px */
+}
+.brand { display: flex; align-items: center; gap: var(--s3); }
+.brand::before {
+  content: ""; width: 10px; height: 26px; flex: none;
+  border-left: 3px solid var(--blue); border-right: 3px solid var(--text);
+  transform: skewY(-18deg);
 }
 .controls { display: flex; align-items: center; gap: var(--s2); flex-wrap: wrap; }
 
@@ -231,7 +235,7 @@ header.topbar { padding: var(--s6) 0 0; }
 
 select.run-select {
   border: 1px solid var(--border-strong); border-radius: var(--radius);
-  padding: var(--s2) var(--s3); font-size: var(--fs-sec); font-family: var(--font);
+  padding: var(--s2) var(--s3); min-height: 44px; font-size: var(--fs-sec); font-family: var(--font);
   background: var(--surface); color: var(--text); min-width: 0; max-width: 240px;
 }
 
@@ -239,7 +243,7 @@ select.run-select {
   border: 1px solid var(--border-strong); border-radius: var(--radius);
   padding: var(--s2) var(--s3); font-size: var(--fs-sec); font-weight: 500;
   background: var(--surface); color: var(--text-dim); cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  min-height: 44px; transition: background 0.15s, color 0.15s;
 }
 .theme-toggle:hover { background: var(--surface-2); color: var(--text); }
 
@@ -256,20 +260,20 @@ select.run-select {
 .health-bar .dot { margin-right: var(--s1); }
 
 nav.pages {
-  display: flex; gap: var(--s1); margin: var(--s4) 0 0;
+  display: flex; gap: var(--s2); margin: var(--s6) 0 0;
   border-bottom: 1px solid var(--border);
 }
 nav.pages button {
   border: none; background: transparent; padding: var(--s3) var(--s3);
   font-size: var(--fs-sec); font-weight: 600; letter-spacing: 0.01em;
   color: var(--text-faint); cursor: pointer;
-  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  border-bottom: 2px solid transparent; margin-bottom: -1px; min-height: 48px;
   transition: color 0.15s, border-color 0.15s;
 }
-nav.pages button[aria-current="page"] { color: var(--text); border-bottom-color: var(--blue); }
+nav.pages button[aria-current="page"] { color: var(--blue); border-bottom-color: var(--blue); background: var(--blue-dim); border-radius: 6px 6px 0 0; }
 nav.pages button:hover:not([aria-current="page"]) { color: var(--text-dim); }
 
-main { padding-top: var(--s2); }
+main { padding-top: var(--s6); min-width: 0; }
 
 section { margin-top: var(--s8); }
 section:first-of-type { margin-top: var(--s6); }
@@ -285,34 +289,24 @@ section:first-of-type { margin-top: var(--s6); }
 .section-title:first-child,
 section > .section-title { margin-top: 0; }
 
-/* Section band — the separation device for a page's follow-on folds.
-   A page's FIRST fold (its headline figures) stays on the plain page
-   ground; every major fold after it sits in one of these, so the rhythm
-   reads ground -> band -> band rather than a wall of equal blocks.
-
-   Deliberately NOT a card: no shadow, no radius, no heavy border. Just a
-   barely-there ground shift between two hairlines. The tint bleeds into
-   the shell's own side gutter so content inside a band stays on exactly
-   the same left edge as the page hero above it.
-
-   `section.band`, not `.band` — it has to outrank `section:first-of-type`
-   (same specificity, declared later), or the first band on a page would
-   silently keep the 24px section gap instead of its own 48px. */
+/* Contained sections: a visible gutter between folds, shared title rhythm. */
 section.band {
-  margin: var(--s12) calc(var(--s6) * -1) 0;
+  margin: var(--s6) 0 0;
   padding: var(--s6);
-  background: var(--band);
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
 }
-/* Consecutive bands share one gap, never two stacked margins. */
-section.band + section.band { margin-top: var(--s12); }
+section.band + section.band { margin-top: var(--s6); }
+section.band > .section-title {
+  display: flex; align-items: center; gap: var(--s3); margin-bottom: var(--s6);
+}
+section.band > .section-title::before {
+  content: ""; width: 3px; height: 18px; background: var(--blue); flex: none;
+}
 
 @media (max-width: 760px) {
   section.band {
-    margin-left: calc(var(--s4) * -1);
-    margin-right: calc(var(--s4) * -1);
-    padding: var(--s6) var(--s4);
+    padding: var(--s4); margin-top: var(--s6);
   }
 }
 
@@ -324,20 +318,28 @@ section.band + section.band { margin-top: var(--s12); }
 
 /* ------------------------------------------------------------- surfaces */
 
-/* A plain padded block on the page ground. Cards are no longer a surface
-   in this design; the four real objects below keep their own borders. */
+/* Compatibility wrappers used by the existing page renderers. */
 .card { padding: 0; }
 .panel { overflow-x: auto; }
 
 /* --------------------------------------------------------- hero pair */
-/* Overview only: the two figures the page exists to report, directly on
-   the page ground with no container. */
+/* Overview: capital and return anchor the page inside one summary surface. */
+.portfolio-summary {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+}
+.portfolio-summary .section-title {
+  font-size: var(--fs-label); color: var(--text-faint); text-transform: uppercase;
+  letter-spacing: 0.12em; margin: 0; padding: var(--s6) var(--s6) 0;
+}
 
 .hero-pair {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--s6);
-  padding-bottom: var(--s6); border-bottom: 1px solid var(--border);
+  padding: var(--s6); border-bottom: 1px solid var(--border);
 }
+.hero-pair > * { min-width: 0; }
+.hero-pair > * + * { border-left: 1px solid var(--border); padding-left: var(--s6); }
 .hero-label {
   font-size: var(--fs-label); color: var(--text-faint); margin-bottom: var(--s2);
 }
@@ -354,8 +356,10 @@ section.band + section.band { margin-top: var(--s12); }
    same hairline the rest of the page uses. */
 @media (max-width: 560px) {
   .hero-pair { grid-template-columns: 1fr; gap: 0; }
-  .hero-pair > * + * { margin-top: var(--s4); padding-top: var(--s4); border-top: 1px solid var(--border); }
-  .hero-value { font-size: 28px; }
+  .hero-pair { padding: var(--s4); }
+  .hero-pair > * + * { margin-top: var(--s4); padding: var(--s4) 0 0; border-top: 1px solid var(--border); border-left: 0; }
+  .portfolio-summary .section-title { padding: var(--s4) var(--s4) 0; }
+  .hero-value { font-size: clamp(28px, 8vw, 36px); }
 }
 
 /* ------------------------------------------------- metric information strip */
@@ -388,6 +392,7 @@ section.band + section.band { margin-top: var(--s12); }
 /* Must restate: `.stats-grid.six .stat` outranks the base `.stat:first-child`
    rule, so the strip's first column would otherwise lose its flush edge. */
 .stats-grid.six .stat:first-child { padding-left: 0; }
+.portfolio-summary .stats-grid { border: 0; background: var(--band); padding: 0 var(--s6); }
 @media (max-width: 1000px) {
   .stats-grid.six { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .stats-grid.six .stat:nth-child(3n + 1) { border-left: none; padding-left: 0; }
@@ -411,7 +416,7 @@ section.band + section.band { margin-top: var(--s12); }
   display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s2) var(--s4);
   padding: var(--s4) 0; border-bottom: 1px solid var(--border);
 }
-.pos-head { display: flex; align-items: baseline; gap: var(--s3); min-width: 0; }
+.pos-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s3); min-width: 0; }
 .pos-ticker { font-size: var(--fs-major); font-weight: 600; letter-spacing: -0.01em; }
 .pos-pnl { font-family: var(--mono); font-size: var(--fs-major); font-weight: 600; }
 .pos-pnl.pos { color: var(--green); }
@@ -437,8 +442,12 @@ td {
 }
 th:last-child, td:last-child { padding-right: 0; }
 tr:last-child td { border-bottom: none; }
-tbody tr { cursor: pointer; }
-tbody tr:hover td { background: var(--surface-2); }
+tbody tr[data-key] { cursor: pointer; }
+tbody tr[data-key]:hover td, tbody tr.is-selected td { background: var(--surface-2); }
+thead { background: var(--band); }
+th:first-child, td:first-child { padding-left: var(--s3); }
+th:last-child, td:last-child { padding-right: var(--s3); }
+tbody tr[data-key]:focus-visible { outline-offset: -2px; }
 
 /* Numeric columns align right so the figures stack cleanly. */
 td.num, th.num { text-align: right; font-family: var(--mono); }
@@ -477,28 +486,31 @@ td.reason { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-s
 .summary-line {
   display: flex; flex-wrap: wrap; gap: var(--s2) var(--s6);
   font-size: var(--fs-sec); color: var(--text-dim);
-  padding-bottom: var(--s3);
+  padding: var(--s4); margin-bottom: var(--s6); background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
 }
 .summary-line b { font-family: var(--mono); font-weight: 600; color: var(--text); }
 
-/* mobile: wide tables collapse to stacked label/value rows */
+/* Mobile: each record becomes a compact two-column definition grid.
+   P&L and prose span both columns; every original field stays visible. */
 @media (max-width: 660px) {
   table.responsive thead { display: none; }
-  table.responsive, table.responsive tbody, table.responsive tr, table.responsive td { display: block; width: 100%; }
-  table.responsive tr { border-bottom: 1px solid var(--border); padding: var(--s3) 0; }
-  table.responsive tr:last-child { border-bottom: none; }
-  table.responsive td { border: none; padding: var(--s1) 0; }
-  /* Two real columns, so a wrapped value aligns under itself instead of
-     snapping back to the far left. */
+  table.responsive, table.responsive tbody { display: block; width: 100%; }
+  table.responsive tr {
+    display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--s3) var(--s4); padding: var(--s4); margin-bottom: var(--s3);
+    border: 1px solid var(--border); border-radius: var(--radius); background: var(--band);
+  }
+  table.responsive tr:last-child { margin-bottom: 0; }
+  table.responsive td { min-width: 0; border: none; padding: 0; overflow-wrap: anywhere; }
   table.responsive td[data-label] {
-    display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: var(--s3); align-items: baseline;
+    display: flex; flex-direction: column; gap: var(--s1); align-items: flex-start;
   }
   table.responsive td[data-label]::before {
     content: attr(data-label); color: var(--text-faint); font-size: var(--fs-label);
   }
-  /* A grid item stretches its column by default, which would blow a status
-     pill or a confidence meter out to the full value width. */
-  table.responsive td[data-label] > * { justify-self: start; }
+  table.responsive td[data-label="P&L"], table.responsive td[data-label="Time"],
+  table.responsive td.reason { grid-column: 1 / -1; }
   table.responsive td.reason { max-width: none; white-space: normal; overflow: visible; }
   table.responsive td.num { text-align: left; }
 }
@@ -531,10 +543,10 @@ td.reason { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-s
 /* -------------------------------------------------------------- states */
 
 .empty, .loading {
-  padding: var(--s8) 0; color: var(--text-faint); font-size: var(--fs-body);
-  border-top: 1px solid var(--border);
+  padding: var(--s8) var(--s6); color: var(--text-dim); font-size: var(--fs-body);
+  border: 1px dashed var(--border-strong); background: var(--band); border-radius: var(--radius);
 }
-/* Real objects: these four keep a border, and are the only things that do. */
+/* Status messages keep semantic colors and distinct surfaces. */
 .error-box {
   padding: var(--s3) var(--s4); border-radius: var(--radius); border: 1px solid var(--red);
   background: var(--red-dim); color: var(--red); font-size: var(--fs-sec);
@@ -567,6 +579,7 @@ td.reason { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-s
 .run-status-banner .close-run-status:hover { opacity: 1; }
 
 .skel { position: relative; overflow: hidden; background: var(--surface-2); border-radius: var(--radius); }
+.skel-page { height: 280px; }
 .skel::after {
   content: ""; position: absolute; inset: 0;
   background: linear-gradient(90deg, transparent, rgba(0,0,0,0.04), transparent);
@@ -593,7 +606,7 @@ td.reason { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-s
 .close-detail {
   border: 1px solid var(--border-strong); background: var(--surface); border-radius: var(--radius);
   padding: var(--s2) var(--s3); font-size: var(--fs-sec); font-weight: 600;
-  color: var(--text-dim); cursor: pointer; min-height: 36px;
+  color: var(--text-dim); cursor: pointer; min-height: 36px; margin-top: var(--s3);
 }
 .close-detail:hover { background: var(--surface-2); }
 
@@ -618,9 +631,7 @@ td.reason { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-s
 .lifecycle .step.done { background: var(--blue-dim); color: var(--blue); border-color: transparent; }
 
 /* ------------------------------------------------------------------ chart */
-/* No card. Full content width, same visual weight in both themes. Inside
-   its band the chart needs no rule of its own -- it sits directly under
-   its heading, attached to the section rather than floating below it. */
+/* Chart fits its section; axis labels remain unscaled HTML. */
 
 .chart-block { padding-top: var(--s2); }
 
@@ -630,8 +641,8 @@ td.reason { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-s
    geometry uses, so it stays pixel-aligned to its chart level. */
 .chart-grid {
   display: grid;
-  grid-template-columns: 64px 1fr;
-  grid-template-rows: 220px 22px;
+  grid-template-columns: 76px minmax(0, 1fr);
+  grid-template-rows: 248px 26px;
   grid-template-areas: "yaxis plot" ". xaxis";
   column-gap: var(--s2);
 }
@@ -669,7 +680,7 @@ td.reason { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-s
 .chart-endpoint.neg { color: var(--red); }
 
 @media (max-width: 760px) {
-  .chart-grid { grid-template-columns: 56px 1fr; grid-template-rows: 180px 20px; }
+  .chart-grid { grid-template-columns: 72px minmax(0, 1fr); grid-template-rows: 180px 24px; column-gap: var(--s1); }
   /* At phone width the endpoint label would sit off the plot edge. */
   .chart-endpoint { display: none; }
 }
@@ -728,6 +739,7 @@ td.reason { max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-s
   text-transform: uppercase; letter-spacing: 0.06em;
 }
 .tech-details[open] summary { margin-bottom: var(--s2); }
+.tech-kv-list { margin-top: var(--s2); }
 .tech-details .tech-note {
   margin-top: var(--s3); padding: var(--s3); border-radius: var(--radius);
   background: var(--surface-2); font-size: var(--fs-sec); color: var(--text-dim);
@@ -758,13 +770,17 @@ nav.bottom-nav button {
   flex: 1 1 0; padding: var(--s2) var(--s1);
   border-top: 2px solid transparent; margin-top: -1px;
 }
-nav.bottom-nav button[aria-current="page"] { color: var(--text); border-top-color: var(--blue); }
+nav.bottom-nav button[aria-current="page"] { border-top-color: var(--blue); background: var(--blue-dim); color: var(--blue); }
 
 @media (max-width: 760px) {
   nav.pages { display: none; }
   nav.bottom-nav { display: flex; }
   .shell { padding: 0 var(--s4) 88px; }
   header.topbar { padding-top: var(--s4); }
+  .portfolio-summary .stats-grid { padding: 0 var(--s4); }
+  .controls { max-width: 100%; }
+  .controls #run-select-wrap { min-width: 0; }
+  select.run-select { max-width: 100%; }
 }
 
 /* ------------------------------------------------------------- roadmap */
@@ -779,21 +795,25 @@ nav.bottom-nav button[aria-current="page"] { color: var(--text); border-top-colo
 }
 .rm-legend-item { display: inline-flex; align-items: baseline; gap: var(--s2); white-space: nowrap; }
 
-/* One card per sector — 3 across on desktop, 2 on tablet, 1 on phone.
-   align-items: start keeps a 3-item card its own height instead of being
-   stretched to match a 4-item neighbour. */
+/* Six numbered sectors: aligned rows, 3/2/1 columns by viewport. */
 .rm-sectors {
   display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
-  align-items: start; gap: var(--s6); margin-top: var(--s6);
+  align-items: stretch; gap: var(--s4); margin-top: var(--s6); counter-reset: sector;
 }
 @media (max-width: 980px) { .rm-sectors { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 660px) { .rm-sectors { grid-template-columns: 1fr; } }
 
-.rm-sector {
+section.rm-sector {
+  margin: 0; counter-increment: sector;
   min-width: 0; background: var(--surface); border: 1px solid var(--border);
   border-radius: var(--radius); padding: var(--s6);
 }
-.rm-sector-title { font-size: var(--fs-major); font-weight: 600; }
+.rm-sector-title { font-size: var(--fs-major); font-weight: 600; min-height: 3em; }
+.rm-sector-title::before {
+  content: counter(sector, decimal-leading-zero); display: block;
+  font-family: var(--mono); font-size: var(--fs-label); color: var(--blue);
+  margin-bottom: var(--s3); letter-spacing: 0.08em;
+}
 
 .rm-list { list-style: none; margin: var(--s4) 0 0; padding: 0; display: flex; flex-direction: column; gap: var(--s3); }
 .rm-item { display: flex; gap: var(--s3); font-size: var(--fs-body); line-height: 1.45; color: var(--text); }
@@ -806,3 +826,4 @@ nav.bottom-nav button[aria-current="page"] { color: var(--text); border-top-colo
 .rm-mark.active { color: var(--blue); }
 .rm-mark.next { color: var(--text-faint); }
 .rm-mark.later { color: var(--text-faint); opacity: 0.7; }
+.rm-item + .rm-item { border-top: 1px solid var(--border); padding-top: var(--s3); }

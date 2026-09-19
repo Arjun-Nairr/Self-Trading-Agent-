@@ -70,7 +70,8 @@ export function render(el, data, ctx) {
   el.innerHTML = `
     ${renderRunStatus(data, ctx || {})}
     ${staleBanner}
-    <section>
+    <section class="portfolio-summary">
+      <h2 class="section-title">Portfolio overview</h2>
       <div class="hero-pair">
         ${hero("Equity", snap ? money(snap.equity) : "—", "", snap ? `Cash ${money(snap.cash)}` : "")}
         ${hero("Total return", pctSigned(totRet), totRet >= 0 ? "pos" : "neg", `vs. ${money(STARTING_EQUITY)} start`)}

@@ -49,7 +49,7 @@ export function render(el, data) {
   const dominantSignal = modeValue(rowsData.map(t => t.primary_signal));
 
   const rows = rowsData.map(t => `
-    <tr data-key="${esc(key(t))}" class="responsive">
+    <tr data-key="${esc(key(t))}" class="responsive ${selectedKey === key(t) ? "is-selected" : ""}" tabindex="0" aria-label="View ${esc(t.ticker)} decision details">
       <td data-label="Time" class="mono">${time(t.created_at)}</td>
       <td data-label="Ticker" class="ticker">${esc(t.ticker)}</td>
       <td data-label="Action">${esc(t.action)}</td>
@@ -86,6 +86,14 @@ export function render(el, data) {
   `;
 
   el.querySelectorAll("tbody tr").forEach(tr => {
+    tr.addEventListener("keydown", e => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      e.preventDefault();
+      tr.click();
+      const nextFocus = el.querySelector(".close-detail") ||
+        Array.from(el.querySelectorAll("tr[data-key]")).find(row => row.dataset.key === tr.dataset.key);
+      nextFocus?.focus();
+    });
     tr.addEventListener("click", () => {
       selectedKey = selectedKey === tr.dataset.key ? null : tr.dataset.key;
       render(el, data);
@@ -135,8 +143,12 @@ function renderDetail(el, t, activity) {
       ${evidenceRow("7. Available-cash check (§3)", "not individually stored per decision", true)}
       ${evidenceRow("8. Deterministic validation result", validation ? esc(validation.description) : NO_MATCH, !validation)}
       ${evidenceRow("Filled quantity", t.fill_quantity != null ? String(t.fill_quantity) : "not filled")}
-      <button class="close-detail" type="button" style="margin-top:12px">Close</button>
+      <button class="close-detail" type="button">Close</button>
     </div>
   `;
-  el.querySelector(".close-detail").addEventListener("click", () => { selectedKey = null; el.innerHTML = ""; });
+  el.querySelector(".close-detail").addEventListener("click", () => {
+    const row = el.parentElement.querySelector("tr.is-selected");
+    if (row) { row.classList.remove("is-selected"); row.focus(); }
+    selectedKey = null; el.innerHTML = "";
+  });
 }

@@ -6,14 +6,15 @@ step, no package manager, no external UI libraries. Two typefaces are
 **self-hosted** from `fonts/` (Archivo + IBM Plex Mono, both SIL OFL 1.1);
 the shipped app makes no external font request of any kind.
 
-**Visual pass (2026-09-14): research tearsheet.** Hierarchy comes from the
-page ground, whitespace and single hairlines rather than from boxes. A
-bordered surface is spent only on the four things that really are separate
-objects — Roadmap sector cards, warning/error boxes, the run-status banner,
-and the detail panel. 4px spacing scale, 6px radius, nothing visible below
-12px, tabular numerals on every displayed figure, and light/dark designed as
-equals. Presentation only: no query, metric, caveat, route, or data point
-changed.
+**Visual pass (2026-09-19): research workspace.** A prominent portfolio
+summary, inset section surfaces, and quiet table headers distinguish the
+main reading levels. The shared shell is wider, active navigation is more
+visible, and the six roadmap sectors align with numbered headings. Mobile
+trade/decision records use two columns while retaining every field. Selected
+rows are highlighted and support Enter/Space; Close returns focus to the row.
+Self-hosted typography, semantic financial colors, the 4px spacing scale,
+and both light/dark themes are retained. Queries, calculations, routes,
+data content, and live-paper restrictions are unchanged.
 
 **Dashboard-exposure correction (2026-09-13): backtest-only, live paper
 inaccessible.** Live paper trading is not activated and has no route, tab,
@@ -75,7 +76,8 @@ Run from `dashboard-v2/`, then open `http://127.0.0.1:8843/`. Any static
 file server works — there is nothing to build or install.
 
 Fixture preview (dev-only, not linked from the shipped app — covers all
-five pages, Roadmap included):
+five pages, Roadmap included, with representative header and desktop/mobile
+navigation; all displayed data is synthetic):
 `http://127.0.0.1:8843/dev/fixtures-preview.html`
 
 ## Fixture-based checks
@@ -101,7 +103,7 @@ shape / public-safety guard, and null/empty inputs.
 | `js/pages/*.js` | One render module per page — `render(container, data, ctx)`, pure DOM building. `pages/roadmap.js` ignores `data` and reads `roadmap-data.js` only. |
 | `js/app.js` | Shell bootstrap: mode/run/page state, refresh loop, loading/error states. |
 | `js/fixtures.js` | Representative local fixtures (dev preview only — never imported by `index.html`). |
-| `dev/fixtures-preview.html` | Dev-only page for inspecting all four pages against fixtures. Not linked from `index.html`. |
+| `dev/fixtures-preview.html` | Dev-only page for inspecting all five pages and the shell against fixtures. Not linked from `index.html`. |
 | `test/calc.test.mjs` | Fixture-based checks for `calc.js`. |
 
 ## Data module boundary

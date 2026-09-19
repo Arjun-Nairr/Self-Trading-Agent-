@@ -68,7 +68,7 @@ function setStatus(text, cls = "") {
 }
 
 function showSkeleton() {
-  el("page-root").innerHTML = `<div class="skel" style="height:280px"></div>`;
+  el("page-root").innerHTML = `<div class="skel skel-page"></div>`;
 }
 
 function renderPage(data) {

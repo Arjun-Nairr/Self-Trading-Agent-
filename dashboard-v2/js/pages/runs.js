@@ -76,7 +76,7 @@ function renderTechnicalDetails(failedCount, lastFailed) {
   return `
     <details class="tech-details">
       <summary>Technical: failure history</summary>
-      <div class="kv-list" style="margin-top:8px">
+      <div class="kv-list tech-kv-list">
         <div class="kv"><span class="k">Failed cycles in this run</span><span class="v">${failedCount ?? 0}</span></div>
         <div class="kv"><span class="k">Last failed attempt</span><span class="v">${lastFailed ? time(lastFailed.created_at) : "none recorded"}</span></div>
       </div>
