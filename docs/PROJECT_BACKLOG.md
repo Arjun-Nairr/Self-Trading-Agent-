@@ -458,6 +458,13 @@ document; it is implemented.**
     `summary["fills"]`/`["proposals"]` instead of ambiguous `decisions`
     text, and guaranteed 4-regime holdout coverage via a documented
     backward pool-expansion search.
+    **Single-episode runs (2026-09-19)**: `run_configuration(..., episode_selector=
+    EpisodeSelector(year, month, regime))` runs exactly ONE approved comparison
+    episode (comparison set only, never holdout; same approval/hash/version/
+    viability gates first, no side effect on refusal; a halted episode stays
+    halted, never retried). CLI: `python eval_suite.py run-one --manifest <approved.json>
+    --year 2022 --month 7 --regime rally --checkpoint-dir <dir>` (real run:
+    Docker/Neon/Hermes; add `--fundamentals` only for the fundamentals arm).
     **Second correction pass (same day, experiment design)**: (a)
     `classify_regime`'s `"sideways"` is no longer a residual bucket — it
     now requires both a small net move (±2%) AND low daily variance

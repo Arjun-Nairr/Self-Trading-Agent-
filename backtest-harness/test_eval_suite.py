@@ -45,7 +45,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_suite import (                                              # noqa: E402
-    EpisodeConfig, EVAL_RUN_KIND, MANIFEST_VERSION, ManifestNotApprovedError,
+    EpisodeConfig, EpisodeSelectionError, EpisodeSelector, EVAL_RUN_KIND, MANIFEST_VERSION, ManifestNotApprovedError,
     ManifestTamperedError, ManifestGenerationError, ManifestVersionError,
     ManifestWatchlistViabilityError, MonthMetrics,
     classify_regime, compute_content_hash, month_bounds, month_range,
@@ -1011,6 +1011,122 @@ def test_public_api_refuses_manifest_missing_valid_watchlist_viability_before_an
         check(f"zero journal-access calls ({label} audit)", journal_calls, [])
     print("  ok  run_configuration refuses an approved, hash-consistent manifest whose "
           "watchlist_viability audit is missing OR failing, before any execution-side call")
+
+# ===========================================================================
+# Single-episode selector (run_configuration(episode_selector=...)).
+# ===========================================================================
+
+def _selector_manifest(status_approved=True):
+    """Approved manifest of three one-day comparison episodes (distinct
+    regimes) plus one holdout, hash recomputed so the real verify path runs."""
+    m = _propose(seed=301)
+    if status_approved:
+        m = _approve(m)
+    m["episodes"] = [_one_day_episode(date(2023, 1, 2), "rally"),
+                     _one_day_episode(date(2023, 3, 6), "selloff"),
+                     _one_day_episode(date(2023, 5, 1), "sideways")]
+    m["holdout_episodes"] = [_one_day_episode(date(2023, 8, 7), "rally")]
+    m["content_hash"] = compute_content_hash(m)
+    return m
+
+
+def _fake_day_factory(seen):
+    from run_backtest import STARTING_EQUITY
+    import run_backtest as rb
+
+    def fake_run_day(day, day_index, portfolio, masking, watchlist, limits_ctx, run_id,
+                     fundamentals_enabled=False):
+        assert portfolio.equity_curve == [STARTING_EQUITY], "portfolio not fresh"
+        seen.append((str(day), run_id, str(rb.CHECKPOINT_PATH), id(masking)))
+        summary = {"day": str(day), "exits": [], "decisions": [], "blocked": [], "usage": {},
+                   "fills": [], "proposals": []}
+        return portfolio, summary, (lambda: None)
+    return fake_run_day
+
+
+WL = [{"symbol": "OLN", "name": "Olin Corporation", "sector": "Chemicals"}]
+
+
+def test_selector_runs_exactly_one_matching_episode_with_fresh_isolation():
+    m = _selector_manifest()
+    seen, registered = [], []
+    with tempfile.TemporaryDirectory() as tmp,          patch("eval_suite.run_day", side_effect=_fake_day_factory(seen)),          patch("eval_suite.register_run", side_effect=lambda rid, k: registered.append((rid, k))):
+        report = run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tmp),
+                                   episode_selector=EpisodeSelector(2023, 3, "selloff"))
+        check("exactly one episode reported", len(report["per_episode"]), 1)
+        check("only the selected day ran", [x[0] for x in seen], ["2023-03-06"])
+        check("one register_run, as evaluation", [k for _, k in registered], [EVAL_RUN_KIND])
+        check_true("own run_id", registered[0][0] == report["per_episode"][0]["run_id"])
+        check_true("checkpoint isolated to the given dir", seen[0][2].startswith(tmp))
+    print("  ok  selector runs exactly one comparison episode, freshly isolated")
+
+
+def test_selected_run_gets_own_context_per_call():
+    m = _selector_manifest()
+    seen = []
+    with tempfile.TemporaryDirectory() as tmp,          patch("eval_suite.run_day", side_effect=_fake_day_factory(seen)),          patch("eval_suite.register_run"):
+        for sel in (EpisodeSelector(2023, 1, "rally"), EpisodeSelector(2023, 5, "sideways")):
+            run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tmp), episode_selector=sel)
+    check_true("distinct run_id and checkpoint per selected run",
+               seen[0][1] != seen[1][1] and seen[0][2] != seen[1][2])
+    print("  ok  each selected run has its own run_id/checkpoint/portfolio")
+
+
+def _assert_no_side_effects(m, selector=None, episode_set="episodes", exc=Exception):
+    calls = []
+    with tempfile.TemporaryDirectory() as tmp,          patch("eval_suite.register_run", side_effect=lambda *a: calls.append("register")),          patch("eval_suite.run_day", side_effect=lambda *a, **k: calls.append("run_day")),          patch("eval_suite._run_episode", side_effect=lambda *a, **k: calls.append("episode")),          patch("eval_suite.fetch_fundamentals_assessment_counts", side_effect=lambda r: calls.append("journal")):
+        try:
+            run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tmp),
+                              episode_set=episode_set, episode_selector=selector)
+            raise AssertionError("expected refusal")
+        except exc:
+            pass
+        check_true("checkpoint dir never created", not any(Path(tmp).iterdir()))
+    check("no side effect before refusal", calls, [])
+
+
+def test_selector_refused_before_side_effects_for_bad_manifests():
+    sel = EpisodeSelector(2023, 1, "rally")
+    _assert_no_side_effects(_selector_manifest(status_approved=False), sel, exc=ManifestNotApprovedError)
+    tampered = _selector_manifest(); tampered["episodes"][0]["start"] = "2023-01-03"
+    _assert_no_side_effects(tampered, sel, exc=ManifestTamperedError)
+    stale = _selector_manifest(); stale["manifest_version"] = MANIFEST_VERSION - 1
+    stale["content_hash"] = compute_content_hash(stale)
+    _assert_no_side_effects(stale, sel, exc=ManifestVersionError)
+    bad_wv = _selector_manifest(); bad_wv["episodes"][0]["watchlist_viability"] = {"valid": False, "unavailable_tickers": ["X"]}
+    bad_wv["content_hash"] = compute_content_hash(bad_wv)
+    _assert_no_side_effects(bad_wv, sel, exc=ManifestWatchlistViabilityError)
+    print("  ok  proposed/tampered/version-mismatched/non-viable manifests fail before any side effect")
+
+
+def test_selector_unknown_ambiguous_malformed_and_holdout_refused_before_side_effects():
+    m = _selector_manifest()
+    _assert_no_side_effects(m, EpisodeSelector(2023, 1, "selloff"), exc=EpisodeSelectionError)  # wrong pairing
+    _assert_no_side_effects(m, EpisodeSelector(2023, 8, "rally"), exc=EpisodeSelectionError)    # holdout-only month
+    _assert_no_side_effects(m, EpisodeSelector(2023, 1, "rally"), episode_set="holdout_episodes",
+                            exc=EpisodeSelectionError)
+    amb = _selector_manifest(); amb["episodes"].append(dict(amb["episodes"][0]))
+    amb["content_hash"] = compute_content_hash(amb)
+    _assert_no_side_effects(amb, EpisodeSelector(2023, 1, "rally"), exc=EpisodeSelectionError)
+    _assert_no_side_effects(m, "2023-01-02", exc=EpisodeSelectionError)  # free-form, not a selector
+    for bad in ((2023, 13, "rally"), (2023, 0, "rally"), ("2023", 1, "rally"), (True, 1, "rally"),
+                (2023, 1, "bull"), (2023, 1, None)):
+        try:
+            EpisodeSelector(*bad)
+            raise AssertionError(f"accepted malformed selector {bad!r}")
+        except EpisodeSelectionError:
+            pass
+    print("  ok  unknown/ambiguous/malformed/holdout selectors fail before any side effect")
+
+
+def test_no_selector_still_runs_full_suite():
+    m = _selector_manifest()
+    seen = []
+    with tempfile.TemporaryDirectory() as tmp,          patch("eval_suite.run_day", side_effect=_fake_day_factory(seen)),          patch("eval_suite.register_run"):
+        report = run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tmp))
+    check("all comparison episodes ran in order", [x[0] for x in seen], ["2023-01-02", "2023-03-06", "2023-05-01"])
+    check("report shape has all episodes", len(report["per_episode"]), 3)
+    print("  ok  full-suite behavior unchanged without a selector")
 
 
 def main():

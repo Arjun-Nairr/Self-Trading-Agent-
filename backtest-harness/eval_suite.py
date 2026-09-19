@@ -711,13 +711,14 @@ def require_approved(manifest: dict) -> None:
         )
 
 
-def _require_valid_watchlist_viability(manifest: dict, episode_set: str) -> None:
+def _require_valid_watchlist_viability(manifest: dict, episode_set: str,
+                                       episodes: list[dict] | None = None) -> None:
     """Correction pass, part 2's integration requirement: refuse to run
     ANY episode in `episode_set` unless every one of them carries a
     well-formed, passing watchlist_viability section. Called from
     run_configuration AFTER require_approved but still BEFORE any
     register_run/run_day/journal/market-data/checkpoint call."""
-    for ep in manifest.get(episode_set) or []:
+    for ep in (episodes if episodes is not None else manifest.get(episode_set) or []):
         label = f"{ep.get('year')}-{ep.get('month', 0):02d}"
         wv = ep.get("watchlist_viability")
         if not isinstance(wv, dict) or "valid" not in wv or "unavailable_tickers" not in wv:
@@ -750,6 +751,43 @@ class EpisodeConfig:
     config_label: str
     fundamentals_enabled: bool = False
     seed: int = DEFAULT_MASKING_SEED
+
+
+class EpisodeSelectionError(ValueError):
+    """The single-episode selector does not identify exactly one approved
+    comparison episode. Raised before any side effect."""
+
+
+@dataclass(frozen=True)
+class EpisodeSelector:
+    """Identifies ONE comparison episode by (year, month, regime) together
+    -- never a free-form date, ticker, or label. Validated on construction;
+    membership in the approved manifest is checked by run_configuration."""
+    year: int
+    month: int
+    regime: str
+
+    def __post_init__(self):
+        for name in ("year", "month"):
+            v = getattr(self, name)
+            if type(v) is not int:
+                raise EpisodeSelectionError(f"{name} must be an int, got {v!r}")
+        if not 1 <= self.month <= 12:
+            raise EpisodeSelectionError(f"month must be 1..12, got {self.month!r}")
+        if self.regime not in REQUIRED_REGIMES:
+            raise EpisodeSelectionError(
+                f"regime must be one of {sorted(REQUIRED_REGIMES)}, got {self.regime!r}")
+
+
+def _select_episode(manifest: dict, selector: EpisodeSelector) -> dict:
+    matches = [e for e in manifest["episodes"]
+               if (e.get("year"), e.get("month"), e.get("regime"))
+               == (selector.year, selector.month, selector.regime)]
+    if len(matches) != 1:
+        raise EpisodeSelectionError(
+            f"{selector} matches {len(matches)} comparison episodes in the approved "
+            "manifest -- exactly one is required")
+    return matches[0]
 
 
 _FUNDAMENTALS_TAG_RE = re.compile(r"^\[fundamentals:([a-z_]+)\]")
@@ -964,7 +1002,8 @@ def _aggregate_episode_reports(per_episode: list[dict]) -> dict:
 
 def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
                       watchlist: list[dict], checkpoint_dir: Path,
-                      episode_set: str = "episodes") -> dict:
+                      episode_set: str = "episodes",
+                      episode_selector: EpisodeSelector | None = None) -> dict:
     """THE public comparison entry point -- the only function in this
     module allowed to execute an episode (correction pass, requirement 1:
     _run_episode is internal and must never be called directly). Requires
@@ -993,7 +1032,14 @@ def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
     test). The parameter stays explicit at the call site (self-documenting
     -- "this registers as evaluation") rather than a silent default;
     trade-journal-mcp's own registry validation is the second, independent
-    layer of the same guarantee."""
+    layer of the same guarantee.
+
+    episode_selector (optional): run EXACTLY ONE approved comparison
+    episode, identified by (year, month, regime). Comparison set only --
+    never the holdout. Selection and the selected episode's watchlist
+    viability are validated after require_approved and before any side
+    effect. Omitted -> the full-suite behavior above, unchanged. A halted
+    episode is reported as halted; nothing here retries or resumes it."""
     if run_kind != EVAL_RUN_KIND:
         raise ValueError(
             f"run_configuration only ever registers episodes as {EVAL_RUN_KIND!r} "
@@ -1004,10 +1050,19 @@ def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
     require_approved(manifest)
     if episode_set not in ("episodes", "holdout_episodes"):
         raise ValueError(f"episode_set must be 'episodes' or 'holdout_episodes', got {episode_set!r}")
-    _require_valid_watchlist_viability(manifest, episode_set)
+    if episode_selector is None:
+        selected = manifest[episode_set]
+        _require_valid_watchlist_viability(manifest, episode_set)
+    else:
+        if not isinstance(episode_selector, EpisodeSelector):
+            raise EpisodeSelectionError("episode_selector must be an EpisodeSelector")
+        if episode_set != "episodes":
+            raise EpisodeSelectionError("single-episode selection is comparison-only; holdouts are not runnable this way")
+        selected = [_select_episode(manifest, episode_selector)]
+        _require_valid_watchlist_viability(manifest, episode_set, selected)
     per_episode = [
         _run_episode(ep, config, run_kind, watchlist, checkpoint_dir)
-        for ep in manifest[episode_set]
+        for ep in selected
     ]
     return {
         "manifest_content_hash": manifest["content_hash"],
@@ -1022,9 +1077,9 @@ def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
 
 
 # ---------------------------------------------------------------------
-# CLI -- manifest generation only. The runner above is never wired to a
-# subcommand here; it is called later, explicitly, by a human/
-# orchestrating script once an approved manifest exists.
+# CLI -- `propose` (manifest generation) and `run-one` (one approved
+# comparison episode via run_configuration's episode_selector; the full
+# suite is still only reachable by calling run_configuration directly).
 # ---------------------------------------------------------------------
 
 def main() -> None:
@@ -1032,7 +1087,25 @@ def main() -> None:
     sub = parser.add_subparsers(dest="cmd", required=True)
     propose = sub.add_parser("propose", help="Generate a new PROPOSED manifest (human review required).")
     propose.add_argument("--seed", type=int, required=True)
+    one = sub.add_parser("run-one", help="Run ONE approved comparison episode (real run; needs Docker/Neon).")
+    one.add_argument("--manifest", type=Path, required=True)
+    one.add_argument("--year", type=int, required=True)
+    one.add_argument("--month", type=int, required=True)
+    one.add_argument("--regime", required=True)
+    one.add_argument("--fundamentals", action="store_true", help="enable fundamentals (default: frozen baseline, off)")
+    one.add_argument("--checkpoint-dir", type=Path, required=True)
     args = parser.parse_args()
+
+    if args.cmd == "run-one":
+        selector = EpisodeSelector(args.year, args.month, args.regime)
+        manifest = json.loads(args.manifest.read_text())
+        label = "fundamentals" if args.fundamentals else "baseline"
+        report = run_configuration(
+            manifest, EpisodeConfig(label, fundamentals_enabled=args.fundamentals),
+            EVAL_RUN_KIND, _load_default_watchlist(), args.checkpoint_dir,
+            episode_selector=selector)
+        print(json.dumps(report, indent=2, default=str))
+        return
 
     if args.cmd == "propose":
         manifest = propose_manifest(seed=args.seed)
