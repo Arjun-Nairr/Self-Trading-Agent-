@@ -103,7 +103,7 @@ import run_backtest as rb                                              # noqa: E
 from run_backtest import (                                             # noqa: E402
     REPO, Portfolio, _limits_for_profile,
     _name_variants, _run_cycle_or_halt, json_from, log_cycle_failure,
-    register_run, register_run_configuration, resolve_trade_rejection, run_day, run_in,
+    preflight, register_run, register_run_configuration, resolve_trade_rejection, run_day, run_in,
 )
 from anonymize import RunMasking                                       # noqa: E402
 
@@ -1119,6 +1119,12 @@ def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
             raise EpisodeSelectionError("single-episode selection is comparison-only; holdouts are not runnable this way")
         selected = [_select_episode(manifest, episode_selector)]
         _require_valid_watchlist_viability(manifest, episode_set, selected)
+    # Same required-container check run_backtest.main() makes (single source
+    # of truth for the service list). After every validation above, before
+    # any registration/checkpoint/fetch/Hermes/journal side effect: a stopped
+    # execution-sim otherwise halts an episode on the first fill, after a
+    # real Hermes call has already been spent.
+    preflight()
     per_episode = [
         _run_episode(ep, config, run_kind, watchlist, checkpoint_dir, manifest)
         for ep in selected

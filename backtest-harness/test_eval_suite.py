@@ -58,6 +58,7 @@ CONFIG_CALLS: list = []
 # _run_episode now registers a run-configuration record; default it to a
 # local recorder so no test can reach Docker/Neon. Tests may patch over it.
 _es.register_run_configuration = lambda *a: CONFIG_CALLS.append(a) or {"run_id": a[0]}
+_es.preflight = lambda: None  # never shell out to docker from tests
 
 ELIGIBLE_START = date(2021, 1, 1)
 ELIGIBLE_END = date(2023, 12, 31)  # 3 years -- plenty of months, fast tests
@@ -1203,6 +1204,51 @@ def test_aggregate_excludes_halted_and_all_halted_has_no_performance():
     check("all halted -> no performance", none["performance"], None)
     check("all halted still lists exclusion", len(none["excluded_episodes"]), 1)
     print("  ok  halted episodes excluded from aggregate metrics and listed; all-halted has none")
+
+def test_missing_required_service_fails_before_any_side_effect():
+    """run_backtest.preflight() (the single service-list source) runs after
+    validation and before register_run/config/checkpoint/fetch/Hermes/
+    journal writes -- for the selector path and the full-suite path."""
+    m = _selector_manifest()
+    for sel in (EpisodeSelector(2023, 1, "rally"), None):
+        calls = []
+        def boom():
+            calls.append("preflight")
+            raise SystemExit("Not running: execution-sim")
+        with tempfile.TemporaryDirectory() as tmp,              patch("eval_suite.preflight", side_effect=boom),              patch("eval_suite.register_run", side_effect=lambda *a: calls.append("register")),              patch("eval_suite.register_run_configuration", side_effect=lambda *a: calls.append("config")),              patch("eval_suite.run_day", side_effect=lambda *a, **k: calls.append("run_day")),              patch("eval_suite._run_episode", side_effect=lambda *a, **k: calls.append("episode")),              patch("eval_suite.fetch_fundamentals_assessment_counts", side_effect=lambda r: calls.append("journal")),              patch("eval_suite.log_cycle_failure", side_effect=lambda *a, **k: calls.append("activity")):
+            try:
+                run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tmp),
+                                  episode_selector=sel)
+                raise AssertionError("expected preflight refusal")
+            except SystemExit:
+                pass
+            check_true("no checkpoint dir content", not any(Path(tmp).iterdir()))
+        check("only preflight ran", calls, ["preflight"])
+    # validation failures happen BEFORE preflight (it must not even run)
+    pf = []
+    with patch("eval_suite.preflight", side_effect=lambda: pf.append(1)):
+        for bad in (_selector_manifest(status_approved=False),):
+            try:
+                run_configuration(bad, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tempfile.gettempdir()) / "x_unused")
+            except ManifestNotApprovedError:
+                pass
+    check("preflight not reached when validation fails", pf, [])
+    print("  ok  missing service fails after validation, before any side effect")
+
+
+def test_passing_preflight_preserves_selector_and_full_suite_behaviour():
+    m = _selector_manifest()
+    pf = []
+    seen = []
+    with tempfile.TemporaryDirectory() as tmp,          patch("eval_suite.preflight", side_effect=lambda: pf.append(1)),          patch("eval_suite.run_day", side_effect=_fake_day_factory(seen)),          patch("eval_suite.register_run"):
+        run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tmp),
+                          episode_selector=EpisodeSelector(2023, 3, "selloff"))
+        check("selector: one episode ran", [x[0] for x in seen], ["2023-03-06"])
+        seen.clear()
+        run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tmp))
+        check("full suite: all episodes ran", len(seen), 3)
+    check("preflight ran once per public call", len(pf), 2)
+    print("  ok  passing preflight preserves single-episode and full-suite behaviour")
 
 
 def main():

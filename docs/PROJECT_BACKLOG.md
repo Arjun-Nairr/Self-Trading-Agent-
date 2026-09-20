@@ -470,6 +470,9 @@ document; it is implemented.**
     Hermes call; the masking seed is derived from manifest hash + episode identity
     (shared by paired configs). Suite aggregates count completed episodes only;
     halted ones are listed in `excluded_episodes`, and all-halted gives `performance: null`.
+    `run_configuration` also calls `run_backtest.preflight()` (required-service check,
+    incl. `execution-sim`) after validation and before any side effect; compose now
+    sets `execution-sim` to `restart: unless-stopped`.
     **Second correction pass (same day, experiment design)**: (a)
     `classify_regime`'s `"sideways"` is no longer a residual bucket — it
     now requires both a small net move (±2%) AND low daily variance

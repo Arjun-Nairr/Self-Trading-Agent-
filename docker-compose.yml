@@ -110,8 +110,9 @@ services:
     env_file:
       - .env
 
-  # execution-sim-mcp — active backtest fill simulator and optional manual
-  # development tool. It is never the live execution backend and is NOT
+  # execution-sim-mcp — required for historical backtest/evaluation fills
+  # (run_backtest.preflight() refuses to start without it, hence
+  # restart: unless-stopped). It is never the live execution backend and is NOT
   # auto-registered in config.yaml — deliberately not an
   # automatic failover if alpaca-mcp has an outage (see
   # project_hermes_trading_agent memory for why: idempotency and
@@ -125,7 +126,7 @@ services:
     build:
       context: ./execution-sim-mcp
     container_name: hermes-trading-agent-execution-sim
-    restart: "no"
+    restart: unless-stopped
     networks:
       - net-execution-sim
 
