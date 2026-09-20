@@ -236,7 +236,7 @@ header.topbar { padding: var(--s8) 0 0; }
 select.run-select {
   border: 1px solid var(--border-strong); border-radius: var(--radius);
   padding: var(--s2) var(--s3); min-height: 44px; font-size: var(--fs-sec); font-family: var(--font);
-  background: var(--surface); color: var(--text); min-width: 0; max-width: 240px;
+  background: var(--surface); color: var(--text); min-width: 0; max-width: 340px;
 }
 
 .theme-toggle {

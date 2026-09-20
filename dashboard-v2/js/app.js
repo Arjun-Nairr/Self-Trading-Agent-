@@ -1,5 +1,5 @@
-import { listTrainingRuns, loadRunData, REFRESH_MS } from "./data.js";
-import { esc, time, computeHealth } from "./calc.js";
+import { listSelectableRuns, loadRunData, REFRESH_MS } from "./data.js";
+import { esc, time, computeHealth, runOptionLabel } from "./calc.js";
 import { render as renderOverview } from "./pages/overview.js";
 import { render as renderTrades } from "./pages/trades.js";
 import { render as renderDecisions } from "./pages/decisions.js";
@@ -58,7 +58,7 @@ function renderRunSelector() {
   wrap.innerHTML = `<select class="run-select" aria-label="Select run"></select>`;
   const sel = wrap.querySelector("select");
   sel.innerHTML = state.runs.map(r =>
-    `<option value="${esc(r.run_id)}" ${r.run_id === state.runId ? "selected" : ""}>${esc(r.run_id.slice(0, 8))}… ${r.latest_day_label ? "· " + esc(r.latest_day_label) : ""}</option>`
+    `<option value="${esc(r.run_id)}" ${r.run_id === state.runId ? "selected" : ""}>${esc(runOptionLabel(r))}</option>`
   ).join("");
   sel.addEventListener("change", () => { state.runId = sel.value; refresh(true); });
 }
@@ -114,17 +114,17 @@ async function refresh(withSkeleton) {
   setStatus("Loading…", "busy");
   try {
     if (state.mode === "backtest") {
-      state.runs = await listTrainingRuns();
+      state.runs = await listSelectableRuns();
       if (!state.runId) state.runId = state.runs[0]?.run_id ?? null;
       renderRunSelector();
       if (!state.runId) {
-        // No registry-backed training run with snapshots exists — an
+        // No registry-backed training/evaluation run exists — an
         // honest empty state, never a fallback to an arbitrary (possibly
         // smoke or archived) snapshot run.
         state.lastData = { trades: [], activity: [], snapshots: [], blockedActivity: [], insights: [], failedCount: 0, lastFailed: null };
         renderPage(state.lastData);
         renderHealthBar(state.lastData);
-        setStatus("No training run available");
+        setStatus("No run available");
         return;
       }
     } else {

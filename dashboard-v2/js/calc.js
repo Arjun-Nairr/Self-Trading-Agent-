@@ -224,6 +224,40 @@ export function trainingRunsFromRows(registryRows, snapshotRows) {
   return runs;
 }
 
+// Selector list: 'training' runs exactly as trainingRunsFromRows (only
+// those with a snapshot) PLUS every registered 'evaluation' run, even one
+// with zero snapshots -- a Day-1 halt must stay visible. smoke, archived
+// and unregistered run_ids never appear. Order: training runs first (so the
+// default view is always the newest training run when one exists), then
+// evaluations, each newest first. Every entry carries its run_kind.
+export function selectableRunsFromRows(registryRows, snapshotRows) {
+  const training = trainingRunsFromRows(registryRows, snapshotRows)
+    .map(r => ({ ...r, run_kind: "training" }));
+  const latest = new Map();
+  for (const r of (snapshotRows || [])) if (r.run_id && !latest.has(r.run_id)) latest.set(r.run_id, r);
+  const evaluation = (registryRows || [])
+    .filter(r => r.run_kind === "evaluation" && r.run_id)
+    .map(r => {
+      const snap = latest.get(r.run_id);
+      return {
+        run_id: r.run_id, run_kind: "evaluation",
+        latest_created_at: snap?.created_at ?? r.created_at ?? null,
+        latest_day_label: snap?.day_label ?? null,
+      };
+    })
+    .sort((a, b) => new Date(b.latest_created_at || 0) - new Date(a.latest_created_at || 0));
+  return [...training, ...evaluation];
+}
+
+const RUN_KIND_LABELS = { training: "Training", evaluation: "Evaluation" };
+
+// "Training · e68525f9… · Day 71" / "Evaluation · 6fe22d6f… · no completed days"
+export function runOptionLabel(run) {
+  const kind = RUN_KIND_LABELS[run.run_kind] || "Run";
+  const day = run.latest_day_label || (run.run_kind === "evaluation" ? "no completed days" : "");
+  return `${kind} · ${String(run.run_id).slice(0, 8)}…${day ? ` · ${day}` : ""}`;
+}
+
 /* --------------------------------------------------------- decisions */
 
 // Newest `limit` decision rows (created_at desc) plus run-wide status

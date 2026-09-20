@@ -9,11 +9,13 @@ import {
   assertRunIsolated, isBlockedRow, rejectionDistribution, STARTING_EQUITY,
   relatedActivity, openPositionDetail, computeHealth, equityCurveSeries,
   ruleLabel, positionsFromTrades, latestPositions, trainingRunsFromRows,
+  selectableRunsFromRows, runOptionLabel,
   decisionSummary, runStatusView, relativeTime, RUN_STATUS_STALE_MS,
   isRunStatusDismissed, dismissRunStatus, runStatusDismissKey,
 } from "../js/calc.js";
 import { STRATEGY_PROFILE, CIRCUIT_BREAKER_NOTE } from "../js/strategy-profile.js";
-import { REFLECTION_LIMIT } from "../js/data.js";
+import { REFLECTION_LIMIT, listSelectableRuns, loadRunData } from "../js/data.js";
+import { emptyStateText } from "../js/pages/overview.js";
 import { ROADMAP_SECTORS, STATUS_MARKS, STATUS_LABELS } from "../js/roadmap-data.js";
 
 let n = 0;
@@ -492,5 +494,77 @@ test("assertRunIsolated: passes for matching/null run_id, throws on mismatch", (
   assert.doesNotThrow(() => assertRunIsolated([{ run_id: "anything" }], null)); // live mode: no expectation
   assert.throws(() => assertRunIsolated([{ run_id: "r1" }, { run_id: "r2" }], "r1"));
 });
+
+/* ---------------------------------------- selector: training + evaluation */
+
+const REG = [
+  { run_id: "train-1", run_kind: "training", created_at: "2026-01-01T00:00:00Z" },
+  { run_id: "eval-halted", run_kind: "evaluation", created_at: "2026-09-20T00:00:00Z" },
+  { run_id: "smoke-1", run_kind: "smoke", created_at: "2026-01-02T00:00:00Z" },
+  { run_id: "arch-1", run_kind: "archived", created_at: "2026-01-03T00:00:00Z" },
+];
+const SNAPS = [
+  { run_id: "smoke-1", created_at: "2026-01-05T00:00:00Z", day_label: "Day 3" },
+  { run_id: "train-1", created_at: "2026-01-04T00:00:00Z", day_label: "Day 71" },
+  { run_id: "arch-1", created_at: "2026-01-03T00:00:00Z", day_label: "Day 9" },
+  { run_id: "unreg-1", created_at: "2026-01-02T00:00:00Z", day_label: "Day 1" },
+];
+
+test("selectableRunsFromRows: evaluation shows with zero snapshots; smoke/archived/unregistered stay absent", () => {
+  const runs = selectableRunsFromRows(REG, SNAPS);
+  assert.deepEqual(runs.map(r => r.run_id), ["train-1", "eval-halted"]);
+  assert.equal(runs[1].run_kind, "evaluation");
+  assert.equal(runs[1].latest_day_label, null);
+});
+
+test("selectableRunsFromRows: default (first entry) is the training run even when an evaluation is newer", () => {
+  assert.equal(selectableRunsFromRows(REG, SNAPS)[0].run_kind, "training");
+  const evalSnap = [{ run_id: "eval-halted", created_at: "2026-09-21T00:00:00Z", day_label: "Day 2" }, ...SNAPS];
+  assert.equal(selectableRunsFromRows(REG, evalSnap)[0].run_id, "train-1");
+});
+
+test("selectableRunsFromRows: a training run with no snapshots still never appears; empty/null never throw", () => {
+  assert.deepEqual(selectableRunsFromRows([{ run_id: "t", run_kind: "training" }], []), []);
+  assert.deepEqual(selectableRunsFromRows(null, null), []);
+});
+
+test("runOptionLabel: states the type explicitly", () => {
+  assert.equal(runOptionLabel({ run_id: "e68525f9-aaaa", run_kind: "training", latest_day_label: "Day 71" }), "Training · e68525f9… · Day 71");
+  assert.equal(runOptionLabel({ run_id: "6fe22d6f-bbbb", run_kind: "evaluation", latest_day_label: null }), "Evaluation · 6fe22d6f… · no completed days");
+});
+
+test("emptyStateText: Day-1-halted evaluation is honest and never says 'training'", () => {
+  const halted = emptyStateText("backtest", "evaluation", 1);
+  assert.match(halted, /halted before usable evaluation data/);
+  assert.ok(!/training/i.test(halted));
+  const none = emptyStateText("backtest", "evaluation", 0);
+  assert.match(none, /evaluation run has no completed days/);
+  assert.ok(!/training/i.test(none) && !/halted/.test(none));
+  assert.match(emptyStateText("backtest", "training", 0), /No training data recorded yet/); // unchanged
+});
+
+// Mocked-fetch checks of the real data.js: no network.
+{
+  const urls = [];
+  const rowsFor = url => url.includes("/backtest_run_registry") ? REG
+    : url.includes("/portfolio_snapshots") && !url.includes("run_id=eq.") ? SNAPS
+    : [];
+  globalThis.fetch = async url => {
+    url = String(url);
+    if (url.includes("/token/anonymous")) return { ok: true, json: async () => ({ token: "t", expires_at: Date.now() / 1000 + 3600 }) };
+    urls.push(url);
+    return { ok: true, json: async () => rowsFor(url), headers: { get: () => "0-0/0" } };
+  };
+  const runs = await listSelectableRuns();
+  assert.deepEqual(runs.map(r => r.run_id), ["train-1", "eval-halted"]);
+  assert.ok(urls.some(u => u.includes("/backtest_run_registry?select=run_id,run_kind,created_at")));
+  urls.length = 0;
+  await loadRunData("backtest", "eval-halted");
+  const scoped = urls.filter(u => /\/(trades|agent_activity|portfolio_snapshots|insight_log|backtest_run_status)\?/.test(u));
+  assert.ok(scoped.length >= 8);
+  assert.ok(scoped.every(u => u.includes("run_id=eq.eval-halted")), "every page query is scoped to the selected evaluation run_id");
+  assert.ok(!urls.some(u => /backtest_run_configuration|backtest_cycle_evidence/.test(u)), "private tables never queried");
+  n += 2; console.log("ok - listSelectableRuns/loadRunData (mocked fetch): registry-backed list; evaluation selection keeps every query run_id-scoped; private tables untouched");
+}
 
 console.log(`\n${n}/${n} checks passed`);

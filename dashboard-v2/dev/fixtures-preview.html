@@ -46,11 +46,11 @@ const fxSel = document.getElementById("fx"), pgSel = document.getElementById("pg
 function draw() {
   const data = fixtures[fxSel.value];
   const mode = fxSel.value === "FIXTURE_BACKTEST" ? "backtest" : "live";
-  // Registry-backed training-run membership, same shape listTrainingRuns()
+  // Registry-backed training-run membership, same shape listSelectableRuns()
   // returns -- lets the fixture preview actually exercise the Overview
   // run-status banner instead of it always reading as "not a training run".
   const runs = mode === "backtest" && data.run_id
-    ? [{ run_id: data.run_id, latest_day_label: data.trades?.[0]?.day_label }]
+    ? [{ run_id: data.run_id, run_kind: "training", latest_day_label: data.trades?.[0]?.day_label }]
     : [];
   root.innerHTML = "";
   PAGES[pgSel.value](root, { ...data, mode, run_id: data.run_id }, { runs });

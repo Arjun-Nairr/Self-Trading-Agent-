@@ -1,4 +1,4 @@
-import { assertRunIsolated, trainingRunsFromRows } from "./calc.js";
+import { assertRunIsolated, selectableRunsFromRows } from "./calc.js";
 
 // Decisions page shows only the newest N decision rows — requested at
 // this limit, never fetched whole and sliced.
@@ -78,21 +78,23 @@ async function qAll(table, params, pageSize = 1000) {
 // (HANDOFF.md §8, this task's own security requirements).
 
 /**
- * Registry-backed run discovery for the selector/default view: only
- * 'training' runs (backtest_run_registry.run_kind) that actually have at
- * least one snapshot, most recent first. 'smoke' and 'archived' runs are
- * never returned here, regardless of how much snapshot data they have —
- * see trainingRunsFromRows() for the (independently tested) filter logic.
+ * Registry-backed run discovery for the selector/default view: 'training'
+ * runs (backtest_run_registry.run_kind) that have at least one snapshot,
+ * then 'evaluation' runs (shown even with no snapshots, so a Day-1 halt is
+ * visible). 'smoke' and 'archived' runs are never returned here, regardless
+ * of how much snapshot data they have — see selectableRunsFromRows() for the
+ * (independently tested) filter logic. Training runs sort first, so the
+ * default is the newest training run whenever one exists.
  * There is deliberately no "latest snapshot, whatever run it belongs to"
  * fallback — an empty result means an honest empty state, never an
  * arbitrary non-training run.
  */
-export async function listTrainingRuns() {
+export async function listSelectableRuns() {
   const [registryRows, snapshotRows] = await Promise.all([
-    qAll("backtest_run_registry", `?select=run_id,run_kind`),
+    qAll("backtest_run_registry", `?select=run_id,run_kind,created_at`),
     qAll("portfolio_snapshots", `?mode=eq.backtest&select=run_id,created_at,day_label&order=created_at.desc`),
   ]);
-  return trainingRunsFromRows(registryRows, snapshotRows);
+  return selectableRunsFromRows(registryRows, snapshotRows);
 }
 
 /**

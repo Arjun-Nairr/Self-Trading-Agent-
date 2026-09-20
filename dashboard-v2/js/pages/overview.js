@@ -21,6 +21,18 @@ function trainingRunLabel(runId, runs) {
   return meta && meta.latest_day_label ? `${short} · ${meta.latest_day_label}` : short;
 }
 
+// Scoped, honest empty state for the selected run (exported for tests).
+// An evaluation with nothing recorded is never called "training"; if a
+// cycle_failed row exists say only that it halted before usable data.
+export function emptyStateText(mode, runKind, failedCount) {
+  if (mode === "backtest" && runKind === "evaluation") {
+    return failedCount > 0
+      ? "This evaluation run halted before usable evaluation data was produced. No completed days, trades, or snapshots are recorded for it."
+      : "This evaluation run has no completed days, trades, or snapshots recorded yet.";
+  }
+  return `No ${mode === "backtest" ? "training" : "live"} data recorded yet for this ${mode === "backtest" ? "run" : "account"}. This view populates as soon as the first cycle runs.`;
+}
+
 // Compact, closeable, near the top of Overview -- not a modal. Hidden
 // entirely when there's nothing to show (no run_id, no classified
 // training run, or dismissed this session) -- see runStatusView's own
@@ -28,7 +40,7 @@ function trainingRunLabel(runId, runs) {
 function renderRunStatus(data, ctx) {
   if (data.mode !== "backtest" || !data.run_id) return "";
   if (isRunStatusDismissed(window.sessionStorage, data.run_id)) return "";
-  const isTrainingRun = (ctx.runs || []).some(r => r.run_id === data.run_id);
+  const isTrainingRun = (ctx.runs || []).some(r => r.run_id === data.run_id && r.run_kind === "training");
   const view = runStatusView({
     statusRow: data.runStatus,
     isTrainingRun,
@@ -48,7 +60,8 @@ export function render(el, data, ctx) {
   const snap = snapshots[0];
 
   if (!snap && !trades.length) {
-    el.innerHTML = `<div class="empty">No ${mode === "backtest" ? "training" : "live"} data recorded yet for this ${mode === "backtest" ? "run" : "account"}. This view populates as soon as the first cycle runs.</div>`;
+    const runKind = ((ctx && ctx.runs) || []).find(r => r.run_id === data.run_id)?.run_kind;
+    el.innerHTML = `<div class="empty">${esc(emptyStateText(mode, runKind, data.failedCount))}</div>`;
     return;
   }
 
