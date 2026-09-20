@@ -62,20 +62,28 @@ experiment. Implements two DELIBERATELY SEPARATE capabilities:
    audit is missing/malformed/failing is refused just as hard as an
    unapproved one -- approval alone was never proof the fixed watchlist
    is actually testable in every episode.
-   NEITHER this module's own top-level code NOR its tests ever call
-   run_configuration/_run_episode against real Docker/Neon/Hermes -- see
-   test_eval_suite.py's fakes. It exists to be called later, by a human/
-   orchestrating script, once an approved manifest and an explicit
-   configuration comparison are actually authorized.
+   Each episode also persists the same frozen run-configuration record a
+   normal backtest does (watchlist snapshot+hash, alias mapping+hash,
+   masking seed, window, fundamentals flag) before any fetch/Hermes/
+   journal write. The masking seed is derived from the approved manifest's
+   content hash + episode identity (derive_episode_seed), identical for
+   paired configurations of one episode.
+   The module's own top-level code never runs an episode, and its tests
+   use fakes only (no real Docker/Neon/Hermes). The ONLY CLI path that
+   executes anything is the explicit `run-one` subcommand below.
 
 HARD BOUNDARY (same discipline as geometry_scan.py/benchmark_sensitivity.py):
 evaluation infrastructure only. Never wired into AGENTS.md, a prompt, or
 the live path. Generating or reading a manifest is not itself an approval
 to run anything -- see require_approved.
 
-Run (manifest generation only -- see the module docstring above for why
-the runner is never invoked from the CLI):
+Manifest generation (offline, no side effects):
     python eval_suite.py propose --seed 20260913
+
+Run ONE approved comparison episode (REAL action: needs Docker, writes to
+Neon, calls Hermes; comparison set only, never holdouts; refuses a
+proposed/tampered/non-viable manifest before any side effect):
+    python eval_suite.py run-one --manifest <approved.json> --year 2022         --month 7 --regime rally --checkpoint-dir <dir> [--fundamentals]
 """
 import argparse
 import hashlib
@@ -93,9 +101,9 @@ from statistics import pstdev
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_backtest as rb                                              # noqa: E402
 from run_backtest import (                                             # noqa: E402
-    DEFAULT_MASKING_SEED, REPO, Portfolio, _limits_for_profile,
+    REPO, Portfolio, _limits_for_profile,
     _name_variants, _run_cycle_or_halt, json_from, log_cycle_failure,
-    register_run, resolve_trade_rejection, run_day, run_in,
+    register_run, register_run_configuration, resolve_trade_rejection, run_day, run_in,
 )
 from anonymize import RunMasking                                       # noqa: E402
 
@@ -747,10 +755,24 @@ def _require_valid_watchlist_viability(manifest: dict, episode_set: str,
 class EpisodeConfig:
     """One configuration to compare -- e.g. fundamentals disabled vs.
     enabled, or a future approved rule variant. `config_label` is report
-    metadata only, never a run_kind and never sent to Neon."""
+    metadata only, never a run_kind and never sent to Neon. There is
+    deliberately no seed: the masking seed is derived from the approved
+    manifest + episode identity (derive_episode_seed), identical across
+    paired configurations of one episode."""
     config_label: str
     fundamentals_enabled: bool = False
-    seed: int = DEFAULT_MASKING_SEED
+
+
+def derive_episode_seed(manifest_content_hash: str, episode: dict) -> int:
+    """Deterministic masking seed from the approved manifest's content hash
+    plus the exact episode identity (year, month, regime, start, end).
+    Config-independent on purpose (baseline and fundamentals arms of one
+    episode share one alias mapping); no runtime randomness, so a retry
+    or re-run reproduces it. Fits Neon's INTEGER masking_seed column."""
+    ident = "|".join(str(x) for x in (
+        manifest_content_hash, episode["year"], episode["month"],
+        episode["regime"], episode["start"], episode["end"]))
+    return int.from_bytes(hashlib.sha256(ident.encode()).digest()[:8], "big") % (2**31 - 1)
 
 
 class EpisodeSelectionError(ValueError):
@@ -833,6 +855,7 @@ def _max_drawdown_pct(equity_curve: list[float]) -> float:
 
 def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
                  watchlist: list[dict], checkpoint_dir: Path,
+                 manifest: dict,
                  fetch_fundamentals_fn=fetch_fundamentals_assessment_counts) -> dict:
     """INTERNAL. Runs ONE one-month episode through run_backtest's real,
     unchanged per-day loop (Portfolio/RunMasking/run_day/
@@ -864,7 +887,18 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
     register_run(run_id, run_kind)
 
     names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
-    masking = RunMasking(names, run_start=start, seed=config.seed)
+    seed = derive_episode_seed(manifest["content_hash"], episode)
+    masking = RunMasking(names, run_start=start, seed=seed)
+    # Same durable frozen-config record main() writes for a fresh run
+    # (backtest_run_configuration), BEFORE any market-data fetch, Hermes
+    # call, journal write, or cycle-evidence write. A failure here aborts
+    # the episode.
+    alias_mapping = masking.mapping()
+    register_run_configuration(
+        run_id, watchlist, rb._watchlist_hash(watchlist), alias_mapping,
+        hashlib.sha256(json.dumps(alias_mapping, sort_keys=True).encode()).hexdigest(),
+        seed, episode["start"], episode["end"], config.fundamentals_enabled,
+    )
     portfolio = Portfolio()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
@@ -960,6 +994,17 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
         "fundamentals_enabled": config.fundamentals_enabled,
         "run_id": run_id,
         "run_kind": run_kind,
+        "provenance": {
+            "manifest_content_hash": manifest["content_hash"],
+            "manifest_version": manifest["manifest_version"],
+            "episode_identity": f"{episode['year']}-{episode['month']:02d}/{episode['regime']}",
+            "config_label": config.config_label,
+            "run_id": run_id,
+            "masking_seed": seed,
+            "alias_mapping_hash": hashlib.sha256(
+                json.dumps(alias_mapping, sort_keys=True).encode()).hexdigest(),
+            "watchlist_snapshot_hash": rb._watchlist_hash(watchlist),
+        },
         "halted": halted,
         "days_completed": len(day_summaries),
         "return_pct": (
@@ -983,21 +1028,35 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
 
 
 def _aggregate_episode_reports(per_episode: list[dict]) -> dict:
-    n = len(per_episode)
-    if n == 0:
-        return {"episode_count": 0}
-    returns = [e["return_pct"] for e in per_episode]
-    drawdowns = [e["max_drawdown_pct"] for e in per_episode]
-    return {
-        "episode_count": n,
-        "halted_count": sum(1 for e in per_episode if e["halted"]),
-        "mean_return_pct": round(sum(returns) / n, 4),
-        "worst_max_drawdown_pct": round(min(drawdowns), 4),
-        "total_fills": sum(e["fill_count"] for e in per_episode),
-        "total_proposals": sum(e["proposal_count"] for e in per_episode),
-        "total_closed_trades": sum(e["closed_trade_count"] for e in per_episode),
-        "total_blocked": sum(e["blocked_count"] for e in per_episode),
+    """Performance metrics come from COMPLETED (non-halted) episodes only.
+    Halted episodes are listed by identity/run_id and never averaged in;
+    with zero completed episodes there are no performance metrics at all
+    (never fabricated zeros). Per-episode reports stay intact."""
+    completed = [e for e in per_episode if not e["halted"]]
+    excluded = [
+        {"episode": f"{e['episode']['year']}-{e['episode']['month']:02d}/{e['episode']['regime']}",
+         "run_id": e["run_id"]}
+        for e in per_episode if e["halted"]
+    ]
+    agg = {
+        "episode_count": len(per_episode),
+        "completed_count": len(completed),
+        "halted_count": len(excluded),
+        "excluded_episodes": excluded,
     }
+    if not completed:
+        agg["performance"] = None
+        return agg
+    n = len(completed)
+    agg["performance"] = {
+        "mean_return_pct": round(sum(e["return_pct"] for e in completed) / n, 4),
+        "worst_max_drawdown_pct": round(min(e["max_drawdown_pct"] for e in completed), 4),
+        "total_fills": sum(e["fill_count"] for e in completed),
+        "total_proposals": sum(e["proposal_count"] for e in completed),
+        "total_closed_trades": sum(e["closed_trade_count"] for e in completed),
+        "total_blocked": sum(e["blocked_count"] for e in completed),
+    }
+    return agg
 
 
 def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
@@ -1061,7 +1120,7 @@ def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
         selected = [_select_episode(manifest, episode_selector)]
         _require_valid_watchlist_viability(manifest, episode_set, selected)
     per_episode = [
-        _run_episode(ep, config, run_kind, watchlist, checkpoint_dir)
+        _run_episode(ep, config, run_kind, watchlist, checkpoint_dir, manifest)
         for ep in selected
     ]
     return {

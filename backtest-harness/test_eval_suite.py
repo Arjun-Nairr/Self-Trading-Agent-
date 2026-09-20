@@ -45,13 +45,19 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from eval_suite import (                                              # noqa: E402
-    EpisodeConfig, EpisodeSelectionError, EpisodeSelector, EVAL_RUN_KIND, MANIFEST_VERSION, ManifestNotApprovedError,
+    EpisodeConfig, EpisodeSelectionError, derive_episode_seed, _aggregate_episode_reports, EpisodeSelector, EVAL_RUN_KIND, MANIFEST_VERSION, ManifestNotApprovedError,
     ManifestTamperedError, ManifestGenerationError, ManifestVersionError,
     ManifestWatchlistViabilityError, MonthMetrics,
     classify_regime, compute_content_hash, month_bounds, month_range,
     propose_manifest, require_approved, run_configuration,
     select_paired_episodes, verify_manifest,
 )
+
+import eval_suite as _es                                              # noqa: E402
+CONFIG_CALLS: list = []
+# _run_episode now registers a run-configuration record; default it to a
+# local recorder so no test can reach Docker/Neon. Tests may patch over it.
+_es.register_run_configuration = lambda *a: CONFIG_CALLS.append(a) or {"run_id": a[0]}
 
 ELIGIBLE_START = date(2021, 1, 1)
 ELIGIBLE_END = date(2023, 12, 31)  # 3 years -- plenty of months, fast tests
@@ -702,9 +708,9 @@ def test_aggregate_report_uses_the_corrected_fill_field():
              patch("eval_suite.register_run", return_value=None):
             report = run_configuration(manifest, EpisodeConfig("baseline"), EVAL_RUN_KIND, watchlist, Path(tmp))
     check("aggregate.total_fills reflects the corrected per-episode fill_count",
-          report["aggregate"]["total_fills"], 1)
+          report["aggregate"]["performance"]["total_fills"], 1)
     check("aggregate.total_proposals is tracked separately from fills",
-          report["aggregate"]["total_proposals"], 1)
+          report["aggregate"]["performance"]["total_proposals"], 1)
     print("  ok  aggregate totals (total_fills/total_proposals) use the corrected structured fields")
 
 
@@ -1074,7 +1080,7 @@ def test_selected_run_gets_own_context_per_call():
 
 def _assert_no_side_effects(m, selector=None, episode_set="episodes", exc=Exception):
     calls = []
-    with tempfile.TemporaryDirectory() as tmp,          patch("eval_suite.register_run", side_effect=lambda *a: calls.append("register")),          patch("eval_suite.run_day", side_effect=lambda *a, **k: calls.append("run_day")),          patch("eval_suite._run_episode", side_effect=lambda *a, **k: calls.append("episode")),          patch("eval_suite.fetch_fundamentals_assessment_counts", side_effect=lambda r: calls.append("journal")):
+    with tempfile.TemporaryDirectory() as tmp,          patch("eval_suite.register_run", side_effect=lambda *a: calls.append("register")),          patch("eval_suite.register_run_configuration", side_effect=lambda *a: calls.append("config")),          patch("eval_suite.run_day", side_effect=lambda *a, **k: calls.append("run_day")),          patch("eval_suite._run_episode", side_effect=lambda *a, **k: calls.append("episode")),          patch("eval_suite.fetch_fundamentals_assessment_counts", side_effect=lambda r: calls.append("journal")):
         try:
             run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tmp),
                               episode_set=episode_set, episode_selector=selector)
@@ -1127,6 +1133,76 @@ def test_no_selector_still_runs_full_suite():
     check("all comparison episodes ran in order", [x[0] for x in seen], ["2023-01-02", "2023-03-06", "2023-05-01"])
     check("report shape has all episodes", len(report["per_episode"]), 3)
     print("  ok  full-suite behavior unchanged without a selector")
+
+def _run_selected(m, sel, label="baseline", fundamentals=False, tmp=None):
+    calls, order = [], []
+    with tempfile.TemporaryDirectory() as t,          patch("eval_suite.run_day", side_effect=lambda *a, **k: order.append("run_day") or (_ for _ in ()).throw(RuntimeError("stop"))) as _rd,          patch("eval_suite.register_run", side_effect=lambda *a: order.append("register_run")),          patch("eval_suite.register_run_configuration", side_effect=lambda *a: order.append("config") or calls.append(a)),          patch("eval_suite.log_cycle_failure"):
+        rep = run_configuration(m, EpisodeConfig(label, fundamentals_enabled=fundamentals),
+                                EVAL_RUN_KIND, WL, Path(t), episode_selector=sel)
+    return rep, calls, order
+
+
+def test_selected_run_persists_frozen_configuration_before_first_cycle():
+    m = _selector_manifest()
+    ep = m["episodes"][1]
+    rep, calls, order = _run_selected(m, EpisodeSelector(2023, 3, "selloff"), fundamentals=True)
+    check("register_run, then config, then first run_day", order[:3], ["register_run", "config", "run_day"])
+    rid, snap, snap_hash, alias, alias_hash, seed, start, end, fund = calls[0]
+    check("run_id matches report", rid, rep["per_episode"][0]["run_id"])
+    check("watchlist snapshot frozen", snap, WL)
+    check_true("hashes present", len(snap_hash) == 64 and len(alias_hash) == 64)
+    check("seed derived from manifest+episode", seed, derive_episode_seed(m["content_hash"], ep))
+    check("window", (start, end), (ep["start"], ep["end"]))
+    check("fundamentals flag", fund, True)
+    prov = rep["per_episode"][0]["provenance"]
+    check("provenance", (prov["manifest_content_hash"], prov["manifest_version"], prov["episode_identity"],
+                         prov["config_label"], prov["run_id"], prov["masking_seed"]),
+          (m["content_hash"], MANIFEST_VERSION, "2023-03/selloff", "baseline", rid, seed))
+    print("  ok  fresh selected run persists frozen config before any cycle; provenance reported")
+
+
+def test_derived_seed_and_mapping_deterministic_distinct_and_pair_stable():
+    from anonymize import RunMasking
+    from run_backtest import _name_variants
+    m = _selector_manifest()
+    a, b = m["episodes"][0], m["episodes"][1]
+    check("same manifest+episode -> same seed", derive_episode_seed(m["content_hash"], a),
+          derive_episode_seed(m["content_hash"], dict(a)))
+    check_true("different episode -> different seed",
+               derive_episode_seed(m["content_hash"], a) != derive_episode_seed(m["content_hash"], b))
+    check_true("different manifest -> different seed",
+               derive_episode_seed(m["content_hash"], a) != derive_episode_seed("f" * 64, a))
+    check_true("fits INTEGER column", 0 <= derive_episode_seed(m["content_hash"], a) < 2**31)
+    wl = [{"symbol": f"T{i}", "name": f"Name{i} Corp", "sector": "X"} for i in range(8)]
+    def mapping(seed):
+        return RunMasking({t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in wl},
+                          run_start=date(2023, 1, 2), seed=seed).mapping()
+    sa, sb = (derive_episode_seed(m["content_hash"], e) for e in (a, b))
+    check("same seed -> same mapping", mapping(sa), mapping(sa))
+    check_true("distinct episode -> distinct mapping", mapping(sa) != mapping(sb))
+    r1, c1, _ = _run_selected(m, EpisodeSelector(2023, 1, "rally"), "baseline", False)
+    r2, c2, _ = _run_selected(m, EpisodeSelector(2023, 1, "rally"), "fundamentals", True)
+    check("paired configs share seed", c1[0][5], c2[0][5])
+    check("paired configs share alias mapping/hash", (c1[0][3], c1[0][4]), (c2[0][3], c2[0][4]))
+    check_true("but distinct run ids", c1[0][0] != c2[0][0])
+    print("  ok  seed deterministic, episode/manifest-distinct, shared across paired configs")
+
+
+def test_aggregate_excludes_halted_and_all_halted_has_no_performance():
+    def rep(y, mo, halted, ret, rid):
+        return {"episode": {"year": y, "month": mo, "regime": "rally"}, "run_id": rid, "halted": halted,
+                "return_pct": ret, "max_drawdown_pct": -ret, "fill_count": 1, "proposal_count": 2,
+                "closed_trade_count": 3, "blocked_count": 4}
+    agg = _aggregate_episode_reports([rep(2023, 1, False, 4.0, "a"), rep(2023, 2, True, -50.0, "b"),
+                                      rep(2023, 3, False, 2.0, "c")])
+    check("counts", (agg["episode_count"], agg["completed_count"], agg["halted_count"]), (3, 2, 1))
+    check("excluded identified", agg["excluded_episodes"], [{"episode": "2023-02/rally", "run_id": "b"}])
+    check("metrics from completed only", (agg["performance"]["mean_return_pct"],
+          agg["performance"]["worst_max_drawdown_pct"], agg["performance"]["total_fills"]), (3.0, -4.0, 2))
+    none = _aggregate_episode_reports([rep(2023, 2, True, 0.0, "b")])
+    check("all halted -> no performance", none["performance"], None)
+    check("all halted still lists exclusion", len(none["excluded_episodes"]), 1)
+    print("  ok  halted episodes excluded from aggregate metrics and listed; all-halted has none")
 
 
 def main():

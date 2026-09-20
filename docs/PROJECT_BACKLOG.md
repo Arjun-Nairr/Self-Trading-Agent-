@@ -440,7 +440,7 @@ document; it is implemented.**
     (infrastructure only, 2026-09-13, corrected twice same day)** — role
     unchanged: a *prerequisite for* Bayesian optimization, not an
     approved experiment or a run. `backtest-harness/eval_suite.py` (+
-    `test_eval_suite.py`, 128 assertions): (1) **manifest generation** —
+    `test_eval_suite.py`): (1) **manifest generation** —
     classifies each calendar month in a fixed, documented eligible range
     by a fixed, pre-committed priority-ordered rule, stratified-samples a
     comparison suite + later disjoint holdout, and writes a versioned,
@@ -465,6 +465,11 @@ document; it is implemented.**
     halted, never retried). CLI: `python eval_suite.py run-one --manifest <approved.json>
     --year 2022 --month 7 --regime rally --checkpoint-dir <dir>` (real run:
     Docker/Neon/Hermes; add `--fundamentals` only for the fundamentals arm).
+    Each episode now persists its frozen `backtest_run_configuration` record
+    (watchlist/alias hashes, seed, window, fundamentals flag) before any fetch/
+    Hermes call; the masking seed is derived from manifest hash + episode identity
+    (shared by paired configs). Suite aggregates count completed episodes only;
+    halted ones are listed in `excluded_episodes`, and all-halted gives `performance: null`.
     **Second correction pass (same day, experiment design)**: (a)
     `classify_regime`'s `"sideways"` is no longer a residual bucket — it
     now requires both a small net move (±2%) AND low daily variance
