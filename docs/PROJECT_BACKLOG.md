@@ -414,11 +414,15 @@ vs. cash/SPY/watchlist/SMA(10) baseline, plus rule-parameter
 sensitivity) — **this was previously misfiled as "deferred" in this
 document; it is implemented.**
 
-- **Now:** the evaluation-track decision itself (`HANDOFF.md` §10):
-  (a) existing evidence suffices for Bayesian optimization, (b) run
-  another unchanged tranche first, or (c) improve measurement first.
-  Status `discussing` — the report's own recommendation is (c), a
-  recommendation to weigh, not a decision made.
+- **Now:** `baseline_v1` (regime-diverse technical-news evaluation
+  suite) is **complete** — see the dated entry below. Next gated step:
+  build `baseline_v2` (slippage-adjusted sizing) and rerun the same 4
+  months — not yet started.
+- **Also unresolved:** the separate Round 2 evaluation-track decision
+  (`HANDOFF.md` §10): (a) existing evidence suffices for Bayesian
+  optimization, (b) run another unchanged tranche first, or (c) improve
+  measurement first. Status `discussing` — the report's own
+  recommendation is (c), a recommendation to weigh, not a decision made.
 - **Soon:** none — everything below is gated on the §10 decision above.
 - **Later:**
   - Review aggressive Phase 1 rule numbers against filled/closed-trade
@@ -738,6 +742,38 @@ document; it is implemented.**
     dashboard, and provider API untouched. Manifest still `proposed`; no
     run/training/evaluation/smoke/holdout/live-paper process executed; no
     Neon writes.
+
+    **2026-09-19/21 — `baseline_v1` COMPLETE.** Manifest
+    `manifest_20260916T154923_30f4c12e0f7e.json` approved (v4, hash
+    `30f4c12e0f7ed7bb75780b9d84f6f38cf69c84a149c58b3ab66f4d4a97d018fb`,
+    unchanged since). Infra gap fixed first: `execution-sim` was stopped
+    (`restart: "no"`), so `run_configuration` now calls the same
+    `run_backtest.preflight()` required-service check before any side
+    effect, and compose sets `execution-sim` to `restart: unless-stopped`
+    (`backtest-harness/eval_suite.py`, `docker-compose.yml`). Rules/config
+    frozen: fundamentals disabled (`--fundamentals` never passed), fixed
+    watchlist, point-in-time data, alias masking, next-day execution,
+    news veto — all unchanged from `baseline_v1`'s own definition. All 4
+    comparison episodes run via the public `run-one` selector, none
+    halted:
+    - [x] Jun 2022 / high_volatility — `1c754200-8b87-4abf-b6c8-04bc5d0e6583` — −3.97%, max DD −5.26%
+    - [x] Jul 2022 / rally — `295c1bb9-a774-4354-8f10-a6aa74b8d518` — +5.80%, max DD −2.24%
+    - [x] Sep 2022 / selloff — `329ec8aa-5aae-4442-bda7-f0364221ef04` — −3.27%, max DD −5.41%
+    - [x] Oct 2024 / sideways — `dd02237a-db56-4cbe-bfdd-0fcb45d1129c` — +0.08%, max DD −1.81%
+
+    Diagnosis recorded, not a conclusion: upside participation in the
+    rally; weaker performance in selloff/high-volatility; 4 one-month
+    samples, no causality claim, no holdout used. Baseline limitation
+    observed (not fixed): raw-price sizing plus 5bps simulated fill
+    slippage causes marginal >20%-position-cap rejections across all 4
+    runs. `baseline_v1` is now **frozen unchanged** — never overwrite,
+    delete, relabel, or compare it as though it were a different config.
+
+    **Next gated step:** create a separate `baseline_v2` configuration
+    that sizes using the expected slippage-adjusted fill price, then
+    rerun the SAME 4 frozen comparison months. `baseline_v2` is a new,
+    separate config — not a mutation of `baseline_v1` — and is not yet
+    started. No other speculative next step is approved here.
 
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.

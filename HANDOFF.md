@@ -373,24 +373,11 @@ were never re-checked against overnight news before their 09:45 ET fill.
 Audit confirmed no holdout/live-paper touch, Round 2 untouched —
 **excluded from all analysis**, detail in the measurement report.
 
-**2026-09-17:** implemented the missing gate (`apply_pre_fill_news_gate`,
-`run_backtest.py`) before `simulate_trading_day`; SELLs/exits untouched,
-`risk_checker.py` stays pure math. **Same-day correction (2026-09-17b):**
-the FIRST version's window started at next-day *midnight*, not the real
-decision cutoff — skipping the after-close/pre-midnight gap earnings
-often land in. Fixed: `QueuedOrder.decision_cutoff_at` is now the REAL,
-half-day-aware session close (`fetch_trading_calendar_day`, never
-inferred from a date); window is exactly `(decision_cutoff_at, T+1 09:45
-ET]`; `get_historical_news` now takes RFC-3339 UTC `start_at`/`end_at`,
-paginates for real, reports `complete` (incomplete fails the order
-closed); the decision-time fetch gained the same explicit cutoff. 20
-new/updated tests. Manifest status reverted proposed→approved→proposed
-(hash unchanged) pending review. Live parity: no queued/delayed live BUY
-path exists to extend — documented, not built speculatively. Conclusion
-unchanged: **keep Fundamentals V1 as unproven context**. Detail:
-`docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
+**2026-09-17:** implemented the missing gate (`apply_pre_fill_news_gate`, `run_backtest.py`) before `simulate_trading_day`; SELLs/exits untouched, `risk_checker.py` stays pure math. **Same-day correction (2026-09-17b):** the FIRST version's window started at next-day *midnight*, not the real decision cutoff — skipping the after-close/pre-midnight gap earnings often land in. Fixed: `QueuedOrder.decision_cutoff_at` is now the REAL, half-day-aware session close (`fetch_trading_calendar_day`, never inferred from a date); window is exactly `(decision_cutoff_at, T+1 09:45 ET]`; `get_historical_news` now takes RFC-3339 UTC `start_at`/`end_at`, paginates for real, reports `complete` (incomplete fails the order closed); the decision-time fetch gained the same explicit cutoff. 20 new/updated tests. Manifest status reverted proposed→approved→proposed (hash unchanged) pending review. Live parity: no queued/delayed live BUY path exists to extend — documented, not built speculatively. Conclusion unchanged: **keep Fundamentals V1 as unproven context**. Detail: `docs/evaluations/fundamentals_v1_measurement_block_2026-09-15.md`.
 
 **2026-09-17c/d:** `fetch_news` trusted every article and cut to 4 headlines *before* checking timestamps — a bad `created_at`, or one outside the requested range on either edge, could reach the prompt. Fixed: pure `_articles_in_decision_window(articles, start_at, end_at)` validates + cuts to `start_at < created_at <= end_at` first (fail-closed on any bad timestamp, both edges enforced, not just the cutoff); `_is_tz_aware` (shared by this, `_parse_news_timestamp`, `_pre_fill_news_window`, `_to_utc_rfc3339`) now requires `utcoffset()` to actually resolve, not just `tzinfo is not None`. 12 new tests; gate/risk untouched.
+
+**2026-09-19/21 — `baseline_v1` complete:** manifest approved (v4, `30f4c12e0f7ed7bb75780b9d84f6f38cf69c84a149c58b3ab66f4d4a97d018fb`), `execution-sim` preflight gap fixed (`run_configuration` now calls `run_backtest.preflight()`, `restart: unless-stopped`), then all 4 comparison episodes run via `run-one` (fundamentals off): Jun22/high_vol `1c754200…` −3.97% (DD −5.26%), Jul22/rally `295c1bb9…` +5.80% (DD −2.24%), Sep22/selloff `329ec8aa…` −3.27% (DD −5.41%), Oct24/sideways `dd02237a…` +0.08% (DD −1.81%). Diagnosis (not a conclusion — 4 one-month samples, no causality claim): upside participation in the rally, weaker in selloff/high-vol. Baseline limitation observed, not fixed: raw-price sizing + 5bps sim slippage causes marginal >20%-cap rejections. `baseline_v1` frozen unchanged. Next gated step: `docs/PROJECT_BACKLOG.md` §4.
 
 ---
 
