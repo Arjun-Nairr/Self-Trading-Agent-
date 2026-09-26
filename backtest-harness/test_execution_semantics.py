@@ -34,6 +34,7 @@ from run_backtest import (
     _load_checkpoint, _maybe_advance_activity_block, _record_trade_completion,
     _redact_diagnostic_text, _resolve_fundamentals_enabled,
     _resolve_seed, _resolve_window, _run_cycle_or_halt, _save_checkpoint, _slipped_buy_price,
+    _expected_buy_fill_price, BUY_SLIPPAGE_BPS,
     build_decision_time_context, build_prompt,
     evaluate_bar_stop_target, evaluate_opening_gap, fetch_bars, make_decision_id,
     require_intraday_coverage, required_entry_quantity, resolve_queued_order,
@@ -458,7 +459,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
         return HermesResult(response={
             "decisions": [{
-                "alias": alias, "action": "BUY", "quantity": 200, "entry_price": 100.0,
+                "alias": alias, "action": "BUY", "quantity": 199, "entry_price": 100.0,
                 "stop_price": 93.0, "target_price": 115.0, "confidence": 3,
                 "primary_signal": "technical", "technical_basis": "rsi",
                 "expected_reward_risk": 2.14, "invalidation_condition": "closes below $93",
@@ -1917,24 +1918,27 @@ def test_queued_orders_use_their_stored_threshold_at_execution():
 
 def test_required_entry_quantity_matches_rules_md_sizing_formula():
     """Pure function, no I/O -- the exact arithmetic RULES.md §2a
-    (stop-risk), §2b (concentration), and §3 (remaining cash) imply,
-    whichever is smallest, floored to a whole share."""
+    (stop-risk), §2b (concentration), and §3 (remaining cash) imply against
+    the EXPECTED BUY fill price (entry reserved for BUY_SLIPPAGE_BPS, see
+    _expected_buy_fill_price), whichever of the three is smallest, floored
+    to a whole share."""
     ctx = _ctx()  # equity=$100,000, cash=$100,000
-    # entry $100, stop $93 (7% distance): risk_size = floor(100000*0.02/7)
-    # = 285, concentration_size = floor(100000*0.20/100) = 200,
-    # cash_size = floor(100000/100) = 1000 -- concentration binds.
+    # entry $100 -> expected fill $100.05 (5bps reserved). stop $93 (7%
+    # distance): risk_size = floor(2000/7.05) = 283, concentration_size =
+    # floor(20000/100.05) = 199, cash_size = floor(100000/100.05) = 999 --
+    # concentration binds.
     trade = ProposedTrade(ticker="OLN", action="BUY", quantity=1,
                           entry_price=100.0, stop_price=93.0, target_price=115.0)
-    assert required_entry_quantity(trade, ctx) == 200
+    assert required_entry_quantity(trade, ctx) == 199
     print("  ok  required_entry_quantity matches RULES.md's own §2a/§2b/§3 arithmetic "
-          "(concentration binds here)")
+          "against the slippage-reserved expected fill (concentration binds here)")
 
-    # entry $100, stop $99.9 (0.1% distance): risk_size = floor(2000/0.1) =
-    # 20000, concentration_size = 200, cash_size = 1000 -- still
+    # entry $100, stop $99.9 (0.1% distance): risk_size = floor(2000/0.15) =
+    # 13333, concentration_size = 199, cash_size = 999 -- still
     # concentration, proving it's a genuine min(), not always risk-based.
     tight_stop = ProposedTrade(ticker="OLN", action="BUY", quantity=1,
                                entry_price=100.0, stop_price=99.9, target_price=115.0)
-    assert required_entry_quantity(tight_stop, ctx) == 200
+    assert required_entry_quantity(tight_stop, ctx) == 199
     print("  ok  required_entry_quantity takes the genuine minimum of all three, "
           "not just the risk-based figure")
 
@@ -1944,7 +1948,7 @@ def test_required_entry_quantity_matches_rules_md_sizing_formula():
                              weekly_pl_pct=0.0, drawdown_from_peak_pct=0.0),
         clock=MarketClock(is_open=True), watchlist=["OLN"],
     )
-    assert required_entry_quantity(trade, low_cash_ctx) == 15  # floor(1500/100)
+    assert required_entry_quantity(trade, low_cash_ctx) == 14  # floor(1500/100.05)
     print("  ok  required_entry_quantity is cash-bound when cash is the scarce resource")
 
     # Fails closed (None) on unusable inputs -- an inverted/missing stop, a
@@ -1963,6 +1967,113 @@ def test_required_entry_quantity_matches_rules_md_sizing_formula():
     ) is None
     print("  ok  required_entry_quantity fails closed (None) on an inverted/missing "
           "stop or a non-BUY action")
+
+
+def test_required_entry_quantity_reserves_buy_slippage_at_the_concentration_boundary():
+    """The real defect baseline_v1 exposed: at entry=$100 the OLD (raw-
+    price) formula's concentration_size = floor(20000/100) = 200 sat
+    EXACTLY at the §2b 20% cap on the raw reference price -- but a real
+    BUY always fills BUY_SLIPPAGE_BPS above its reference (_slipped_buy_
+    price, mirrored by execution-sim-mcp's own _simulate_fill), so 200
+    shares at the real ~$100.05 fill is $20,010: a genuine 20.01% breach
+    of the SAME cap it was sized to respect. The corrected formula
+    reserves that known slippage before sizing and returns 199, not 200."""
+    ctx = _ctx()  # equity=$100,000
+    trade = ProposedTrade(ticker="OLN", action="BUY", quantity=1,
+                          entry_price=100.0, stop_price=93.0, target_price=115.0)
+    corrected_quantity = required_entry_quantity(trade, ctx)
+    assert corrected_quantity == 199, corrected_quantity
+
+    wide_bar = {"open": 100.0, "high": 105.0, "low": 95.0, "close": 100.0}
+    real_fill_price = _slipped_buy_price(100.0, wide_bar)
+    cap_notional = ctx.account.equity * (ctx.limits.max_position_pct / 100)
+
+    old_raw_price_quantity = 200  # what the pre-fix formula returned here
+    assert old_raw_price_quantity * real_fill_price > cap_notional, (
+        "the old formula's own boundary quantity must genuinely breach "
+        "§2b once it actually fills -- not a hypothetical"
+    )
+    assert corrected_quantity * real_fill_price <= cap_notional, (
+        "the corrected quantity must stay within §2b once it actually fills"
+    )
+    print("  ok  required_entry_quantity reserves BUY_SLIPPAGE_BPS at the exact "
+          f"concentration boundary -- old quantity 200 breaches §2b once filled "
+          f"(${200 * real_fill_price:,.2f} > ${cap_notional:,.2f}), corrected "
+          f"quantity 199 does not (${corrected_quantity * real_fill_price:,.2f})")
+
+
+def test_corrected_quantity_passes_execution_when_fill_matches_decision_reference():
+    """The corrected (slippage-reserved) quantity, queued exactly as
+    required_entry_quantity computed it, passes resolve_queued_order's own
+    real execution-time risk re-check the next day when the real fill bar
+    opens at the SAME reference price decision time used and only normal
+    BUY_SLIPPAGE_BPS slippage applies -- proving the reservation is
+    sufficient for the ordinary (non-gapped) case it exists for."""
+    ctx = _ctx()
+    trade = ProposedTrade(ticker="OLN", action="BUY", quantity=1,
+                          entry_price=100.0, stop_price=93.0, target_price=115.0)
+    quantity = required_entry_quantity(trade, ctx)
+    assert quantity == 199
+
+    order = _order(quantity=quantity, stop_price=93.0, target_price=115.0,
+                   entry_price=100.0)
+    same_reference_bar = {"open": 100.0, "high": 102.0, "low": 98.0, "close": 100.5}
+    outcome = resolve_queued_order(order, same_reference_bar, ctx)
+    assert outcome.accepted, outcome.reason
+    print("  ok  the corrected quantity clears execution-time revalidation when "
+          "the next day's real open matches the decision-time reference price")
+
+
+def test_gapped_next_day_price_still_rejected_despite_the_correction():
+    """The correction reserves the KNOWN 5bps markup, not an unknown
+    overnight gap -- a materially gapped-up next-day open must still get
+    the SAME corrected quantity rejected at execution. This is the
+    boundary the fix does not (and must not pretend to) solve."""
+    ctx = _ctx()
+    trade = ProposedTrade(ticker="OLN", action="BUY", quantity=1,
+                          entry_price=100.0, stop_price=93.0, target_price=115.0)
+    quantity = required_entry_quantity(trade, ctx)
+    assert quantity == 199
+
+    order = _order(quantity=quantity, stop_price=93.0, target_price=115.0,
+                   entry_price=100.0)
+    # A genuine overnight gap up to $125 (25%) -- nothing at decision time
+    # could have known this in advance.
+    gapped_bar = {"open": 125.0, "high": 126.0, "low": 124.0, "close": 125.5}
+    outcome = resolve_queued_order(order, gapped_bar, ctx)
+    assert not outcome.accepted
+    assert "§2b" in outcome.reason, outcome.reason
+    print("  ok  execution-time revalidation still rejects the corrected quantity "
+          f"against a genuine overnight gap ({outcome.reason}) -- the correction "
+          "never pretends to know tomorrow's actual price")
+
+
+def test_expected_buy_fill_price_matches_buy_slippage_bps_and_sell_sizing_is_untouched():
+    """_expected_buy_fill_price applies the SAME BUY_SLIPPAGE_BPS constant
+    _slipped_buy_price does (no second hard-coded 5), and SELL sizing/exit
+    semantics are completely unaffected -- required_entry_quantity's SELL
+    branch returns None exactly as before (it never reaches the new
+    expected-fill math), and resolve_queued_order's SELL path still prices
+    a SELL at the raw bar open, never through _expected_buy_fill_price or
+    _slipped_buy_price."""
+    assert _expected_buy_fill_price(100.0) == 100.0 * (1 + BUY_SLIPPAGE_BPS / 10_000)
+    assert BUY_SLIPPAGE_BPS == 5  # the one project-wide slippage rate
+
+    ctx = _ctx()
+    sell = ProposedTrade(ticker="OLN", action="SELL", quantity=1, entry_price=100.0,
+                         stop_price=93.0, target_price=115.0)
+    assert required_entry_quantity(sell, ctx) is None
+
+    held_ctx = _ctx(positions=[Position(ticker="OLN", quantity=90, market_value=9_000.0)])
+    sell_order = _order(action="SELL", quantity=90, stop_price=93.0, target_price=115.0,
+                        entry_price=999.0, decision={"action": "SELL", "quantity": 90, "confidence": 3})
+    bar = {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}
+    outcome = resolve_queued_order(sell_order, bar, held_ctx)
+    # A SELL is priced at the raw open ($100), never slipped -- proceeds
+    # of 90*100=$9,000 comfortably clears every cap regardless of this fix.
+    assert outcome.accepted, outcome.reason
+    print("  ok  _expected_buy_fill_price reuses BUY_SLIPPAGE_BPS (no second constant); "
+          "SELL sizing/exit semantics are completely unaffected by this correction")
 
 
 def test_resolve_queued_order_does_not_recalculate_exact_quantity_after_a_gap():
@@ -2052,8 +2163,9 @@ def test_decision_time_sizing_rejects_placeholder_accepts_exact_and_journals_tim
     alias = masking.alias("OLN")
     portfolio = Portfolio(cash=100_000.0, equity_curve=[100_000.0])
 
-    # entry $100, stop $93 -> required exactly 200 (concentration-bound,
-    # same arithmetic as the pure test above).
+    # entry $100, stop $93 -> required exactly 199 (concentration-bound
+    # against the slippage-reserved expected fill, same arithmetic as the
+    # pure test above).
     placeholder = {"alias": alias, "action": "BUY", "quantity": 1, "entry_price": 100.0,
                   "stop_price": 93.0, "target_price": 115.0, "confidence": 3,
                   "primary_signal": "technical", "technical_basis": "rsi",
@@ -2064,12 +2176,12 @@ def test_decision_time_sizing_rejects_placeholder_accepts_exact_and_journals_tim
         news_payload={"OLN": []},
     )
     assert not queued1, "a one-share placeholder must never reach record_queued_decision"
-    assert any("§2/§3" in line and "200" in line for line in blocked1), blocked1
+    assert any("§2/§3" in line and "199" in line for line in blocked1), blocked1
     assert not working1.pending_orders, "the placeholder must not have been queued"
-    print("  ok  a one-share placeholder is rejected when the required size (200) is larger, "
+    print("  ok  a one-share placeholder is rejected when the required size (199) is larger, "
           "and never journaled")
 
-    exact = dict(placeholder, quantity=200, reasoning="exact required size")
+    exact = dict(placeholder, quantity=199, reasoning="exact required size")
     news_with_article = {"OLN": [
         {"headline": "Olin reports steady demand", "created_at": "2026-02-16T14:30:00+00:00",
          "summary": "...", "symbols": ["OLN"]},
@@ -2101,8 +2213,8 @@ def test_decision_time_sizing_rejects_placeholder_accepts_exact_and_journals_tim
     assert ts["latest_news_created_at"] == "2026-02-16T14:30:00+00:00", (
         f"must be the REAL latest of the actual news payload, not fabricated: {ts}"
     )
-    assert working2.pending_orders and working2.pending_orders[0].quantity == 200
-    print("  ok  the exact calculated size (200) is accepted and journaled with a real, "
+    assert working2.pending_orders and working2.pending_orders[0].quantity == 199
+    print("  ok  the exact calculated size (199) is accepted and journaled with a real, "
           "non-null, accurate data_timestamps object (technical/news cutoff + latest news)")
 
 
@@ -2139,9 +2251,10 @@ def test_decision_time_multi_decision_response_coherence():
 
     # entry $100, stop $92 (8%, risk $8/share), target $112.50 -> reward
     # $12.50/share, ratio 1.5625, clears the 1.5 base floor comfortably.
-    # risk_size=floor(2000/8)=250, concentration_size=floor(20000/100)=200
-    # -- concentration binds against the FULL $25,000 cash pool
-    # (cash_size=250 > 200).
+    # Sized against the slippage-reserved expected fill ($100.05):
+    # risk_size=floor(2000/8.05)=248, concentration_size=floor(20000/100.05)
+    # =199 -- concentration binds against the FULL $25,000 cash pool
+    # (cash_size=floor(25000/100.05)=249 > 199).
     def buy(alias, quantity, notes):
         return {"alias": alias, "action": "BUY", "quantity": quantity, "entry_price": 100.0,
                "stop_price": 92.0, "target_price": 112.5, "confidence": 3,
@@ -2150,11 +2263,13 @@ def test_decision_time_multi_decision_response_coherence():
                "reasoning": notes}
 
     decisions = [
-        buy(alpha_alias, 1, "wrong placeholder for ALPHA"),           # 0: rejected (1 != 200)
-        buy(alpha_alias, 200, "corrected ALPHA proposal"),            # 1: accepted, reserves $20,000
-        buy(alpha_alias, 200, "duplicate ALPHA proposal"),            # 2: rejected (duplicate ticker)
-        # remaining cash after #1: 25000 - 20000 = 5000 ->
-        # cash_size = floor(5000/100) = 50, now the binding constraint.
+        buy(alpha_alias, 1, "wrong placeholder for ALPHA"),           # 0: rejected (1 != 199)
+        buy(alpha_alias, 199, "corrected ALPHA proposal"),            # 1: accepted, reserves $19,900
+        buy(alpha_alias, 199, "duplicate ALPHA proposal"),            # 2: rejected (duplicate ticker)
+        # remaining cash after #1: 25000 - 19900 = 5100 -> cash_size =
+        # floor(5100/100.05) = 50, now the binding constraint (unchanged
+        # from before this correction -- close enough to the same boundary
+        # that ALPHA's 1-share-smaller reservation doesn't move it).
         buy(beta_alias, 50, "BETA sized against the REMAINING cash"),  # 3: accepted
     ]
     working, _prompts, queued, blocked = _run_backtest_scenario(
@@ -2175,7 +2290,7 @@ def test_decision_time_multi_decision_response_coherence():
 
     alpha_order = next(o for o in working.pending_orders if o.ticker == "ALPHA")
     beta_order = next(o for o in working.pending_orders if o.ticker == "BETA")
-    assert alpha_order.quantity == 200
+    assert alpha_order.quantity == 199
     assert beta_order.quantity == 50, (
         f"BETA must be sized against the cash REMAINING after ALPHA's reservation "
         f"(required 50, i.e. floor($5,000 remaining / $100)), got {beta_order.quantity}"
@@ -2273,8 +2388,10 @@ def test_activity_escalation_transition_at_the_real_orchestration_boundary():
 
     # A marginal proposal: ratio 1.3 -- fails the base 1.5 floor (even with
     # its 0.02 tolerance), clears the escalated 1.25 floor comfortably.
+    # entry $100, stop $92 -> required exactly 199 (concentration-bound
+    # against the slippage-reserved expected fill $100.05).
     marginal_decision = {
-        "alias": dino_alias, "action": "BUY", "quantity": 200, "entry_price": 100.0,
+        "alias": dino_alias, "action": "BUY", "quantity": 199, "entry_price": 100.0,
         "stop_price": 92.0, "target_price": 110.4, "confidence": 3,
         "primary_signal": "technical", "technical_basis": "rsi",
         "expected_reward_risk": 1.3, "invalidation_condition": "closes below $92",
@@ -3179,7 +3296,7 @@ def test_run_day_still_queues_a_normal_valid_candidate_proposal_unchanged():
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False,
                         run_id=None, day_index=None):
         return HermesResult(response={
-            "decisions": [{"alias": m.alias("OLN"), "action": "BUY", "quantity": 200,
+            "decisions": [{"alias": m.alias("OLN"), "action": "BUY", "quantity": 199,
                           "entry_price": 100.0, "stop_price": 93.0, "target_price": 115.0}],
             "no_action_reason": "",
         }, attempt_count=1, retry_diagnostics=[])

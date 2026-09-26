@@ -627,6 +627,26 @@ def _slipped_buy_price(reference_price: float, bar: dict) -> float:
     return round(min(max(fill_price, bar["low"]), bar["high"]), 2)
 
 
+def _expected_buy_fill_price(entry_price: float) -> float:
+    """Decision-time ESTIMATE of what a BUY will actually fill at, used
+    only for sizing (required_entry_quantity) -- the SAME BUY_SLIPPAGE_BPS
+    markup _slipped_buy_price applies against a real bar, applied here to
+    Hermes' own proposed entry_price instead. This is NOT a claim to know
+    tomorrow's actual fill: unlike _slipped_buy_price, it is deliberately
+    never clamped into a real [low, high] bar range, because that bar
+    doesn't exist yet at decision time. Its only job is to reserve the
+    KNOWN 5bps markup so a quantity sized off it doesn't get rejected by
+    that same, entirely predictable markup at execution (the defect
+    baseline_v1 exposed: a quantity sized to land exactly at the §2b cap
+    on the raw entry price is already ~5bps over that cap once it
+    actually fills). An unknown overnight gap is a separate risk this
+    value does nothing to predict or absorb -- resolve_queued_order's own
+    re-check against the REAL fill bar (via _slipped_buy_price) remains
+    fully authoritative and can still reject the same order for a
+    genuine gap this estimate never saw coming."""
+    return entry_price * (1 + BUY_SLIPPAGE_BPS / 10_000)
+
+
 @dataclass
 class QueuedOrderOutcome:
     accepted: bool
@@ -3347,10 +3367,13 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         f"  §2a risk budget: {limits.risk_budget_pct:.1f}% of equity risked per trade",
         f"  §2b max position: {limits.max_position_pct:.1f}% of equity in one name",
         "  §3: cash-only exposure, no margin",
-        "  For each BUY, compute all three and take the smallest, floored to a whole share:",
-        f"    stop-based size    = floor(equity * ({limits.risk_budget_pct:.1f} / 100) / (entry - stop))",
-        f"    concentration size = floor(equity * ({limits.max_position_pct:.1f} / 100) / entry)",
-        "    cash size          = floor(remaining_cash / entry)",
+        "  For each BUY, size off your expected fill, not your raw entry_price --",
+        f"  a BUY fills ~{BUY_SLIPPAGE_BPS}bps above entry, so reserve that first:",
+        f"    expected fill      = entry * (1 + {BUY_SLIPPAGE_BPS} / 10000)",
+        "  Then compute all three and take the smallest, floored to a whole share:",
+        f"    stop-based size    = floor(equity * ({limits.risk_budget_pct:.1f} / 100) / (expected fill - stop))",
+        f"    concentration size = floor(equity * ({limits.max_position_pct:.1f} / 100) / expected fill)",
+        "    cash size          = floor(remaining_cash / expected fill)",
         "    required quantity  = min(stop-based size, concentration size, cash size)",
         "",
     ]
@@ -3907,6 +3930,18 @@ def build_decision_time_context(working: "Portfolio", bars: dict[str, dict],
 def required_entry_quantity(trade: ProposedTrade, ctx: Context) -> int | None:
     """Exact whole-share size required by RULES.md §2/§3 at decision time.
 
+    Sizes against `_expected_buy_fill_price(trade.entry_price)`, not the
+    raw proposed entry price: a BUY's real fill is always ~BUY_SLIPPAGE_BPS
+    above its reference price (_slipped_buy_price, execution-sim-mcp's own
+    _simulate_fill), so sizing off the raw price under-reserves risk/
+    concentration/cash by that same known amount every time -- a quantity
+    that lands exactly at a cap on the raw price is already just over it
+    once it actually fills. This is still only an ESTIMATE of the
+    decision-time expected fill, never a prediction of tomorrow's real
+    price; an unknown overnight gap is untouched by this and is exactly
+    why execution-time revalidation (resolve_queued_order) stays fully
+    authoritative and can still reject the same order.
+
     Returns None when the inputs are unusable; the ordinary risk checker
     reports those violations. Execution-time checks deliberately do not
     call this: a next-day gap may change the theoretical optimum, while the
@@ -3919,13 +3954,14 @@ def required_entry_quantity(trade: ProposedTrade, ctx: Context) -> int | None:
         or equity <= 0 or cash < 0 or trade.entry_price <= stop
     ):
         return None
+    expected_fill = _expected_buy_fill_price(trade.entry_price)
     risk_size = math.floor(
-        equity * (ctx.limits.risk_budget_pct / 100) / (trade.entry_price - stop)
+        equity * (ctx.limits.risk_budget_pct / 100) / (expected_fill - stop)
     )
     concentration_size = math.floor(
-        equity * (ctx.limits.max_position_pct / 100) / trade.entry_price
+        equity * (ctx.limits.max_position_pct / 100) / expected_fill
     )
-    cash_size = math.floor(cash / trade.entry_price)
+    cash_size = math.floor(cash / expected_fill)
     return min(risk_size, concentration_size, cash_size)
 
 
