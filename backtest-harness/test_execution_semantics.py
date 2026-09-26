@@ -1378,6 +1378,31 @@ def test_build_prompt_sizing_block_reads_the_active_limits_not_hardcoded_default
     print("  ok  omitting `limits` falls back to RiskLimits()'s own real default, not a stale copy")
 
 
+def test_build_prompt_sizing_formula_matches_expected_buy_fill_price_exactly():
+    """The prompt's rendered sizing-price formula must be the exact
+    helper-equivalent expression _expected_buy_fill_price actually
+    computes (`entry + entry * (bps / 10000)`, then rounded) -- NOT the
+    mathematically-equal but floating-point-order-different
+    `entry * (1 + bps / 10000)`, which rounds a $10.00 case to a
+    different cent than the real fill (see _expected_buy_fill_price's own
+    docstring). A prompt describing the wrong arithmetic order would mislead
+    Hermes about how its own proposed quantity gets verified, even though
+    the harness's own enforcement (required_entry_quantity) was already
+    correct."""
+    account = {"equity": 100_000.0, "cash": 100_000.0, "exposure_pct": 0.0,
+              "daily_pl_pct": 0.0, "weekly_pl_pct": 0.0, "drawdown_pct": 0.0}
+    prompt = build_prompt("Day 1", account, [], [], [])
+
+    assert f"round(entry + entry * ({BUY_SLIPPAGE_BPS} / 10000), 2)" in prompt
+    assert f"entry * (1 + {BUY_SLIPPAGE_BPS} / 10000)" not in prompt
+    # Still an explicit sizing reserve, never a claim of knowing tomorrow's
+    # actual fill.
+    assert "not a claim you know tomorrow's actual fill" in prompt
+    print("  ok  the prompt's sizing formula is the exact helper-equivalent expression "
+          "_expected_buy_fill_price computes, not the floating-point-order-different one, "
+          "and still states this is a reserve, not knowledge of the actual fill")
+
+
 # --------------------------------------------------------------------------
 # 2026-08-29 correctness pass #4
 # --------------------------------------------------------------------------
