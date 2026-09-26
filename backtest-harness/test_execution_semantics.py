@@ -2076,6 +2076,90 @@ def test_expected_buy_fill_price_matches_buy_slippage_bps_and_sell_sizing_is_unt
           "SELL sizing/exit semantics are completely unaffected by this correction")
 
 
+def test_expected_buy_fill_price_matches_the_real_fills_own_cent_rounding():
+    """The second-order defect: sizing off the UNROUNDED expected fill
+    alone isn't enough, because the real fill (_slipped_buy_price) rounds
+    to the cent, and that rounding can independently push it a cent
+    higher. At entry=$10.00: unrounded 10.00*(1+5/10000) = $10.005, which
+    permits floor(20000/10.005) = 1,999 shares -- but the REAL fill (5bps,
+    no gap) rounds to $10.01, and 1,999 * $10.01 = $20,009.99, a genuine
+    breach of the $20,000 (20%) cap despite ZERO overnight gap.
+    _expected_buy_fill_price must therefore round the SAME way
+    _slipped_buy_price does (same computation order, same round-to-cents),
+    not just apply the same bps -- proven here by matching it exactly
+    against a wide (non-clamping) bar's real fill."""
+    entry = 10.00
+    # The mathematically-equal but floating-point-order-different formula
+    # a naive fix could reach for -- rounds to a DIFFERENT cent than the
+    # real fill at this exact entry, which is precisely the pitfall
+    # _expected_buy_fill_price's docstring documents avoiding.
+    naive_rounded_estimate = round(entry * (1 + BUY_SLIPPAGE_BPS / 10_000), 2)
+    assert naive_rounded_estimate == 10.00, naive_rounded_estimate
+
+    corrected_estimate = _expected_buy_fill_price(entry)
+    wide_bar = {"open": entry, "high": 10.50, "low": 9.50, "close": entry}
+    real_fill = _slipped_buy_price(entry, wide_bar)
+    assert corrected_estimate == real_fill == 10.01, (corrected_estimate, real_fill)
+    print("  ok  _expected_buy_fill_price($10.00) == 10.01, matching _slipped_buy_price's "
+          "own cent-rounded real fill exactly (the unrounded estimate would have been $10.005)")
+
+
+def test_required_entry_quantity_reserves_the_real_rounded_fill_at_a_low_priced_boundary():
+    """The exact scenario from the correction request: a $10.00 entry
+    whose UNROUNDED expected-fill formula alone still permits a quantity
+    (1,999) that breaches the 20% cap once the real, ordinarily-rounded
+    5bps fill lands at $10.01 with no overnight gap at all. The corrected
+    formula (rounding to cents like the real fill does) returns 1,998,
+    which does not breach it."""
+    ctx = _ctx()  # equity=$100,000, cash=$100,000
+    # entry $10.00, stop $9.50 (5% distance): concentration is the binding
+    # constraint (risk_size=3921, cash_size=9990, both far looser).
+    trade = ProposedTrade(ticker="OLN", action="BUY", quantity=1,
+                          entry_price=10.00, stop_price=9.50, target_price=12.00)
+    corrected_quantity = required_entry_quantity(trade, ctx)
+    assert corrected_quantity == 1998, corrected_quantity
+
+    wide_bar = {"open": 10.00, "high": 10.50, "low": 9.50, "close": 10.00}
+    real_fill_price = _slipped_buy_price(10.00, wide_bar)
+    assert real_fill_price == 10.01
+    cap_notional = ctx.account.equity * (ctx.limits.max_position_pct / 100)
+
+    old_unrounded_estimate_quantity = 1999  # what the pre-fix (unrounded) formula returned
+    assert old_unrounded_estimate_quantity * real_fill_price > cap_notional, (
+        "the old unrounded-estimate quantity must genuinely breach §2b once the real "
+        "fill's own cent-rounding is applied -- not a hypothetical"
+    )
+    assert corrected_quantity * real_fill_price <= cap_notional, (
+        "the corrected quantity must stay within §2b once it actually fills"
+    )
+    print("  ok  required_entry_quantity($10.00 entry) reserves the REAL rounded fill "
+          f"-- old unrounded-estimate quantity 1,999 breaches §2b once filled "
+          f"(${1999 * real_fill_price:,.2f} > ${cap_notional:,.2f}), corrected quantity "
+          f"1,998 does not (${corrected_quantity * real_fill_price:,.2f})")
+
+
+def test_low_priced_corrected_quantity_passes_execution_with_only_normal_rounded_slippage():
+    """The corrected $10.00-entry quantity (1,998), queued exactly as
+    required_entry_quantity computed it, clears resolve_queued_order's
+    real execution-time re-check the next day when the real fill bar
+    opens at the SAME reference price and only normal (rounded) 5bps
+    slippage applies -- no gap, just the ordinary cent-rounding that
+    caused the original defect at this price point."""
+    ctx = _ctx()
+    trade = ProposedTrade(ticker="OLN", action="BUY", quantity=1,
+                          entry_price=10.00, stop_price=9.50, target_price=12.00)
+    quantity = required_entry_quantity(trade, ctx)
+    assert quantity == 1998
+
+    order = _order(quantity=quantity, stop_price=9.50, target_price=12.00,
+                   entry_price=10.00)
+    same_reference_bar = {"open": 10.00, "high": 10.50, "low": 9.50, "close": 10.00}
+    outcome = resolve_queued_order(order, same_reference_bar, ctx)
+    assert outcome.accepted, outcome.reason
+    print("  ok  the corrected $10.00-entry quantity (1,998) clears execution-time "
+          "revalidation under ordinary rounded 5bps slippage with no gap")
+
+
 def test_resolve_queued_order_does_not_recalculate_exact_quantity_after_a_gap():
     """RULES.md §2/§3's exact-match requirement is a DECISION-time gate
     only. Execution-time (resolve_queued_order, the next real trading day)

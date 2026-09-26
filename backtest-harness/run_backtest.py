@@ -630,21 +630,32 @@ def _slipped_buy_price(reference_price: float, bar: dict) -> float:
 def _expected_buy_fill_price(entry_price: float) -> float:
     """Decision-time ESTIMATE of what a BUY will actually fill at, used
     only for sizing (required_entry_quantity) -- the SAME BUY_SLIPPAGE_BPS
-    markup _slipped_buy_price applies against a real bar, applied here to
-    Hermes' own proposed entry_price instead. This is NOT a claim to know
-    tomorrow's actual fill: unlike _slipped_buy_price, it is deliberately
-    never clamped into a real [low, high] bar range, because that bar
-    doesn't exist yet at decision time. Its only job is to reserve the
-    KNOWN 5bps markup so a quantity sized off it doesn't get rejected by
-    that same, entirely predictable markup at execution (the defect
-    baseline_v1 exposed: a quantity sized to land exactly at the §2b cap
-    on the raw entry price is already ~5bps over that cap once it
-    actually fills). An unknown overnight gap is a separate risk this
-    value does nothing to predict or absorb -- resolve_queued_order's own
-    re-check against the REAL fill bar (via _slipped_buy_price) remains
-    fully authoritative and can still reject the same order for a
-    genuine gap this estimate never saw coming."""
-    return entry_price * (1 + BUY_SLIPPAGE_BPS / 10_000)
+    markup and the SAME cent-rounding _slipped_buy_price applies against a
+    real bar, applied here to Hermes' own proposed entry_price instead
+    (same `reference + reference*(bps/10_000)` order, then `round(_, 2)`
+    -- deliberately not the mathematically-equal `entry*(1+bps/10_000)`,
+    which rounds a boundary case like $10.00 to a different cent due to
+    plain floating-point order-of-operations, silently under-reserving by
+    exactly the cent this function exists to reserve). This is NOT a claim
+    to know tomorrow's actual fill: unlike _slipped_buy_price, it is
+    deliberately never clamped into a real [low, high] bar range, because
+    that bar doesn't exist yet at decision time. Its only job is to
+    reserve the KNOWN 5bps markup, AT THE SAME ROUNDING GRANULARITY THE
+    REAL FILL ACTUALLY LANDS AT, so a quantity sized off it doesn't get
+    rejected by that same, entirely predictable markup at execution (the
+    defect baseline_v1 exposed: a quantity sized to land exactly at the
+    §2b cap on the raw entry price is already ~5bps over that cap once it
+    actually fills -- and sizing off the UNROUNDED estimate alone still
+    isn't enough, since the real fill's own cent-rounding can independently
+    push it another cent higher; a $10.00 entry's unrounded $10.005
+    estimate permits 1,999 shares, but the real fill rounds to $10.01,
+    making 1,999 shares breach the cap by $9.99). An unknown overnight gap
+    is a separate risk this value does nothing to predict or absorb --
+    resolve_queued_order's own re-check against the REAL fill bar (via
+    _slipped_buy_price) remains fully authoritative and can still reject
+    the same order for a genuine gap this estimate never saw coming."""
+    slippage = entry_price * (BUY_SLIPPAGE_BPS / 10_000)
+    return round(entry_price + slippage, 2)
 
 
 @dataclass
@@ -3367,13 +3378,13 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         f"  §2a risk budget: {limits.risk_budget_pct:.1f}% of equity risked per trade",
         f"  §2b max position: {limits.max_position_pct:.1f}% of equity in one name",
         "  §3: cash-only exposure, no margin",
-        "  For each BUY, size off your expected fill, not your raw entry_price --",
-        f"  a BUY fills ~{BUY_SLIPPAGE_BPS}bps above entry, so reserve that first:",
-        f"    expected fill      = entry * (1 + {BUY_SLIPPAGE_BPS} / 10000)",
+        f"  For decision-time sizing, reserve {BUY_SLIPPAGE_BPS}bps above your proposed",
+        "  entry -- this is a sizing margin, not a claim you know tomorrow's actual fill:",
+        f"    sizing price       = round(entry * (1 + {BUY_SLIPPAGE_BPS} / 10000), 2)",
         "  Then compute all three and take the smallest, floored to a whole share:",
-        f"    stop-based size    = floor(equity * ({limits.risk_budget_pct:.1f} / 100) / (expected fill - stop))",
-        f"    concentration size = floor(equity * ({limits.max_position_pct:.1f} / 100) / expected fill)",
-        "    cash size          = floor(remaining_cash / expected fill)",
+        f"    stop-based size    = floor(equity * ({limits.risk_budget_pct:.1f} / 100) / (sizing price - stop))",
+        f"    concentration size = floor(equity * ({limits.max_position_pct:.1f} / 100) / sizing price)",
+        "    cash size          = floor(remaining_cash / sizing price)",
         "    required quantity  = min(stop-based size, concentration size, cash size)",
         "",
     ]
