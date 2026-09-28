@@ -92,7 +92,11 @@ STARTING_EQUITY = 100_000.0
 # milestone) -- the function's structure changed even though its output
 # is byte-identical to v1 whenever fundamentals_enabled is left at its
 # default (False).
-PROMPT_SCHEMA_VERSION = 2
+# 3 (was 2, 2026-09-27 hardening pass H2): build_prompt now embeds
+# RULES.md's full verbatim text plus an explicit no-tools-available
+# notice -- every cycle's rendered prompt genuinely changed shape, so an
+# old evidence row's prompt_text is visibly told apart from a new one.
+PROMPT_SCHEMA_VERSION = 3
 # The masking seed used when nothing is stored yet and no --seed is given
 # (a fresh or --reset run) -- was argparse's own default before item 7's
 # seed-persistence fix; unchanged in value, only in where it lives.
@@ -202,14 +206,301 @@ def run_in(service: str, script: str) -> str:
     return result.stdout
 
 
-def preflight() -> None:
-    """Fail fast and clearly if a container the loop needs is not running.
+# -- Backtest-only Hermes isolation (2026-09-27 hardening pass, H1) -------
+# docs/evaluations/project_integrity_and_laya_readiness_audit.md found that
+# every backtest Hermes call ran under the SAME long-lived `default` Hermes
+# profile the (never-yet-run) live trading agent uses -- 30 generic tools
+# offered (terminal, file read/write, browser, session search, memory, and
+# a generic MCP tool_call that could reach the trade journal or the paper
+# broker), sharing its persistent session/memory store, even though
+# AGENTS.md's "no tools in backtest mode" was never enforced structurally.
+# The old `-t ""` flag silently did nothing: hermes_cli/oneshot.py's
+# `_normalize_toolsets("")` treats an empty string as "no override" and
+# falls through to config.yaml's own toolset default -- so this fix lives
+# in a dedicated profile's config, not a CLI flag.
+#
+# BACKTEST_HERMES_HOME/BACKTEST_HERMES_PROFILE name the BASE profile
+# (`hermes profile create backtest --no-skills`, provisioned once,
+# out-of-band -- see docs/evaluations/backtest_hardening_verification.md)
+# with its own config.yaml: `platform_toolsets.cli: []` (zero tools),
+# `mcp_servers: {}` (no MCP servers), `memory.memory_enabled: false`.
+# 2026-09-27 correction pass (requirement 1): this base profile is no
+# longer used directly by any real cycle -- it exists only as the CLONE
+# SOURCE for a fresh, disposable HermesRuntime provisioned once per run
+# (see _provision_ephemeral_hermes_runtime below), so no two separate
+# runs, past or future, ever share a session database, request dump,
+# memory store, or user profile. It shares the SAME model/provider/auth
+# as the live `default` profile (a scoping boundary, not a credential or
+# model change) but its own, separate HERMES_HOME -- selected
+# per-invocation via `-e HERMES_HOME=...` on the `docker compose exec`
+# call, never by touching the live profile's own sticky `hermes profile
+# use` pointer. The live `default` profile's config.yaml, auth, memory,
+# and MCP servers (trade-journal, alpaca, maverick, news) are completely
+# untouched by any of this.
+BACKTEST_HERMES_HOME = "/opt/data/profiles/backtest"
+BACKTEST_HERMES_PROFILE = "backtest"
+# 2026-09-27 correction pass (requirement 2): BACKTEST_HERMES_WORKDIR
+# (/opt/data/workspace) is the SHARED container path the LIVE agent's
+# AGENTS.md/RULES.md/SOUL.md are mounted at (docker-compose.yml) -- real,
+# unmasked text. Proven live (prompt-size --json) that running a backtest
+# Hermes call with `--workdir` pointed there injects 14KB+ of that real
+# text into the "context (AGENTS.md/cwd files)" tier of every cycle,
+# regardless of the isolated profile's own zero-tool/zero-memory config.
+# This constant is kept ONLY as still-correct documentation of where the
+# LIVE agent's cwd is, and as the (never used for a real Hermes call)
+# default HermesRuntime's own workdir for old, non-isolation-focused test
+# call sites -- see _DEFAULT_HERMES_RUNTIME below. Every REAL backtest
+# Hermes invocation now runs with `--workdir` pointed at its OWN
+# per-run HermesRuntime.workdir (that profile's private, always-empty
+# `workspace/` subdirectory under its own HERMES_HOME) instead, which has
+# no AGENTS.md/RULES.md/SOUL.md to auto-inject at all -- verified live,
+# "context (AGENTS.md/cwd files)": 0 bytes. See build_prompt/masking for
+# the ONLY trading context a backtest Hermes call ever receives.
+BACKTEST_HERMES_WORKDIR = "/opt/data/workspace"
+
+
+@dataclass(frozen=True)
+class HermesRuntime:
+    """A single, disposable Hermes profile for exactly one run (2026-09-27
+    correction pass, requirement 1). Provisioned by
+    _provision_ephemeral_hermes_runtime via the documented, supported
+    `hermes profile create <name> --clone-from backtest --no-alias`
+    mechanism -- verified live: the clone copies ONLY config.yaml/.env/
+    SOUL.md/skills from the source profile, never state.db, sessions/, or
+    memories/, so a fresh clone starts with EMPTY session history/memory,
+    completely unrelated to any other run's own ephemeral profile, past
+    or future (two runs, two profile names, two disjoint directories).
+
+    workdir is this profile's OWN private `workspace/` subdirectory
+    (`<home>/workspace`), never the shared /opt/data/workspace the LIVE
+    agent's real AGENTS.md/RULES.md/SOUL.md are mounted at -- see
+    BACKTEST_HERMES_WORKDIR's own comment. A brand-new clone's workspace/
+    is always empty (nothing is ever written there), so Hermes' own cwd
+    context-file tier has nothing to auto-inject; the ONLY trading
+    context a real cycle's Hermes call ever receives is the controller's
+    prepared, masked prompt (build_prompt/apply_pre_fill_news_gate).
+
+    fingerprint is a short sha256 of `name` -- NOT `home` (an absolute
+    path under the user's home directory) -- the non-secret, non-path
+    per-run isolation identifier this pass's own requirement asks to be
+    persisted in place of the raw HERMES_HOME path the prior pass wrote."""
+    name: str
+    home: str
+    workdir: str
+    fingerprint: str
+
+
+# Fallback runtime for call sites that don't care about per-run
+# disposability (mocked tests, and any old direct call that predates this
+# pass's runtime threading). Points at the BASE profile itself -- still
+# fully isolated from the live `default` profile (own HERMES_HOME, zero
+# tools, zero memory) -- just not per-run-disposable. Every REAL backtest
+# invocation (main()/eval_suite.run_configuration(), via preflight()) always
+# threads an explicit, freshly-provisioned HermesRuntime instead; this
+# default is never reached on a real cycle.
+_DEFAULT_HERMES_RUNTIME = HermesRuntime(
+    name=BACKTEST_HERMES_PROFILE, home=BACKTEST_HERMES_HOME,
+    workdir=BACKTEST_HERMES_WORKDIR,
+    fingerprint=hashlib.sha256(BACKTEST_HERMES_PROFILE.encode()).hexdigest()[:16],
+)
+
+
+def _provision_ephemeral_hermes_runtime() -> HermesRuntime:
+    """Provisions a fresh, disposable HermesRuntime for exactly one run,
+    via the supported `hermes profile create <name> --clone-from backtest
+    --no-alias` mechanism (verified live -- see docs/evaluations/
+    backtest_hardening_verification.md for the exact inspection: a clone
+    copies config.yaml/.env/SOUL.md/skills only, arriving with NO
+    state.db and empty sessions/memories directories). `name` is random
+    and non-secret (never derived from any run/portfolio identity), and
+    is the ONLY thing persisted as provenance -- see build_run_provenance.
+
+    Raises SystemExit (never silently falls back to a shared profile) if
+    the clone itself fails -- e.g. the base 'backtest' profile has not
+    been provisioned."""
+    name = f"btrun-{uuid.uuid4().hex[:16]}"
+    home = f"/opt/data/profiles/{name}"
+    runtime = HermesRuntime(
+        name=name, home=home, workdir=f"{home}/workspace",
+        fingerprint=hashlib.sha256(name.encode()).hexdigest()[:16],
+    )
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "gateway", "hermes", "profile", "create",
+             name, "--clone-from", BACKTEST_HERMES_PROFILE, "--no-alias",
+             "--description", "Ephemeral per-run backtest Hermes profile (2026-09-27 "
+             "correction pass) -- safe to delete; cleaned up automatically at the "
+             "end of the run that created it."],
+            capture_output=True, text=True, cwd=REPO, timeout=60, encoding="utf-8",
+        )
+    except BaseException:
+        # A timeout/interrupt may fire AFTER the profile was really created
+        # -- best-effort delete of this exact name, then re-raise unchanged.
+        _cleanup_ephemeral_hermes_runtime(runtime)
+        raise
+    if result.returncode != 0:
+        raise SystemExit(
+            "failed to provision a fresh, disposable per-run Hermes profile "
+            f"(clone of {BACKTEST_HERMES_PROFILE!r}): {result.stderr[-1000:]}\n"
+            "Refusing to start any backtest cycle without a per-run isolated "
+            "Hermes runtime. Has the base 'backtest' Hermes profile been "
+            "provisioned? See docs/evaluations/backtest_hardening_verification.md."
+        )
+    return runtime
+
+
+def _cleanup_ephemeral_hermes_runtime(runtime: "HermesRuntime | None") -> None:
+    """Best-effort deletion of ONLY the exact ephemeral profile this run
+    provisioned -- never BACKTEST_HERMES_PROFILE (the clone source) and
+    never anything under the live `default` profile. Called from the
+    run's own try/finally on BOTH normal completion and any failure path
+    (requirement 1's "cleanup ... on normal completion and safe failure
+    paths"), so an ephemeral home never accumulates. A no-op for the
+    shared _DEFAULT_HERMES_RUNTIME (name == BACKTEST_HERMES_PROFILE) --
+    that one is never this run's own to delete. A cleanup failure is
+    printed, never raised: it must not mask whatever real result or
+    exception the run is already returning."""
+    if runtime is None or runtime.name == BACKTEST_HERMES_PROFILE:
+        return
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "gateway", "hermes", "profile",
+             "delete", runtime.name, "-y"],
+            capture_output=True, text=True, cwd=REPO, timeout=60, encoding="utf-8",
+        )
+        if result.returncode != 0:
+            print(f"  WARNING: ephemeral Hermes profile {runtime.name!r} cleanup "
+                  f"exited {result.returncode}: {(result.stderr or '')[-300:].strip()} "
+                  f"-- safe to delete manually later "
+                  f"(`hermes profile delete {runtime.name} -y`)")
+    except Exception as exc:
+        print(f"  WARNING: failed to clean up ephemeral Hermes profile "
+              f"{runtime.name!r}: {type(exc).__name__}: {exc} -- safe to delete "
+              f"manually later (`hermes profile delete {runtime.name} -y`)")
+
+
+def _read_hermes_runtime_config(runtime: "HermesRuntime") -> dict:
+    """Best-effort read of the isolated runtime's OWN model/provider/
+    reasoning-effort configuration straight from its config.yaml (M2
+    correction, requirement 4: "persist model/provider/reasoning
+    configuration at run level whenever it can be read safely from the
+    isolated runtime configuration"). Reads the file's raw text via the
+    SAME `docker compose exec` mechanism every other real read in this
+    module uses (never the host's own PyYAML -- this project's host
+    Python carries no such dependency) and pulls the fixed keys this
+    profile's own generated config.yaml always writes (see the base
+    'backtest' profile's config.yaml) with a plain regex scan -- a
+    controlled, self-authored file, not arbitrary untrusted YAML.
+
+    Returns {"model", "provider", "reasoning_effort", "source":
+    "isolated_profile_config"} on success, or an EXPLICIT {"model": None,
+    "provider": None, "reasoning_effort": None, "source": "unavailable"}
+    on any failure -- never a fabricated value, and the availability
+    state itself is always recorded, never silently dropped."""
+    unavailable = {"model": None, "provider": None, "reasoning_effort": None,
+                   "source": "unavailable"}
+    try:
+        result = subprocess.run(
+            ["docker", "compose", "exec", "-T", "gateway", "cat", f"{runtime.home}/config.yaml"],
+            capture_output=True, text=True, cwd=REPO, timeout=30, encoding="utf-8",
+        )
+        if result.returncode != 0:
+            return unavailable
+        text = result.stdout
+    except Exception:
+        return unavailable
+    model = re.search(r"^\s*default:\s*(\S+)\s*$", text, re.MULTILINE)
+    provider = re.search(r"^\s*provider:\s*(\S+)\s*$", text, re.MULTILINE)
+    reasoning = re.search(r"^\s*reasoning_effort:\s*(\S+)\s*$", text, re.MULTILINE)
+    if not (model and provider):
+        return unavailable
+    return {
+        "model": model.group(1), "provider": provider.group(1),
+        "reasoning_effort": reasoning.group(1) if reasoning else None,
+        "source": "isolated_profile_config",
+    }
+
+
+def _verify_backtest_hermes_isolation(runtime: "HermesRuntime | None" = None) -> dict:
+    """Fail-closed preflight (H1, extended by the 2026-09-27 correction
+    pass's requirement 2): runs `hermes prompt-size --json` under
+    `runtime`'s own HERMES_HOME/workdir and raises SystemExit BEFORE any
+    market-data fetch, journal write, or real Hermes call this run if the
+    runtime advertises ANY tool, ANY non-zero memory/user-profile bytes,
+    OR any non-zero "context (AGENTS.md/cwd files)" bytes -- the third
+    check is new: the prior pass's own preflight proved zero tools/memory
+    but never checked whether the workdir it ran under had raw project
+    docs sitting in it (it did -- 14KB+ of real AGENTS.md/RULES.md text,
+    found and fixed by this pass; see BACKTEST_HERMES_WORKDIR's comment
+    and runtime.workdir's own docstring). `prompt-size` is Hermes' own
+    offline report (no API call, no cost) of exactly what a fresh session
+    under a profile+workdir would send.
+
+    Returns the parsed report so the caller can persist real provenance
+    without a second subprocess call."""
+    runtime = runtime or _DEFAULT_HERMES_RUNTIME
+    result = subprocess.run(
+        ["docker", "compose", "exec", "-T", "-e", f"HERMES_HOME={runtime.home}",
+         "--workdir", runtime.workdir, "gateway", "hermes", "prompt-size", "--json"],
+        capture_output=True, text=True, cwd=REPO, timeout=60, encoding="utf-8",
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            "backtest Hermes isolation preflight failed to run ("
+            f"`hermes prompt-size` under HERMES_HOME={runtime.home} "
+            f"exited {result.returncode}): {result.stderr[-1000:]}\n"
+            "Refusing to start any backtest cycle without a verified "
+            "tool-less, memory-less, doc-injection-free Hermes runtime. Has "
+            "the isolated 'backtest' Hermes profile been provisioned? See "
+            "docs/evaluations/backtest_hardening_verification.md."
+        )
+    report = json_from(result.stdout)
+    tool_count = report.get("tools", {}).get("count")
+    memory_bytes = report.get("memory", {}).get("bytes")
+    profile_bytes = report.get("user_profile", {}).get("bytes")
+    context_bytes = next(
+        (b for label, _chars, b in report.get("sections", []) if str(label).startswith("context")),
+        None,
+    )
+    if tool_count != 0 or memory_bytes != 0 or profile_bytes != 0 or context_bytes != 0:
+        raise SystemExit(
+            "backtest Hermes isolation preflight FAILED: the runtime "
+            f"(HERMES_HOME={runtime.home}, workdir={runtime.workdir}) currently "
+            f"advertises {tool_count} tool(s), {memory_bytes} byte(s) of "
+            f"memory, {profile_bytes} byte(s) of user-profile context, and "
+            f"{context_bytes!r} byte(s) of auto-discovered workspace/project "
+            "context -- all four must be exactly zero. Refusing to start any "
+            "backtest cycle rather than run one with tools, persistent "
+            "memory, or raw project documents available. Fix the profile's "
+            "config.yaml (platform_toolsets.cli: [], mcp_servers: {}, memory."
+            "memory_enabled: false) and/or point workdir at an empty "
+            "directory, then re-run."
+        )
+    return report
+
+
+def preflight() -> dict:
+    """Fail fast and clearly if a container the loop needs is not running,
+    then provision a fresh, disposable per-run HermesRuntime (H1
+    correction, requirement 1) and verify it is tool-less, memory-less,
+    and free of any auto-discovered workspace/project context (H1/H2 --
+    see _verify_backtest_hermes_isolation).
 
     Found the hard way: `execution-sim` ships with `restart: "no"` (it was a
     dev-only tool before being repurposed for backtest fills), so it is
     stopped by default. The loop then died mid-cycle with a bare
     'service is not running' — after already spending a real Hermes call
     for nothing. Cheaper to check all five up front.
+
+    Returns the isolation report (the raw prompt-size fields, PLUS a
+    "runtime" key holding this run's own HermesRuntime) so the caller can
+    (a) thread `runtime` into every real ask_hermes/apply_pre_fill_news_
+    gate call this run makes, (b) pass the whole dict into
+    build_run_provenance for a fresh run's provenance write, and (c) clean
+    the runtime up (_cleanup_ephemeral_hermes_runtime) when the run ends,
+    on any path. If isolation verification itself fails, the just-created
+    ephemeral profile is cleaned up before re-raising -- a failed preflight
+    must never leak a disposable profile.
     """
     required = ["gateway", "maverick-mcp", "alpaca-mcp", "trade-journal",
                 "execution-sim"]
@@ -223,6 +514,20 @@ def preflight() -> None:
             f"Not running: {', '.join(missing)}\n"
             f"Start them with:  docker compose up -d {' '.join(missing)}"
         )
+    runtime = _provision_ephemeral_hermes_runtime()
+    # BaseException, not just SystemExit: a timeout, malformed prompt-size
+    # JSON, any unexpected exception, or a KeyboardInterrupt between
+    # provisioning and this function's return would otherwise orphan the
+    # disposable profile (the caller never receives `runtime`, so its own
+    # finally can never clean it). The original exception is re-raised
+    # unchanged; cleanup only ever targets this exact `runtime`.
+    try:
+        report = _verify_backtest_hermes_isolation(runtime)
+        report["runtime"] = runtime
+    except BaseException:
+        _cleanup_ephemeral_hermes_runtime(runtime)
+        raise
+    return report
 
 
 def json_from(text: str) -> dict:
@@ -1412,11 +1717,13 @@ def _load_checkpoint(run_id: str, day_index: int) -> dict | None:
     return None
 
 
-def _save_checkpoint(run_id: str, day_index: int, response: dict, usage: dict,
+def _save_checkpoint(run_id: str, day_index: int, response: dict | None = None,
+                     usage: dict | None = None,
                      prompt_text: str | None = None, input_payload: dict | None = None,
                      attempt_count: int | None = None,
                      retry_diagnostics: list | None = None,
-                     fundamentals_provenance: list | None = None) -> None:
+                     fundamentals_provenance: list | None = None,
+                     pre_fill_gate: dict | None = None) -> None:
     """Atomic (see _atomic_write_json) -- a crash mid-write must never
     leave a half-written checkpoint that a retry could partially trust.
 
@@ -1428,18 +1735,47 @@ def _save_checkpoint(run_id: str, day_index: int, response: dict, usage: dict,
     four positional args still work; `_load_checkpoint` reading an OLDER
     checkpoint file that predates this simply finds these keys absent,
     handled with `.get(..., default)` wherever they're read (never a
-    required field on read)."""
-    data = {"run_id": run_id, "day_index": day_index, "response": response, "usage": usage}
+    required field on read).
+
+    2026-09-27 hardening pass (M3): `response`/`usage` are now OPTIONAL --
+    run_day's pre-fill news gate checkpoints its own `pre_fill_gate`
+    verdicts BEFORE the main Hermes call even happens (there is no
+    `response` yet at that point), and this same function is called AGAIN
+    once the main call succeeds. Each call MERGES onto whatever the
+    checkpoint file already holds for this exact (run_id, day_index)
+    rather than clobbering it: the gate's early write must survive the
+    later response write, and the later response write must never require
+    re-passing `pre_fill_gate` just to avoid erasing it. `_load_checkpoint`
+    -- not the in-memory value passed here -- is the merge base, so this
+    stays correct even if the caller never held the prior write's dict."""
+    existing = _load_checkpoint(run_id, day_index) or {}
+    data = {"run_id": run_id, "day_index": day_index}
+    data["response"] = response if response is not None else existing.get("response")
+    data["usage"] = usage if usage is not None else existing.get("usage")
     if prompt_text is not None:
         data["prompt_text"] = prompt_text
+    elif "prompt_text" in existing:
+        data["prompt_text"] = existing["prompt_text"]
     if input_payload is not None:
         data["input_payload"] = input_payload
+    elif "input_payload" in existing:
+        data["input_payload"] = existing["input_payload"]
     if attempt_count is not None:
         data["attempt_count"] = attempt_count
+    elif "attempt_count" in existing:
+        data["attempt_count"] = existing["attempt_count"]
     if retry_diagnostics is not None:
         data["retry_diagnostics"] = retry_diagnostics
+    elif "retry_diagnostics" in existing:
+        data["retry_diagnostics"] = existing["retry_diagnostics"]
     if fundamentals_provenance is not None:
         data["fundamentals_provenance"] = fundamentals_provenance
+    elif "fundamentals_provenance" in existing:
+        data["fundamentals_provenance"] = existing["fundamentals_provenance"]
+    if pre_fill_gate is not None:
+        data["pre_fill_gate"] = pre_fill_gate
+    elif "pre_fill_gate" in existing:
+        data["pre_fill_gate"] = existing["pre_fill_gate"]
     _atomic_write_json(CHECKPOINT_PATH, data)
 
 
@@ -1987,7 +2323,8 @@ def _parse_pre_fill_confirmation(raw: str, aliases: list[str]) -> dict[str, str]
 def apply_pre_fill_news_gate(
     pending_orders: list["QueuedOrder"], fill_day: date, masking: RunMasking,
     usage_totals: dict, fetch_news_fn=None, call_hermes_fn=None,
-) -> tuple[list["QueuedOrder"], list[dict]]:
+    checkpointed_gate: dict | None = None,
+) -> tuple[list["QueuedOrder"], list[dict], dict | None]:
     """Harness-owned overnight/pre-fill news gate. Runs BEFORE
     simulate_trading_day, using real I/O outside the risk checker (which
     stays pure math/rules -- see this section's own header) and outside
@@ -2024,16 +2361,44 @@ def apply_pre_fill_news_gate(
     this gate's real cost is never invisible in the cycle's own usage
     report.
 
-    Returns (surviving_pending_orders, gate_events). surviving_pending_
-    orders is every SELL plus every CONFIRMed BUY, in original relative
-    order -- exactly what the caller should pass to simulate_trading_day
-    next; a CANCELled BUY is never in it, so simulate_trading_day can
-    never re-validate or fill one (requirement 9). gate_events is one
-    dict per EVALUATED BUY (never per SELL) -- {"order", "outcome"
-    ("confirm"/"cancel"), "reason", "window_start", "window_end",
-    "article_count", "article_timestamps"} -- for the caller to resolve
-    (resolve_trade_rejection on "cancel") and journal/log durably
-    (requirement 8).
+    Returns (surviving_pending_orders, gate_events, gate_call_evidence).
+    surviving_pending_orders is every SELL plus every CONFIRMed BUY, in
+    original relative order -- exactly what the caller should pass to
+    simulate_trading_day next; a CANCELled BUY is never in it, so
+    simulate_trading_day can never re-validate or fill one (requirement
+    9). gate_events is one dict per EVALUATED BUY (never per SELL) --
+    {"order", "outcome" ("confirm"/"cancel"), "reason", "window_start",
+    "window_end", "article_count", "article_timestamps"} -- for the
+    caller to resolve (resolve_trade_rejection on "cancel") and
+    journal/log durably (requirement 8).
+
+    gate_call_evidence (2026-09-27 hardening/correction passes, M3) is
+    None when no Hermes confirmation call was made THIS invocation (the
+    common, cheap case: no windowed BUY, every windowed BUY resolved with
+    zero in-window articles, or every order was replayed from
+    `checkpointed_gate`), otherwise {"prompt_text", "prompt_sha256",
+    "raw_response", "response_sha256", "attempt_count", "order_ids",
+    "aliases"} describing the ONE batched call this invocation made --
+    the SAME byte-exact-hashing discipline ask_hermes applies to the main
+    cycle call (see _call_hermes). order_ids/aliases name exactly which
+    queued orders this call's batch covered (correction pass, requirement
+    3), since a single simulated day can require MORE than one such call
+    across retries; the caller (run_day) APPENDS each invocation's
+    evidence onto an ordered `pre_fill_gate.gate_calls` list rather than
+    overwriting a single value, so no earlier batch's evidence is ever
+    lost.
+
+    checkpointed_gate, when given (a dict previously returned via this
+    function's OWN prior invocation this exact cycle, restructured by the
+    caller into {"verdicts": {decision_id: {outcome/reason/window/
+    article...}}} -- see run_day's checkpoint-replay branch), makes every
+    COVERED order a PURE replay: its verdict is read back with NO news
+    re-fetch and NO Hermes call, so a retried cycle can never re-fetch
+    different (newer) live news or get a different classification from a
+    non-deterministic model call than the attempt that already ran. Any
+    BUY not covered by the checkpoint (should not happen for a genuine
+    retry of the same cycle, since `pending_orders` is stable across it)
+    falls through to the normal live path rather than silently guessing.
 
     fetch_news_fn/call_hermes_fn default to the real fetch_news_window/
     _call_hermes, resolved LAZILY here (never as the parameter's own
@@ -2052,9 +2417,29 @@ def apply_pre_fill_news_gate(
     sells = [o for o in pending_orders if o.action != "BUY"]
     buys = [o for o in pending_orders if o.action == "BUY"]
 
-    windows: dict[str, tuple[datetime, datetime]] = {}
+    # -- replay: every order already resolved by an earlier attempt this
+    # exact cycle needs neither a news fetch nor a Hermes call -- see the
+    # docstring above. Orders NOT covered (none, for a genuine retry) fall
+    # through to the live path below unchanged.
+    checkpointed_verdicts = (checkpointed_gate or {}).get("verdicts") or {}
     gate_events: list[dict] = []
+    surviving_buys: list["QueuedOrder"] = []
+    live_buys: list["QueuedOrder"] = []
     for order in buys:
+        v = checkpointed_verdicts.get(order.decision_id)
+        if v is None:
+            live_buys.append(order)
+            continue
+        gate_events.append({"order": order, **v})
+        if v["outcome"] == "confirm":
+            surviving_buys.append(order)
+
+    gate_call_evidence: dict | None = None
+    if not live_buys:
+        return sells + surviving_buys, gate_events, gate_call_evidence
+
+    windows: dict[str, tuple[datetime, datetime]] = {}
+    for order in live_buys:
         window = _pre_fill_news_window(order.decision_cutoff_at, fill_day)
         if window is None:
             gate_events.append({
@@ -2065,8 +2450,7 @@ def apply_pre_fill_news_gate(
             continue
         windows[order.decision_id] = window
 
-    windowed_orders = [o for o in buys if o.decision_id in windows]
-    surviving_buys: list["QueuedOrder"] = []
+    windowed_orders = [o for o in live_buys if o.decision_id in windows]
 
     if windowed_orders:
         # Every order's own window_end is identically fill_day's 09:45 ET
@@ -2126,7 +2510,28 @@ def apply_pre_fill_news_gate(
                 [{"alias": b["alias"], "articles": b["articles"]} for b in batch]
             )
             masking.assert_clean(prompt)
-            raw, usage = call_hermes_fn(prompt)
+            # 2026-09-27 hardening pass (M1/M3): call_hermes_fn now returns
+            # raw response BYTES (matching _call_hermes's own real contract
+            # -- see its docstring) -- hash before decode, same discipline
+            # ask_hermes applies to the main cycle call.
+            raw_bytes, usage = call_hermes_fn(prompt)
+            prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+            response_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+            raw = raw_bytes.decode("utf-8", errors="replace")
+            # order_ids/aliases (correction pass, requirement 3): which
+            # queued orders THIS specific call's batch covered -- needed
+            # because a day can require more than one confirmation batch
+            # (e.g. a retry that resolves a second, previously-uncovered
+            # order), and run_day now keeps an ORDERED LIST of every such
+            # call rather than a single overwritten dict -- see its own
+            # checkpoint-merge site below.
+            gate_call_evidence = {
+                "prompt_text": prompt, "prompt_sha256": prompt_sha256,
+                "raw_response": raw, "response_sha256": response_sha256,
+                "attempt_count": 1,
+                "order_ids": [o.decision_id for o in to_confirm],
+                "aliases": [o.alias for o in to_confirm],
+            }
             for key in ("input_tokens", "output_tokens", "cache_read_tokens",
                         "reasoning_tokens", "total_tokens", "api_calls"):
                 usage_totals[key] = (usage_totals.get(key) or 0) + (usage.get(key) or 0)
@@ -2149,7 +2554,7 @@ def apply_pre_fill_news_gate(
                         "article_count": b["article_count"], "article_timestamps": b["article_timestamps"],
                     })
 
-    return sells + surviving_buys, gate_events
+    return sells + surviving_buys, gate_events, gate_call_evidence
 
 
 # ---------------------------------------------------------------------
@@ -2548,7 +2953,15 @@ def record_cycle_evidence(cycle_id: str, run_id: str, day_label: str, prompt_tex
                           agents_md_sha256: str, soul_md_sha256: str,
                           model: str | None = None, provider: str | None = None,
                           reasoning_effort: str | None = None,
-                          fundamentals_provenance: list | None = None) -> None:
+                          fundamentals_provenance: list | None = None,
+                          prompt_sha256: str | None = None,
+                          raw_response_text: str | None = None,
+                          response_sha256: str | None = None,
+                          offered_tool_count: int | None = None,
+                          tools_used_count: int | None = None,
+                          tools_used: list | None = None,
+                          tool_use_attestation_basis: str | None = None,
+                          pre_fill_gate: dict | None = None) -> None:
     """One exact evidence record per successful backtest cycle -- see
     _record_cycle_evidence's own docstring in trade-journal-mcp/server.py
     for the full idempotency/collision contract (same discipline as
@@ -2569,7 +2982,28 @@ def record_cycle_evidence(cycle_id: str, run_id: str, day_label: str, prompt_tex
     Reused verbatim from the checkpoint on a replay, exactly like
     prompt_text/input_payload, so a rerun's private audit trail is never
     recomputed from a freshly re-fetched (and potentially different)
-    SEC snapshot."""
+    SEC snapshot.
+
+    prompt_sha256/raw_response_text/response_sha256/offered_tool_count
+    (2026-09-27 hardening pass, M1/M2): the exact-byte evidence for THIS
+    cycle's main Hermes call -- see HermesResult/ask_hermes.
+    tools_used_count/tools_used/tool_use_attestation_basis (correction
+    pass, requirement 4): the explicit zero-tool-use attestation, and
+    WHY it's zero -- "structural_zero_offered_tools" means this is
+    implied by offered_tool_count==0 (nothing WAS offered, so nothing
+    could have been used), never an independently observed runtime trace
+    (Hermes' own usage report has no per-call tool-use list to observe).
+
+    pre_fill_gate (M3, correction pass requirement 3): the SAME dict the
+    checkpoint's own `pre_fill_gate` key carries ({"verdicts": {...},
+    "gate_calls": [...] }) -- `gate_calls` is an ORDERED LIST of every
+    pre-fill Hermes confirmation call this cycle made (a day needing more
+    than one confirmation batch keeps ALL of them, not just the last),
+    persisted as JSON into pre_fill_gate_calls below rather than the four
+    flat scalar columns an earlier version of this pass used (which
+    silently discarded every batch but the last). None on the (common)
+    cycle where the gate had nothing to evaluate."""
+    gate_calls = (pre_fill_gate or {}).get("gate_calls") or []
     script = f'''
 import asyncio
 from server import _record_cycle_evidence
@@ -2585,6 +3019,12 @@ async def main():
         soul_md_sha256={soul_md_sha256!r}, model={model!r}, provider={provider!r},
         reasoning_effort={reasoning_effort!r},
         fundamentals_provenance={fundamentals_provenance!r},
+        prompt_sha256={prompt_sha256!r}, raw_response_text={raw_response_text!r},
+        response_sha256={response_sha256!r}, offered_tool_count={offered_tool_count!r},
+        tools_used_count={tools_used_count!r}, tools_used={tools_used!r},
+        tool_use_attestation_basis={tool_use_attestation_basis!r},
+        pre_fill_gate_verdicts={(pre_fill_gate or {}).get("verdicts")!r},
+        pre_fill_gate_calls={gate_calls!r},
     )
 
 asyncio.run(main())
@@ -2661,10 +3101,115 @@ asyncio.run(main())
     return json_from(run_in("trade-journal", script))["run_kind"]
 
 
+def _git_head_provenance() -> tuple[str | None, bool | None]:
+    """(git HEAD sha, dirty-tree flag) for THIS repo checkout, at the
+    moment a run starts -- M2 provenance. Best-effort: a `git` failure
+    (not a git checkout, git missing) returns (None, None) rather than
+    failing the run over a provenance nicety, same discipline as
+    ask_hermes's own usage-report tagging."""
+    try:
+        sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], capture_output=True, text=True,
+            cwd=REPO, timeout=10,
+        )
+        status = subprocess.run(
+            ["git", "status", "--porcelain"], capture_output=True, text=True,
+            cwd=REPO, timeout=10,
+        )
+        if sha.returncode != 0 or status.returncode != 0:
+            return None, None
+        return sha.stdout.strip() or None, bool(status.stdout.strip())
+    except Exception:
+        return None, None
+
+
+def _gateway_image_digest() -> str | None:
+    """The gateway service's pinned image reference from docker-compose.yml
+    (e.g. `nousresearch/hermes-agent@sha256:...`) -- read from source, not
+    `docker inspect`, so this reflects what the compose FILE currently
+    pins rather than whatever happens to be cached/running. Best-effort:
+    None if the file or the expected `image:` line can't be found."""
+    try:
+        compose_text = (REPO / "docker-compose.yml").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    match = re.search(r"^\s*gateway:\s*\n(?:.*\n)*?\s*image:\s*(\S+)", compose_text, re.MULTILINE)
+    return match.group(1) if match else None
+
+
+def build_run_provenance(isolation_report: dict) -> dict:
+    """Assembles the M2 run-level provenance dict register_run_configuration
+    persists -- called with the SAME report preflight()/
+    _verify_backtest_hermes_isolation() already measured for this run, so
+    isolation is proven exactly once per run, not re-measured here.
+
+    hermes_system_prompt_sha256 is a fingerprint of prompt-size's own JSON
+    report (the fixed tool list + section byte breakdown), NOT a hash of
+    Hermes' actual raw system-prompt text -- `hermes prompt-size` does not
+    expose that text, only its size/composition, and this project is not
+    willing to reverse-engineer Hermes' internal prompt assembly to obtain
+    a byte-for-byte hash it doesn't publish. What this DOES prove: any
+    future change to the isolated profile's offered tools, skills, or
+    section sizes changes this fingerprint, making drift detectable.
+
+    2026-09-27 correction pass (requirement 1): `hermes_profile` is now
+    this RUN's own ephemeral profile name (isolation_report["runtime"],
+    set by preflight()) -- a random, non-secret label, never the fixed
+    BACKTEST_HERMES_PROFILE every run used to share. `hermes_home` (an
+    absolute path under the user's home directory) is dropped in favor of
+    `hermes_home_fingerprint`, a short sha256 of the profile name -- the
+    non-secret per-run isolation identifier this pass's own requirement
+    asks for. Falls back to _DEFAULT_HERMES_RUNTIME's identity only when
+    `isolation_report` carries no "runtime" key at all (an old/mocked
+    caller that predates per-run provisioning).
+
+    requirement 2: `hermes_context_bytes` persists the same "context
+    (AGENTS.md/cwd files)" measurement _verify_backtest_hermes_isolation
+    already fails the run closed on, so a later audit can also see the
+    proven-zero value, not just trust that the gate passed.
+
+    requirement 4: `hermes_runtime_model/provider/reasoning_effort` come
+    from _read_hermes_runtime_config's best-effort read of the runtime's
+    OWN config.yaml (never fabricated -- `hermes_runtime_config_source`
+    records "unavailable" rather than silently omitting the fields on any
+    read failure)."""
+    runtime = isolation_report.get("runtime") or _DEFAULT_HERMES_RUNTIME
+    git_sha, git_dirty = _git_head_provenance()
+    report_for_hash = {k: v for k, v in isolation_report.items() if k != "runtime"}
+    report_bytes = json.dumps(report_for_hash, sort_keys=True).encode()
+    runtime_config = _read_hermes_runtime_config(runtime)
+    context_bytes = next(
+        (b for label, _c, b in isolation_report.get("sections", []) if str(label).startswith("context")),
+        None,
+    )
+    return {
+        "hermes_profile": runtime.name,
+        "hermes_home_fingerprint": runtime.fingerprint,
+        "hermes_offered_tool_count": isolation_report.get("tools", {}).get("count"),
+        "hermes_tool_list_sha256": hashlib.sha256(
+            json.dumps(sorted(
+                t.get("toolset") for t in isolation_report.get("toolsets_breakdown", [])
+            )).encode()
+        ).hexdigest(),
+        "hermes_memory_enabled": isolation_report.get("memory", {}).get("bytes", 0) != 0,
+        "hermes_context_bytes": context_bytes,
+        "hermes_system_prompt_sha256": hashlib.sha256(report_bytes).hexdigest(),
+        "hermes_isolation_verified_at": datetime.now(timezone.utc).isoformat(),
+        "git_head_sha": git_sha,
+        "git_dirty": git_dirty,
+        "gateway_image_digest": _gateway_image_digest(),
+        "hermes_runtime_model": runtime_config["model"],
+        "hermes_runtime_provider": runtime_config["provider"],
+        "hermes_runtime_reasoning_effort": runtime_config["reasoning_effort"],
+        "hermes_runtime_config_source": runtime_config["source"],
+    }
+
+
 def register_run_configuration(
     run_id: str, watchlist_snapshot: list[dict], watchlist_snapshot_hash: str,
     alias_mapping: dict[str, str], alias_mapping_hash: str, seed: int,
     start_str: str, end_str: str, fundamentals_enabled: bool,
+    provenance: dict | None = None,
 ) -> dict:
     """Idempotently persist this run's frozen watchlist/alias identity into
     the private backtest_run_configuration table -- see
@@ -2675,7 +3220,21 @@ def register_run_configuration(
     right after register_run (backtest_run_configuration.run_id
     foreign-keys to backtest_run_registry.run_id) and before any
     market-data fetch, Hermes call, decision write, or cycle-evidence
-    write for this run."""
+    write for this run.
+
+    provenance (2026-09-27 hardening pass, M2; field set corrected by the
+    same-day correction pass): the additive dict from build_run_provenance
+    -- hermes_profile (per-run ephemeral name)/hermes_home_fingerprint/
+    hermes_context_bytes/offered_tool_count/tool_list_sha256/
+    memory_enabled/system_prompt_sha256/isolation_verified_at,
+    hermes_runtime_model/provider/reasoning_effort/config_source,
+    git_head_sha/git_dirty, gateway_image_digest. Passed through to
+    _register_run_configuration as one opaque dict (it does the field-by-
+    field `.get()` extraction) so THIS function needs no changes when that
+    dict's own shape changes. None for every call site that predates this
+    pass, landing every new column as NULL -- matching every historical
+    row already in Neon."""
+    provenance = provenance or {}
     script = f'''
 import asyncio, json
 from server import _register_run_configuration
@@ -2685,6 +3244,7 @@ async def main():
         {run_id!r}, {watchlist_snapshot!r}, {watchlist_snapshot_hash!r},
         {alias_mapping!r}, {alias_mapping_hash!r}, {seed!r},
         {start_str!r}, {end_str!r}, {fundamentals_enabled!r},
+        {provenance!r},
     )
     print(json.dumps({{"run_id": str(row["run_id"])}}))
 
@@ -3325,7 +3885,8 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
                  candidates: list[dict], recent_insights: list[str],
                  reflection_trades: list[dict] | None = None,
                  limits: "RiskLimits | None" = None,
-                 fundamentals_enabled: bool = False) -> str:
+                 fundamentals_enabled: bool = False,
+                 masking: "RunMasking | None" = None) -> str:
     # `limits` must be the SAME RiskLimits instance the decision-time
     # checker (required_entry_quantity/check_trade) will actually enforce
     # -- see run_day's `active_limits` -- never a second, independently
@@ -3345,6 +3906,43 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     lines = [
         f"BACKTEST CYCLE — {day_label}", "",
     ]
+
+    # 2026-09-27 hardening pass (H2 -- docs/evaluations/project_integrity_
+    # and_laya_readiness_audit.md): AGENTS.md's own instruction is "Read
+    # RULES.md at the start of every cycle" -- true in live mode, where
+    # AGENTS.md is auto-injected and Hermes can read the mounted file, but
+    # NEVER true in backtest mode, where the isolated profile (see
+    # BACKTEST_HERMES_HOME) has no read_file/terminal tool to act on that
+    # instruction with. Every rule Hermes was ever actually checked
+    # against still comes from `limits`/risk_checker.py, unchanged by this
+    # -- this block exists so the model reads the SAME rules text the
+    # checker enforces, not a second hand-maintained restatement of it.
+    # Read fresh from disk at cycle-construction time (never cached/
+    # hand-copied). RULES.md §8's watchlist table names every real ticker
+    # and company on the watchlist -- embedding it RAW would silently
+    # defeat the entire no-trained-memory masking gate (anonymize.py) this
+    # project exists to enforce, exactly the leak `masking.assert_clean`
+    # is designed to catch everywhere else. So this text is masked through
+    # the SAME `RunMasking.mask_text` every other piece of prompt text
+    # (news, technicals) already goes through -- "verbatim" here means
+    # the full substantive content (every number, formula, prohibition,
+    # and rule), not literal, unmasked bytes of a file that happens to
+    # also contain real identities. `masking=None` (only test call sites
+    # that don't exercise the real masking-critical path) skips this
+    # block entirely rather than ever risking an unmasked leak.
+    if masking is not None:
+        lines += [
+            "===== RULES.md (verbatim content, identity-masked -- immutable this cycle) =====",
+            masking.mask_text((REPO / "RULES.md").read_text(encoding="utf-8")),
+            "===== END RULES.md =====",
+            "",
+            "You have NO TOOLS available in backtest mode -- every fact you "
+            "need (account state, positions, candidates, recent reflections) "
+            "is already in this prompt. Do not attempt to call a tool, read a "
+            "file, or fetch anything; respond with ONLY the JSON object this "
+            "prompt's closing instructions describe, nothing else.",
+            "",
+        ]
 
     if recent_insights:
         lines.append(
@@ -3489,7 +4087,8 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         )
 
     closing = (
-        "Decide. Reply with ONLY a JSON object, no prose around it:\n"
+        "Decide. You have no tools in this mode -- reply with ONLY a JSON "
+        "object, no prose, no tool call, around it:\n"
         f"{schema}}}\n"
         "For each BUY, quantity must equal the required quantity from the "
         "POSITION SIZING block above -- computed against cash remaining "
@@ -3631,16 +4230,60 @@ class HermesResult:
       message -- never a credential, environment value, or container
       command (none of those ever reach this exception in the first
       place; _call_hermes's own RuntimeError on a nonzero returncode is
-      NOT caught here and is not a retry case -- see ask_hermes)."""
+      NOT caught here and is not a retry case -- see ask_hermes).
+    prompt_sha256/raw_response/response_sha256 (2026-09-27 hardening pass,
+      M1): the EXACT bytes of the FINAL, successful attempt only -- if a
+      retry occurred, these describe the retry's own prompt/response, not
+      the first (failed) attempt's, since those are what `response` above
+      was actually validated from. raw_response is the pre-parse text
+      (response_sha256 is computed over its raw bytes, before decode)."""
     response: dict
     attempt_count: int
     retry_diagnostics: list[dict]
+    # Defaulted (unlike response/attempt_count/retry_diagnostics above) --
+    # ask_hermes always supplies real values; a test that patches
+    # ask_hermes itself (not _call_hermes) and doesn't care about hash
+    # provenance can construct a HermesResult without naming these three.
+    prompt_sha256: str = ""
+    raw_response: str = ""
+    response_sha256: str = ""
 
 
-def _call_hermes(prompt: str) -> tuple[str, dict]:
-    # Correction pass item F (prior audit L5): the annotation previously
-    # said -> str; the real return (below) is (result.stdout, usage).
-    escaped = prompt.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$")
+def _call_hermes(prompt: str, runtime: "HermesRuntime | None" = None) -> tuple[bytes, dict]:
+    """Runs `runtime`'s own isolated, disposable Hermes profile (H1 --
+    see preflight/_verify_backtest_hermes_isolation/HermesRuntime) and
+    returns the RAW response BYTES (M1 hardening pass, prior audit
+    finding M1) -- exactly what Hermes printed to stdout, before any
+    decode/parse touches it, so the caller can hash it byte-for-byte.
+    `runtime` defaults to _DEFAULT_HERMES_RUNTIME (the shared base
+    profile) for callers that don't care about per-run disposability;
+    every REAL cycle (ask_hermes/apply_pre_fill_news_gate, threaded from
+    run_day's own `runtime` param) always passes this run's own freshly
+    provisioned one.
+
+    2026-09-27 hardening pass: the prompt used to be embedded as an escaped
+    ARGV string (`.replace("\\\\", ...).replace('"', ...).replace("$", ...)`),
+    which (a) silently mutated any prompt byte that happened to be a quote/
+    backslash/dollar sign -- the stored `prompt_text` was therefore NOT
+    byte-identical to what Hermes actually received -- and (b) built a
+    single Windows CreateProcess command line subject to its ~32KB length
+    ceiling, which the new RULES.md prompt block (H2) would exceed on this
+    host. Both are gone now: the prompt travels over this HOST subprocess's
+    own stdin (`input=`, never argv), and inside the container `xargs -0
+    -I{}` reads that same stdin as ONE NUL-free item and substitutes it
+    directly into hermes's argv via execve -- no intervening shell, so no
+    quoting/expansion of quotes, `$`, backticks, or backslashes, and no
+    trailing-newline stripping the way `sh -c "...$(cat)..."` would cause.
+    Verified byte-for-byte (host sha256 == container-received sha256) with
+    a payload containing all of those characters before this was trusted
+    -- see docs/evaluations/backtest_hardening_verification.md.
+
+    `-e HERMES_HOME=runtime.home` + `--workdir runtime.workdir` selects
+    this run's own isolated, disposable, doc-injection-free profile (H1/
+    H2) for this invocation only -- never the live `default` profile's
+    sticky selection, and never the shared workdir the live agent's real
+    AGENTS.md/RULES.md/SOUL.md are mounted at."""
+    runtime = runtime or _DEFAULT_HERMES_RUNTIME
     # --usage-file: real per-call token accounting (input/output/cache/
     # reasoning tokens, api_calls) written to a JSON report inside the
     # container. Found via `hermes --help`, not guessed -- the alternative
@@ -3648,20 +4291,23 @@ def _call_hermes(prompt: str) -> tuple[str, dict]:
     # and nothing upstream can verify.
     usage_path = f"/tmp/hermes_usage_{uuid.uuid4().hex}.json"
     result = subprocess.run(
-        ["docker", "compose", "exec", "-T", "--workdir", "/opt/data/workspace",
-         "gateway", "hermes", "-z", escaped, "-t", "", "--usage-file", usage_path],
-        capture_output=True, text=True, cwd=REPO, timeout=600,
-        encoding="utf-8", errors="replace",
+        ["docker", "compose", "exec", "-T", "-e", f"HERMES_HOME={runtime.home}",
+         "--workdir", runtime.workdir,
+         "gateway", "xargs", "-0", "-I{}", "hermes", "-z", "{}",
+         "--usage-file", usage_path],
+        input=prompt.encode("utf-8"), capture_output=True, cwd=REPO, timeout=600,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"hermes failed:\n{result.stderr[-1500:]}")
+        raise RuntimeError(f"hermes failed:\n{result.stderr[-1500:].decode('utf-8', errors='replace')}")
 
     usage_result = subprocess.run(
-        ["docker", "compose", "exec", "-T", "gateway", "cat", usage_path],
+        ["docker", "compose", "exec", "-T", "-e", f"HERMES_HOME={runtime.home}",
+         "gateway", "cat", usage_path],
         capture_output=True, text=True, cwd=REPO, timeout=30, encoding="utf-8",
     )
     subprocess.run(
-        ["docker", "compose", "exec", "-T", "gateway", "rm", "-f", usage_path],
+        ["docker", "compose", "exec", "-T", "-e", f"HERMES_HOME={runtime.home}",
+         "gateway", "rm", "-f", usage_path],
         capture_output=True, cwd=REPO, timeout=30,
     )
     usage = json.loads(usage_result.stdout) if usage_result.returncode == 0 else {}
@@ -3759,7 +4405,7 @@ def _write_diagnostic(run_id: str | None, day_index: int | None, attempt: int, r
 
 def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
                fundamentals_enabled: bool = False, run_id: str | None = None,
-               day_index: int | None = None) -> HermesResult:
+               day_index: int | None = None, runtime: "HermesRuntime | None" = None) -> HermesResult:
     """One retry on a malformed OR semantically invalid reply — a real
     failure mode, seen on the very first live cycle (an unescaped quote
     inside the reasoning text broke the whole object and cost the cycle).
@@ -3831,12 +4477,23 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
                 )
             usage_totals[key] = value
 
-    raw, usage = _call_hermes(prompt)
+    # 2026-09-27 hardening pass (M1): _call_hermes now returns raw RESPONSE
+    # BYTES -- hash them immediately, before any decode/parse touches them,
+    # so response_sha256 reflects exactly what Hermes printed. prompt_sha256
+    # is computed from the SAME `prompt.encode("utf-8")` bytes _call_hermes
+    # sends as stdin (see its own docstring) -- not re-derived from a
+    # separately-escaped copy, so it is provably the sent bytes' hash, not
+    # an approximation of them.
+    raw_bytes, usage = _call_hermes(prompt, runtime)
+    prompt_sha256 = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    response_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+    raw = raw_bytes.decode("utf-8", errors="replace")
     _accumulate(usage)
     try:
         response = json_from(raw)
         validate_hermes_response(response, is_reflection_day, fundamentals_enabled=fundamentals_enabled)
-        return HermesResult(response=response, attempt_count=1, retry_diagnostics=[])
+        return HermesResult(response=response, attempt_count=1, retry_diagnostics=[],
+                            prompt_sha256=prompt_sha256, raw_response=raw, response_sha256=response_sha256)
     except (ValueError, json.JSONDecodeError) as exc:
         # error_message bounded to 500 chars -- the same message a raised
         # exception already carries (never a credential, env value, or
@@ -3853,7 +4510,10 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
             "decision. Keep every free-text field to one short line with "
             "no quote characters, apostrophes, or line breaks inside it."
         )
-        raw2, usage2 = _call_hermes(retry)
+        raw2_bytes, usage2 = _call_hermes(retry, runtime)
+        prompt2_sha256 = hashlib.sha256(retry.encode("utf-8")).hexdigest()
+        response2_sha256 = hashlib.sha256(raw2_bytes).hexdigest()
+        raw2 = raw2_bytes.decode("utf-8", errors="replace")
         _accumulate(usage2)
         # A second failure (parse OR validation) propagates uncaught --
         # fail closed, exactly like the pre-existing JSON-only contract.
@@ -3874,7 +4534,8 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
             _write_diagnostic(run_id, day_index, 1, _build_diagnostic_record(raw, exc))
             _write_diagnostic(run_id, day_index, 2, _build_diagnostic_record(raw2, exc2))
             raise
-        return HermesResult(response=response2, attempt_count=2, retry_diagnostics=retry_diagnostics)
+        return HermesResult(response=response2, attempt_count=2, retry_diagnostics=retry_diagnostics,
+                            prompt_sha256=prompt2_sha256, raw_response=raw2, response_sha256=response2_sha256)
 
 
 def _execute_exit(working: "Portfolio", ticker: str, quantity: int, entry_price: float,
@@ -3982,7 +4643,8 @@ def required_entry_quantity(trade: ProposedTrade, ctx: Context) -> int | None:
 
 def run_day(day: date, day_index: int, portfolio: Portfolio,
             masking: RunMasking, watchlist: list[dict], limits_ctx: dict,
-            run_key: str, fundamentals_enabled: bool = False) -> tuple[Portfolio, dict, "Callable[[], None]"]:
+            run_key: str, fundamentals_enabled: bool = False,
+            runtime: "HermesRuntime | None" = None) -> tuple[Portfolio, dict, "Callable[[], None]"]:
     """Run one simulated trading day. Returns (new_portfolio, summary,
     do_observability).
 
@@ -4131,6 +4793,18 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # indefinitely instead of expiring after the day it happened.
     working.stopped_out_today = []
 
+    # -- checkpoint load (2026-09-27 hardening pass, M3) -------------------
+    # Loaded HERE, before the pre-fill gate below, not only before the main
+    # Hermes call further down (its old position) -- a retry of this EXACT
+    # (run_key, day_index) must replay the gate's own already-resolved
+    # verdicts too, never re-fetch live news or re-ask Hermes for an order
+    # already classified by an earlier attempt. See apply_pre_fill_news_
+    # gate's checkpointed_gate parameter and _save_checkpoint's merge
+    # behavior (the gate's own write below and the main-response write
+    # further down both merge onto this same file, never clobbering each
+    # other's field).
+    checkpoint = _load_checkpoint(run_key, day_index)
+
     # -- overnight/pre-fill news gate (2026-09-17 correction pass) --------
     # BEFORE anything else touches today's pending orders: every queued BUY
     # left over from yesterday is re-checked against headlines published in
@@ -4142,10 +4816,51 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # BEFORE `needed`/intraday bars are computed below, so a cancelled
     # order's ticker is never even fetched for execution timing it will now
     # never need.
-    working.pending_orders, _pre_fill_gate_events = apply_pre_fill_news_gate(
+    working.pending_orders, _pre_fill_gate_events, _pre_fill_gate_call_evidence = apply_pre_fill_news_gate(
         working.pending_orders, day, masking, summary["usage"],
-        fetch_news_fn=fetch_news_window, call_hermes_fn=_call_hermes,
+        fetch_news_fn=fetch_news_window, call_hermes_fn=lambda p: _call_hermes(p, runtime),
+        checkpointed_gate=(checkpoint or {}).get("pre_fill_gate"),
     )
+    # Durably checkpoint the gate's OWN verdicts the instant they're known
+    # -- BEFORE the main Hermes call below, which may itself fail/crash.
+    # `response`/`usage` stay unknown at this point (see _save_checkpoint's
+    # merge behavior: the eventual main-response write below preserves
+    # this write's pre_fill_gate field, and this write preserves nothing
+    # from a NOT-yet-existing main response). Only written when this
+    # attempt did real gate work (a fresh order, a news fetch, or a live
+    # Hermes confirmation call) -- a cycle whose gate was a pure replay, or
+    # had nothing to evaluate, has nothing new worth persisting here.
+    #
+    # gate_calls (correction pass, requirement 3): APPENDS this
+    # invocation's own evidence onto whatever ordered list the checkpoint
+    # already holds, rather than overwriting a single value -- a day that
+    # needs a SECOND confirmation batch (e.g. a retry that resolves a
+    # previously-uncovered order) used to silently discard the first
+    # batch's prompt/response/hashes; every call this cycle ever makes now
+    # survives in order. Verdicts are rebuilt fresh each write from
+    # `_pre_fill_gate_events`, which itself already unions replayed
+    # checkpoint verdicts with freshly-resolved ones (see the function's
+    # own early-return replay loop above) -- so no separate merge is
+    # needed for `verdicts`, only for `gate_calls`.
+    if _pre_fill_gate_events and (
+        _pre_fill_gate_call_evidence is not None
+        or (checkpoint or {}).get("pre_fill_gate") is None
+    ):
+        existing_gate_calls = ((checkpoint or {}).get("pre_fill_gate") or {}).get("gate_calls") or []
+        _save_checkpoint(
+            run_key, day_index,
+            pre_fill_gate={
+                "verdicts": {
+                    event["order"].decision_id: {
+                        k: v for k, v in event.items() if k != "order"
+                    }
+                    for event in _pre_fill_gate_events
+                },
+                "gate_calls": existing_gate_calls + (
+                    [_pre_fill_gate_call_evidence] if _pre_fill_gate_call_evidence else []
+                ),
+            },
+        )
     for event in _pre_fill_gate_events:
         order = event["order"]
         if event["outcome"] != "cancel":
@@ -4520,15 +5235,21 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     prompt = build_prompt(masking.day_index(day), account_view,
                           positions_view, candidates, recent_insights,
                           reflection_trades, limits=active_limits,
-                          fundamentals_enabled=fundamentals_enabled)
+                          fundamentals_enabled=fundamentals_enabled,
+                          masking=masking)
 
     # -- checkpoint gate (2026-08-28 correctness pass, item 2) ------------
     # A retry of this EXACT (run_key, day_index) reuses the response
     # already checkpointed by an earlier attempt -- Hermes is never called
     # again. See the module-level checkpoint docstring above for why this
-    # is the actual root-cause fix.
+    # is the actual root-cause fix. Reloaded here (not just reusing the
+    # value loaded before the pre-fill gate above) because that gate may
+    # itself have just written a checkpoint with a real pre_fill_gate but
+    # NO response yet (2026-09-27 hardening pass, M3) -- checking
+    # `.get("response") is not None`, not merely `is not None`, is what
+    # tells the two apart.
     checkpoint = _load_checkpoint(run_key, day_index)
-    if checkpoint is not None:
+    if checkpoint is not None and checkpoint.get("response") is not None:
         response = checkpoint["response"]
         summary["usage"] = checkpoint.get("usage") or {}
         # 2026-08-31 (evidence instrumentation): reuse the CHECKPOINTED
@@ -4542,6 +5263,13 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         input_payload = checkpoint.get("input_payload", input_payload)
         attempt_count = checkpoint.get("attempt_count", 1)
         retry_diagnostics = checkpoint.get("retry_diagnostics", [])
+        # 2026-09-27 hardening pass (M1): reuse the checkpointed exact-byte
+        # evidence too -- a replay must report the SAME prompt/response
+        # hashes the original successful attempt did, never freshly
+        # recomputed from a possibly-different in-memory prompt string.
+        prompt_sha256 = checkpoint.get("prompt_sha256")
+        raw_response = checkpoint.get("raw_response")
+        response_sha256 = checkpoint.get("response_sha256")
         # Requirement 2: reuse the checkpointed private audit payload too --
         # a replay must never write freshly re-fetched SEC provenance (this
         # attempt's own `fundamentals_provenance_payload` above is fetched
@@ -4555,7 +5283,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         try:
             hermes_result = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day,
                                        fundamentals_enabled=fundamentals_enabled,
-                                       run_id=run_key, day_index=day_index)
+                                       run_id=run_key, day_index=day_index, runtime=runtime)
         except Exception as exc:
             # Tag with whatever real usage ask_hermes accumulated before
             # failing (a validation-retry exhaustion still burns 1-2 real
@@ -4569,6 +5297,9 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         response = hermes_result.response
         attempt_count = hermes_result.attempt_count
         retry_diagnostics = hermes_result.retry_diagnostics
+        prompt_sha256 = hermes_result.prompt_sha256
+        raw_response = hermes_result.raw_response
+        response_sha256 = hermes_result.response_sha256
         # Durably save the validated response BEFORE any further essential
         # mutation (reflection insight, decision journaling, all below) --
         # this is the checkpoint fix: the cycle's whole "intent" now
@@ -4576,11 +5307,23 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         # known, not only once the whole cycle succeeds. Now also carries
         # prompt_text/input_payload/attempt_count/retry_diagnostics, so a
         # retry of the evidence write below never has to call Hermes again
-        # or recompute anything to reproduce it exactly.
+        # or recompute anything to reproduce it exactly. `pre_fill_gate` is
+        # deliberately left unset here (None) -- _save_checkpoint's merge
+        # behavior preserves whatever the gate call above already wrote.
         _save_checkpoint(run_key, day_index, response, summary["usage"],
                          prompt_text=prompt, input_payload=input_payload,
                          attempt_count=attempt_count, retry_diagnostics=retry_diagnostics,
                          fundamentals_provenance=fundamentals_provenance_payload)
+        # A second, additive write for the M1 hash fields -- kept separate
+        # from the call above (rather than threading 3 more parameters
+        # through _save_checkpoint's already-long signature) since these
+        # are simple, independently-mergeable scalars; _atomic_write_json
+        # makes this second write just as crash-safe as the first.
+        _atomic_write_json(CHECKPOINT_PATH, {
+            **_load_checkpoint(run_key, day_index),
+            "prompt_sha256": prompt_sha256, "raw_response": raw_response,
+            "response_sha256": response_sha256,
+        })
 
     # -- ESSENTIAL: persist this cycle's exact evidence (2026-08-31) ------
     # Structural only -- an eligible candidate is 'proposed' iff its alias
@@ -4619,6 +5362,27 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         provider=usage_for_evidence.get("provider"),
         reasoning_effort=usage_for_evidence.get("reasoning_effort"),
         fundamentals_provenance=fundamentals_provenance_payload,
+        prompt_sha256=prompt_sha256, raw_response_text=raw_response,
+        response_sha256=response_sha256,
+        # Constant, not re-measured per cycle: the isolated backtest
+        # profile's tool count is fixed by its config.yaml and verified
+        # ONCE per run by preflight()/_verify_backtest_hermes_isolation
+        # (see build_run_provenance) -- every cycle in a run uses the
+        # SAME profile, so this is that proven value, not a fresh
+        # subprocess call every cycle.
+        offered_tool_count=0,
+        # tools_used_count/tools_used (correction pass, requirement 4):
+        # zero use is STRUCTURALLY implied by zero offered tools (a
+        # oneshot `-z` call under a profile with `platform_toolsets.cli:
+        # []`/`mcp_servers: {}` has no tool it could possibly have
+        # called), not an independently-measured runtime trace -- Hermes'
+        # own --usage-file report has never been observed to report a
+        # per-call tool-use list. tool_use_attestation_basis records that
+        # distinction explicitly rather than letting a constant 0 read as
+        # a real measurement.
+        tools_used_count=0, tools_used=[],
+        tool_use_attestation_basis="structural_zero_offered_tools",
+        pre_fill_gate=(checkpoint or {}).get("pre_fill_gate"),
     )
 
     summary["no_action_reason"] = response.get("no_action_reason", "")
@@ -5026,12 +5790,14 @@ def resolve_run_kind(is_resume: bool, requested_kind: str | None, run_id: str,
         return requested_kind
 
 
-def main() -> None:
-    parser = build_arg_parser()
-    args = parser.parse_args()
-
-    preflight()
-
+def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -> None:
+    """The real body of main() -- factored out so main() itself can wrap
+    it in a try/finally that cleans up this run's ephemeral Hermes
+    profile on EVERY exit path (correction pass, requirement 1's
+    "cleanup ... on normal completion and safe failure paths"), without
+    reindenting this whole function. `runtime` is threaded into every
+    run_day call below (which threads it into ask_hermes/
+    apply_pre_fill_news_gate in turn) -- see main()."""
     if args.reset and STATE_PATH.exists():
         _check_reset_allowed(json.loads(STATE_PATH.read_text()), args.confirm_destructive_reset)
         STATE_PATH.unlink()
@@ -5149,6 +5915,7 @@ def main() -> None:
         register_run_configuration(
             run_id, watchlist, watchlist_snapshot_hash, alias_mapping,
             alias_mapping_hash, seed, start_str, end_str, fundamentals_enabled,
+            provenance=build_run_provenance(isolation_report),
         )
     elif state.get("watchlist_snapshot") is not None:
         remote_config = get_run_configuration(run_id)
@@ -5205,7 +5972,7 @@ def main() -> None:
         todays_limits_ctx = _limits_for_profile(portfolio.profile_level)
         result, halted = _run_cycle_or_halt(
             lambda: run_day(cursor, day_index, portfolio, masking, watchlist, todays_limits_ctx, run_key,
-                            fundamentals_enabled=fundamentals_enabled),
+                            fundamentals_enabled=fundamentals_enabled, runtime=runtime),
             day_label=masking.day_index(cursor),
             run_id=run_id,
         )
@@ -5316,6 +6083,22 @@ def main() -> None:
         print(f"tokens this run: {run_usage['total_tokens']:,} total "
               f"({avg:,.0f} avg/cycle) | api calls: {run_usage['api_calls']} "
               f"| cost: {cost}")
+
+
+def main() -> None:
+    """Parses args, provisions a fresh per-run HermesRuntime (preflight),
+    runs the real body (_run_backtest_main), then ALWAYS cleans that
+    runtime up -- normal completion, a halted cycle (_run_backtest_main
+    returns normally in that case), or an uncaught exception all reach
+    the same finally (correction pass, requirement 1)."""
+    parser = build_arg_parser()
+    args = parser.parse_args()
+    isolation_report = preflight()
+    runtime = isolation_report["runtime"]
+    try:
+        _run_backtest_main(args, isolation_report, runtime)
+    finally:
+        _cleanup_ephemeral_hermes_runtime(runtime)
 
 
 if __name__ == "__main__":

@@ -396,11 +396,21 @@ def _cycle_evidence_mismatches(
     prompt_schema_version: int, rules_md_sha256: str, agents_md_sha256: str,
     soul_md_sha256: str, model: str | None, provider: str | None,
     reasoning_effort: str | None, fundamentals_provenance: Any | None,
+    prompt_sha256: str | None, raw_response_text: str | None,
+    response_sha256: str | None, offered_tool_count: int | None,
+    tools_used_count: int | None, tools_used: Any | None,
+    tool_use_attestation_basis: str | None,
+    pre_fill_gate_verdicts: Any | None, pre_fill_gate_calls: Any | None,
 ) -> list[str]:
     """Same discipline as _decision_field_mismatches -- every field that
     defines this cycle's evidence, so a genuine retry (identical payload)
     stays a no-op while a collision under the same cycle_id but DIFFERENT
-    evidence fails loudly, naming exactly what differed."""
+    evidence fails loudly, naming exactly what differed.
+
+    pre_fill_gate_calls (correction pass, requirement 3): compared as JSON,
+    same as every other JSONB field here -- it's an ORDERED LIST now (see
+    _record_cycle_evidence), so a genuine retry must reproduce the SAME
+    list in the SAME order, not just an equivalent set."""
     checks: list[tuple[str, bool]] = [
         ("run_id", _uuid_equal(row["run_id"], run_id)),
         ("day_label", row["day_label"] == day_label),
@@ -418,6 +428,15 @@ def _cycle_evidence_mismatches(
         ("provider", row["provider"] == provider),
         ("reasoning_effort", row["reasoning_effort"] == reasoning_effort),
         ("fundamentals_provenance", _json_equal(row["fundamentals_provenance"], fundamentals_provenance)),
+        ("prompt_sha256", row["prompt_sha256"] == prompt_sha256),
+        ("raw_response_text", row["raw_response_text"] == raw_response_text),
+        ("response_sha256", row["response_sha256"] == response_sha256),
+        ("offered_tool_count", _int_equal(row["offered_tool_count"], offered_tool_count)),
+        ("tools_used_count", _int_equal(row["tools_used_count"], tools_used_count)),
+        ("tools_used", _json_equal(row["tools_used"], tools_used)),
+        ("tool_use_attestation_basis", row["tool_use_attestation_basis"] == tool_use_attestation_basis),
+        ("pre_fill_gate_verdicts", _json_equal(row["pre_fill_gate_verdicts"], pre_fill_gate_verdicts)),
+        ("pre_fill_gate_calls", _json_equal(row["pre_fill_gate_calls"], pre_fill_gate_calls)),
     ]
     return [name for name, ok in checks if not ok]
 
@@ -429,6 +448,11 @@ async def _record_cycle_evidence(
     prompt_schema_version: int, rules_md_sha256: str, agents_md_sha256: str,
     soul_md_sha256: str, model: str | None = None, provider: str | None = None,
     reasoning_effort: str | None = None, fundamentals_provenance: Any | None = None,
+    prompt_sha256: str | None = None, raw_response_text: str | None = None,
+    response_sha256: str | None = None, offered_tool_count: int | None = None,
+    tools_used_count: int | None = None, tools_used: Any | None = None,
+    tool_use_attestation_basis: str | None = None,
+    pre_fill_gate_verdicts: Any | None = None, pre_fill_gate_calls: Any | None = None,
 ) -> dict[str, Any]:
     """One exact evidence record per successful backtest cycle -- the
     precise masked inputs Hermes was shown, the exact rendered prompt, and
@@ -456,7 +480,26 @@ async def _record_cycle_evidence(
     SEC audit trail, not agent input, and this table is already un-granted
     to the `anonymous` role and not RLS-enabled (see schema.sql), exactly
     the protection this data needs. None whenever the fundamentals profile
-    is off, matching every prior row."""
+    is off, matching every prior row.
+
+    prompt_sha256/raw_response_text/response_sha256/offered_tool_count
+    (2026-09-27 hardening pass, M1/M2): additive, all nullable -- see
+    run_backtest.record_cycle_evidence's own docstring for what each one
+    proves. raw_response_text is masked Hermes output (the SAME response
+    prompt_text's masking gate already covers), never a second
+    identity-leak surface.
+
+    tools_used_count/tools_used/tool_use_attestation_basis (correction
+    pass, requirement 4): the explicit zero-tool-use attestation, and
+    whether it's structural (implied by zero offered tools) or an
+    independently observed trace -- never fabricated either way.
+
+    pre_fill_gate_verdicts/pre_fill_gate_calls (M3, correction pass
+    requirement 3): pre_fill_gate_calls is a JSON ORDERED LIST of every
+    pre-fill Hermes confirmation call this cycle made (replaces the prior
+    pass's four flat scalar columns, which held only the LAST such call
+    and silently discarded any earlier ones on a day needing more than
+    one confirmation batch)."""
     pool = await get_pool()
     row = await pool.fetchrow(
         """
@@ -464,8 +507,12 @@ async def _record_cycle_evidence(
             cycle_id, run_id, day_label, prompt_text, input_payload,
             validated_response, candidate_status, attempt_count, retry_diagnostics,
             prompt_schema_version, rules_md_sha256, agents_md_sha256, soul_md_sha256,
-            model, provider, reasoning_effort, fundamentals_provenance
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+            model, provider, reasoning_effort, fundamentals_provenance,
+            prompt_sha256, raw_response_text, response_sha256, offered_tool_count,
+            tools_used_count, tools_used, tool_use_attestation_basis,
+            pre_fill_gate_verdicts, pre_fill_gate_calls
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                  $18, $19, $20, $21, $22, $23, $24, $25, $26)
         ON CONFLICT (cycle_id) DO NOTHING
         RETURNING *
         """,
@@ -474,6 +521,12 @@ async def _record_cycle_evidence(
         json.dumps(retry_diagnostics), prompt_schema_version,
         rules_md_sha256, agents_md_sha256, soul_md_sha256, model, provider, reasoning_effort,
         json.dumps(fundamentals_provenance) if fundamentals_provenance is not None else None,
+        prompt_sha256, raw_response_text, response_sha256, offered_tool_count,
+        tools_used_count,
+        json.dumps(tools_used) if tools_used is not None else None,
+        tool_use_attestation_basis,
+        json.dumps(pre_fill_gate_verdicts) if pre_fill_gate_verdicts is not None else None,
+        json.dumps(pre_fill_gate_calls) if pre_fill_gate_calls is not None else None,
     )
     if row is None:
         row = await pool.fetchrow(
@@ -491,6 +544,12 @@ async def _record_cycle_evidence(
             rules_md_sha256=rules_md_sha256, agents_md_sha256=agents_md_sha256,
             soul_md_sha256=soul_md_sha256, model=model, provider=provider,
             reasoning_effort=reasoning_effort, fundamentals_provenance=fundamentals_provenance,
+            prompt_sha256=prompt_sha256, raw_response_text=raw_response_text,
+            response_sha256=response_sha256, offered_tool_count=offered_tool_count,
+            tools_used_count=tools_used_count, tools_used=tools_used,
+            tool_use_attestation_basis=tool_use_attestation_basis,
+            pre_fill_gate_verdicts=pre_fill_gate_verdicts,
+            pre_fill_gate_calls=pre_fill_gate_calls,
         )
         if mismatches:
             raise ValueError(
@@ -761,6 +820,7 @@ async def _register_run_configuration(
     run_id: str, watchlist_snapshot: list[dict[str, Any]], watchlist_snapshot_hash: str,
     alias_mapping: dict[str, str], alias_mapping_hash: str, masking_seed: int,
     start_date: str, end_date: str, fundamentals_enabled: bool,
+    provenance: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Idempotently persist a fresh backtest run's immutable frozen identity
     -- watchlist snapshot, ticker<->alias mapping, masking seed, simulated
@@ -779,24 +839,57 @@ async def _register_run_configuration(
     -- a run's frozen identity is permanent once set, never silently
     overwritten.
 
+    provenance (2026-09-27 hardening pass, M2, field set corrected by the
+    same-day correction pass -- additive, all nullable): hermes_profile
+    (this run's OWN ephemeral profile name, not a shared constant)/
+    hermes_home_fingerprint (non-secret sha256, replaces the prior pass's
+    raw absolute-path hermes_home column, which is left in the schema but
+    never written to again)/hermes_context_bytes/hermes_offered_tool_count/
+    hermes_tool_list_sha256/hermes_memory_enabled/
+    hermes_system_prompt_sha256/hermes_isolation_verified_at,
+    hermes_runtime_model/provider/reasoning_effort/config_source (best-
+    effort read of the isolated runtime's OWN config, requirement 4),
+    git_head_sha/git_dirty, gateway_image_digest -- see run_backtest.
+    build_run_provenance. None (or a dict missing some keys) writes NULL
+    for whichever fields are absent, same as every column already NULL on
+    every run that predates this pass.
+
     Caller must already have registered run_id in backtest_run_registry
     (this table's run_id foreign-keys to it -- see _register_run) and must
     call this BEFORE any market-data fetch, Hermes call, decision write, or
     cycle-evidence write for the run -- see run_backtest.py's main()."""
+    provenance = provenance or {}
     pool = await get_pool()
     row = await pool.fetchrow(
         """
         INSERT INTO backtest_run_configuration (
             run_id, watchlist_snapshot, watchlist_snapshot_hash,
             alias_mapping, alias_mapping_hash, masking_seed,
-            start_date, end_date, fundamentals_enabled
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            start_date, end_date, fundamentals_enabled,
+            hermes_profile, hermes_home_fingerprint, hermes_context_bytes,
+            hermes_offered_tool_count,
+            hermes_tool_list_sha256, hermes_memory_enabled,
+            hermes_system_prompt_sha256, hermes_isolation_verified_at,
+            hermes_runtime_model, hermes_runtime_provider,
+            hermes_runtime_reasoning_effort, hermes_runtime_config_source,
+            git_head_sha, git_dirty, gateway_image_digest
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                  $18, $19, $20, $21, $22, $23, $24)
         ON CONFLICT (run_id) DO NOTHING
         RETURNING *
         """,
         run_id, json.dumps(watchlist_snapshot), watchlist_snapshot_hash,
         json.dumps(alias_mapping), alias_mapping_hash, masking_seed,
         start_date, end_date, fundamentals_enabled,
+        provenance.get("hermes_profile"), provenance.get("hermes_home_fingerprint"),
+        provenance.get("hermes_context_bytes"),
+        provenance.get("hermes_offered_tool_count"), provenance.get("hermes_tool_list_sha256"),
+        provenance.get("hermes_memory_enabled"), provenance.get("hermes_system_prompt_sha256"),
+        provenance.get("hermes_isolation_verified_at"),
+        provenance.get("hermes_runtime_model"), provenance.get("hermes_runtime_provider"),
+        provenance.get("hermes_runtime_reasoning_effort"), provenance.get("hermes_runtime_config_source"),
+        provenance.get("git_head_sha"),
+        provenance.get("git_dirty"), provenance.get("gateway_image_digest"),
     )
     if row is None:
         row = await pool.fetchrow(

@@ -856,7 +856,8 @@ def _max_drawdown_pct(equity_curve: list[float]) -> float:
 def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
                  watchlist: list[dict], checkpoint_dir: Path,
                  manifest: dict,
-                 fetch_fundamentals_fn=fetch_fundamentals_assessment_counts) -> dict:
+                 fetch_fundamentals_fn=fetch_fundamentals_assessment_counts,
+                 isolation_report: dict | None = None) -> dict:
     """INTERNAL. Runs ONE one-month episode through run_backtest's real,
     unchanged per-day loop (Portfolio/RunMasking/run_day/
     _run_cycle_or_halt). Do not call directly -- this performs zero
@@ -898,6 +899,7 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
         run_id, watchlist, rb._watchlist_hash(watchlist), alias_mapping,
         hashlib.sha256(json.dumps(alias_mapping, sort_keys=True).encode()).hexdigest(),
         seed, episode["start"], episode["end"], config.fundamentals_enabled,
+        provenance=rb.build_run_provenance(isolation_report) if isolation_report else None,
     )
     portfolio = Portfolio()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -916,7 +918,8 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
             limits_ctx = _limits_for_profile(portfolio.profile_level)
             result, halted = _run_cycle_or_halt(
                 lambda: run_day(cursor, day_index, portfolio, masking, watchlist,
-                                limits_ctx, run_id, fundamentals_enabled=config.fundamentals_enabled),
+                                limits_ctx, run_id, fundamentals_enabled=config.fundamentals_enabled,
+                                runtime=(isolation_report or {}).get("runtime")),
                 day_label=masking.day_index(cursor), run_id=run_id,
                 # Explicit, not _run_cycle_or_halt's own default: a default
                 # parameter binds to run_backtest.log_cycle_failure at THAT
@@ -1124,11 +1127,19 @@ def run_configuration(manifest: dict, config: EpisodeConfig, run_kind: str,
     # any registration/checkpoint/fetch/Hermes/journal side effect: a stopped
     # execution-sim otherwise halts an episode on the first fill, after a
     # real Hermes call has already been spent.
-    preflight()
-    per_episode = [
-        _run_episode(ep, config, run_kind, watchlist, checkpoint_dir, manifest)
-        for ep in selected
-    ]
+    isolation_report = preflight()
+    # Correction pass, requirement 1: preflight() now provisions a fresh,
+    # disposable per-run HermesRuntime -- clean it up on EVERY exit path
+    # (a completed suite, a halted episode, or an exception propagating
+    # out of _run_episode), same discipline as run_backtest.main().
+    try:
+        per_episode = [
+            _run_episode(ep, config, run_kind, watchlist, checkpoint_dir, manifest,
+                        isolation_report=isolation_report)
+            for ep in selected
+        ]
+    finally:
+        rb._cleanup_ephemeral_hermes_runtime((isolation_report or {}).get("runtime"))
     return {
         "manifest_content_hash": manifest["content_hash"],
         "episode_set": episode_set,

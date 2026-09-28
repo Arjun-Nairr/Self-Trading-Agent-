@@ -57,7 +57,7 @@ import eval_suite as _es                                              # noqa: E4
 CONFIG_CALLS: list = []
 # _run_episode now registers a run-configuration record; default it to a
 # local recorder so no test can reach Docker/Neon. Tests may patch over it.
-_es.register_run_configuration = lambda *a: CONFIG_CALLS.append(a) or {"run_id": a[0]}
+_es.register_run_configuration = lambda *a, **k: CONFIG_CALLS.append(a) or {"run_id": a[0]}
 _es.preflight = lambda: None  # never shell out to docker from tests
 
 ELIGIBLE_START = date(2021, 1, 1)
@@ -462,7 +462,7 @@ def test_run_configuration_proceeds_for_a_genuinely_approved_untampered_manifest
     register_calls = []
 
     def fake_run_day(day, day_index, portfolio, masking, watchlist, limits_ctx, run_id,
-                     fundamentals_enabled=False):
+                     fundamentals_enabled=False, runtime=None):
         summary = {"day": str(day), "exits": [], "decisions": [], "blocked": [], "usage": {},
                   "fills": [], "proposals": []}
         return portfolio, summary, (lambda: None)
@@ -504,7 +504,7 @@ def test_run_configuration_isolates_state_and_restores_checkpoint_path():
     fake_calls = {"n": 0}
 
     def fake_run_day(day, day_index, portfolio, masking, watchlist, limits_ctx, run_id,
-                     fundamentals_enabled=False):
+                     fundamentals_enabled=False, runtime=None):
         fake_calls["n"] += 1
         seen_checkpoint_paths_during_call.append(rb.CHECKPOINT_PATH)
         # If a PRIOR episode's state leaked in, portfolio.equity_curve
@@ -552,7 +552,7 @@ def test_run_configuration_halts_cleanly_without_advancing():
     watchlist = [{"symbol": "OLN", "name": "Olin Corporation", "sector": "Chemicals"}]
 
     def fake_run_day_raises(day, day_index, portfolio, masking, watchlist, limits_ctx, run_id,
-                            fundamentals_enabled=False):
+                            fundamentals_enabled=False, runtime=None):
         raise RuntimeError("simulated cycle failure")
 
     fake_fail_logger_calls = []
@@ -599,7 +599,7 @@ def _episode_report_from_fake_summaries(summaries: list[dict], *, fundamentals_e
     calls = {"n": 0}
 
     def fake_run_day(day, day_index, portfolio, masking, watchlist, limits_ctx, run_id,
-                     fundamentals_enabled=False):
+                     fundamentals_enabled=False, runtime=None):
         summary = dict(summaries[calls["n"]])
         calls["n"] += 1
         return portfolio, summary, (lambda: None)
@@ -701,7 +701,7 @@ def test_aggregate_report_uses_the_corrected_fill_field():
     watchlist = [{"symbol": "OLN", "name": "Olin Corporation", "sector": "Chemicals"}]
 
     def fake_run_day(day, day_index, portfolio, masking, watchlist, limits_ctx, run_id,
-                     fundamentals_enabled=False):
+                     fundamentals_enabled=False, runtime=None):
         return portfolio, day1, (lambda: None)
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -739,7 +739,7 @@ def test_episode_resolves_a_dangling_pending_order_at_its_own_end():
     watchlist = [{"symbol": "OLN", "name": "Olin Corporation", "sector": "Chemicals"}]
 
     def fake_run_day(day, day_index, portfolio, masking, watchlist, limits_ctx, run_id,
-                     fundamentals_enabled=False):
+                     fundamentals_enabled=False, runtime=None):
         # Mirrors what a real queued BUY on the episode's own final day
         # leaves behind: an unresolved order in portfolio.pending_orders.
         portfolio.pending_orders.append(QueuedOrder(
@@ -1042,7 +1042,7 @@ def _fake_day_factory(seen):
     import run_backtest as rb
 
     def fake_run_day(day, day_index, portfolio, masking, watchlist, limits_ctx, run_id,
-                     fundamentals_enabled=False):
+                     fundamentals_enabled=False, runtime=None):
         assert portfolio.equity_curve == [STARTING_EQUITY], "portfolio not fresh"
         seen.append((str(day), run_id, str(rb.CHECKPOINT_PATH), id(masking)))
         summary = {"day": str(day), "exits": [], "decisions": [], "blocked": [], "usage": {},
@@ -1081,7 +1081,7 @@ def test_selected_run_gets_own_context_per_call():
 
 def _assert_no_side_effects(m, selector=None, episode_set="episodes", exc=Exception):
     calls = []
-    with tempfile.TemporaryDirectory() as tmp,          patch("eval_suite.register_run", side_effect=lambda *a: calls.append("register")),          patch("eval_suite.register_run_configuration", side_effect=lambda *a: calls.append("config")),          patch("eval_suite.run_day", side_effect=lambda *a, **k: calls.append("run_day")),          patch("eval_suite._run_episode", side_effect=lambda *a, **k: calls.append("episode")),          patch("eval_suite.fetch_fundamentals_assessment_counts", side_effect=lambda r: calls.append("journal")):
+    with tempfile.TemporaryDirectory() as tmp,          patch("eval_suite.register_run", side_effect=lambda *a: calls.append("register")),          patch("eval_suite.register_run_configuration", side_effect=lambda *a, **k: calls.append("config")),          patch("eval_suite.run_day", side_effect=lambda *a, **k: calls.append("run_day")),          patch("eval_suite._run_episode", side_effect=lambda *a, **k: calls.append("episode")),          patch("eval_suite.fetch_fundamentals_assessment_counts", side_effect=lambda r: calls.append("journal")):
         try:
             run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tmp),
                               episode_set=episode_set, episode_selector=selector)
@@ -1137,7 +1137,7 @@ def test_no_selector_still_runs_full_suite():
 
 def _run_selected(m, sel, label="baseline", fundamentals=False, tmp=None):
     calls, order = [], []
-    with tempfile.TemporaryDirectory() as t,          patch("eval_suite.run_day", side_effect=lambda *a, **k: order.append("run_day") or (_ for _ in ()).throw(RuntimeError("stop"))) as _rd,          patch("eval_suite.register_run", side_effect=lambda *a: order.append("register_run")),          patch("eval_suite.register_run_configuration", side_effect=lambda *a: order.append("config") or calls.append(a)),          patch("eval_suite.log_cycle_failure"):
+    with tempfile.TemporaryDirectory() as t,          patch("eval_suite.run_day", side_effect=lambda *a, **k: order.append("run_day") or (_ for _ in ()).throw(RuntimeError("stop"))) as _rd,          patch("eval_suite.register_run", side_effect=lambda *a: order.append("register_run")),          patch("eval_suite.register_run_configuration", side_effect=lambda *a, **k: order.append("config") or calls.append(a)),          patch("eval_suite.log_cycle_failure"):
         rep = run_configuration(m, EpisodeConfig(label, fundamentals_enabled=fundamentals),
                                 EVAL_RUN_KIND, WL, Path(t), episode_selector=sel)
     return rep, calls, order
@@ -1215,7 +1215,7 @@ def test_missing_required_service_fails_before_any_side_effect():
         def boom():
             calls.append("preflight")
             raise SystemExit("Not running: execution-sim")
-        with tempfile.TemporaryDirectory() as tmp,              patch("eval_suite.preflight", side_effect=boom),              patch("eval_suite.register_run", side_effect=lambda *a: calls.append("register")),              patch("eval_suite.register_run_configuration", side_effect=lambda *a: calls.append("config")),              patch("eval_suite.run_day", side_effect=lambda *a, **k: calls.append("run_day")),              patch("eval_suite._run_episode", side_effect=lambda *a, **k: calls.append("episode")),              patch("eval_suite.fetch_fundamentals_assessment_counts", side_effect=lambda r: calls.append("journal")),              patch("eval_suite.log_cycle_failure", side_effect=lambda *a, **k: calls.append("activity")):
+        with tempfile.TemporaryDirectory() as tmp,              patch("eval_suite.preflight", side_effect=boom),              patch("eval_suite.register_run", side_effect=lambda *a: calls.append("register")),              patch("eval_suite.register_run_configuration", side_effect=lambda *a, **k: calls.append("config")),              patch("eval_suite.run_day", side_effect=lambda *a, **k: calls.append("run_day")),              patch("eval_suite._run_episode", side_effect=lambda *a, **k: calls.append("episode")),              patch("eval_suite.fetch_fundamentals_assessment_counts", side_effect=lambda r: calls.append("journal")),              patch("eval_suite.log_cycle_failure", side_effect=lambda *a, **k: calls.append("activity")):
             try:
                 run_configuration(m, EpisodeConfig("baseline"), EVAL_RUN_KIND, WL, Path(tmp),
                                   episode_selector=sel)

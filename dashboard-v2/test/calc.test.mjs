@@ -145,6 +145,16 @@ test("relatedActivity: empty for no row, no activity, or no match", () => {
   assert.deepEqual(relatedActivity({ ticker: "AAA", created_at: "2026-01-01T00:00:00Z" }, null), []);
 });
 
+test("M4 correction: isBlockedRow/rejectionDistribution/relatedActivity degrade gracefully, never crash, when `description` is entirely ABSENT (not just null) -- the real shape public_agent_activity now returns", () => {
+  // A row shaped exactly like what the public view returns post-correction:
+  // no `description` key at all, not `description: null`.
+  const undescribedRow = { event_type: "risk_check", created_at: "2026-01-05T13:00:00Z" };
+  assert.equal(isBlockedRow(undescribedRow), false);
+  assert.deepEqual(rejectionDistribution([undescribedRow, undescribedRow]), []);
+  const row = { ticker: "ALPHA", created_at: "2026-01-05T12:00:00Z" };
+  assert.deepEqual(relatedActivity(row, [undescribedRow]), []);
+});
+
 /* --------------------------------------------------- open position detail */
 
 test("openPositionDetail: finds by ticker, null when no match or no snapshot", () => {
@@ -560,11 +570,21 @@ test("emptyStateText: Day-1-halted evaluation is honest and never says 'training
   assert.ok(urls.some(u => u.includes("/backtest_run_registry?select=run_id,run_kind,created_at")));
   urls.length = 0;
   await loadRunData("backtest", "eval-halted");
-  const scoped = urls.filter(u => /\/(trades|agent_activity|portfolio_snapshots|insight_log|backtest_run_status)\?/.test(u));
+  // 2026-09-27 hardening pass (M4), strengthened by the same-day
+  // correction pass: the dashboard now queries the public_* VIEWS, never
+  // the raw trades/agent_activity/insight_log tables directly. An earlier
+  // version of this pass merely redacted alias TOKENS inside those three
+  // tables' free-text columns; the correction now OMITS those columns
+  // from the views entirely (strategy_notes/invalidation_condition/
+  // description/insight_text) -- structured facts only (see
+  // trade-journal-mcp/schema.sql's own migration comment).
+  const scoped = urls.filter(u => /\/(public_trades|public_agent_activity|portfolio_snapshots|public_insight_log|backtest_run_status)\?/.test(u));
   assert.ok(scoped.length >= 8);
   assert.ok(scoped.every(u => u.includes("run_id=eq.eval-halted")), "every page query is scoped to the selected evaluation run_id");
   assert.ok(!urls.some(u => /backtest_run_configuration|backtest_cycle_evidence/.test(u)), "private tables never queried");
-  n += 2; console.log("ok - listSelectableRuns/loadRunData (mocked fetch): registry-backed list; evaluation selection keeps every query run_id-scoped; private tables untouched");
+  assert.ok(!urls.some(u => /\/(trades|agent_activity|insight_log)\?/.test(u)),
+    "the raw alias-leak-risk tables are never queried directly -- only their structured-only public_* views");
+  n += 3; console.log("ok - listSelectableRuns/loadRunData (mocked fetch): registry-backed list; evaluation selection keeps every query run_id-scoped; private tables untouched; only structured-only public_* views queried for trades/activity/insights");
 }
 
 console.log(`\n${n}/${n} checks passed`);

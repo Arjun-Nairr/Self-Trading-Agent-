@@ -76,6 +76,32 @@ async function qAll(table, params, pageSize = 1000) {
 // backtest_cycle_evidence is deliberately never queried here — it is
 // excluded from the anonymous grant and out of scope for this dashboard
 // (HANDOFF.md §8, this task's own security requirements).
+//
+// public_trades / public_agent_activity / public_insight_log (2026-09-27
+// hardening pass, M4; strengthened by the same-day correction pass), not
+// the raw trades/agent_activity/insight_log tables: those three carry
+// free-text fields Hermes writes while reasoning in ALIAS space
+// (strategy_notes/invalidation_condition/description/insight_text) that
+// can name a masked alias in the SAME row as the real `ticker` column,
+// letting the public reconstruct a run's real ticker<->alias mapping. The
+// anonymous role's direct grant on the three raw tables is revoked. An
+// earlier version of this pass redacted only the alias TOKENS inside that
+// free text (regex, tied to the current fixed 14-alias pool); an
+// independent review flagged this as fragile against any future alias
+// scheme change, so the views now OMIT those free-text columns entirely —
+// structured facts only (real tickers, prices, quantities, statuses,
+// timestamps, deterministic rule-based rejection reasons, confidence,
+// signal enums, aggregate metrics). Rows that used to read `row.
+// description`/`row.strategy_notes`/etc. now get `undefined` for those
+// fields; every call site below already null-guards (`|| ""`, `esc()`'s
+// own `?? ""`) and degrades gracefully (an activity-text rule-citation
+// chart goes empty rather than crashing) — see calc.js's isBlockedRow/
+// rejectionDistribution/relatedActivity and pages/runs.js's reflection
+// rendering. Ordinary portfolio/trade visibility (real tickers, prices,
+// statuses, rule-based rejection reasons) is unaffected.
+const PUBLIC_TRADES = "public_trades";
+const PUBLIC_AGENT_ACTIVITY = "public_agent_activity";
+const PUBLIC_INSIGHT_LOG = "public_insight_log";
 
 /**
  * Registry-backed run discovery for the selector/default view: 'training'
@@ -105,23 +131,23 @@ export async function loadRunData(mode, run_id) {
   const m = MODES[mode];
   const runFilter = run_id ? `&run_id=eq.${run_id}` : "";
   const tradeScope = `?execution_mode=eq.${m.trades}${runFilter}`;
-  const decisionCount = extra => qCount("trades", `${tradeScope}${extra}`);
+  const decisionCount = extra => qCount(PUBLIC_TRADES, `${tradeScope}${extra}`);
 
   const [
     trades, activity, snapshots, blockedActivity, insights, failedCount, lastFailedRows,
     decisionRows, dTotal, dFilled, dRejected, dPending, runStatusRows,
   ] = await Promise.all([
-    qAll("trades", `${tradeScope}&order=created_at.desc`),
-    q("agent_activity", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=200`),
+    qAll(PUBLIC_TRADES, `${tradeScope}&order=created_at.desc`),
+    q(PUBLIC_AGENT_ACTIVITY, `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=200`),
     qAll("portfolio_snapshots", `?mode=eq.${m.snapshots}${runFilter}&order=created_at.desc`),
-    qAll("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=in.(risk_check,order_rejected)&order=created_at.desc`),
-    q("insight_log", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=${REFLECTION_LIMIT}`),
-    qCount("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed`),
-    q("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed&order=created_at.desc&limit=1`),
+    qAll(PUBLIC_AGENT_ACTIVITY, `?mode=eq.${m.activity}${runFilter}&event_type=in.(risk_check,order_rejected)&order=created_at.desc`),
+    q(PUBLIC_INSIGHT_LOG, `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=${REFLECTION_LIMIT}`),
+    qCount(PUBLIC_AGENT_ACTIVITY, `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed`),
+    q(PUBLIC_AGENT_ACTIVITY, `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed&order=created_at.desc&limit=1`),
     // Decisions page: newest N rows only (bounded list query), plus
     // run-wide status totals from count-only queries — the whole trade
     // list is never loaded for this page.
-    q("trades", `${tradeScope}&order=created_at.desc&limit=${DECISIONS_LIMIT}`),
+    q(PUBLIC_TRADES, `${tradeScope}&order=created_at.desc&limit=${DECISIONS_LIMIT}`),
     decisionCount(""),
     decisionCount("&status=eq.filled"),
     decisionCount("&status=eq.rejected"),

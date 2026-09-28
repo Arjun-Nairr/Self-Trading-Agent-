@@ -58,7 +58,7 @@ export function render(el, data) {
       ${insights.length
         ? `<div class="reflections">${insights.map(r => `
             <blockquote class="reflection">
-              <p>${esc(r.insight_text)}</p>
+              <p>${esc(r.insight_text) || "Reflection text is not available on this public view."}</p>
               <span class="meta">${singleType ? "" : `${esc(cycleTypeLabel(r.cycle_type))} · `}${time(r.created_at)}</span>
             </blockquote>`).join("")}</div>`
         : `<div class="empty">No reflection entries yet.</div>`}

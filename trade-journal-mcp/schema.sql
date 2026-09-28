@@ -732,3 +732,272 @@ CREATE TABLE IF NOT EXISTS backtest_run_configuration (
 -- the full real ticker<->alias mapping, which must never reach the
 -- anonymous Data API, the dashboard, or a public user. No GRANT here means
 -- the anonymous role cannot see this table at all, by Postgres default.
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-09-27) -- backtest isolation/provenance/pre-fill-gate
+-- hardening pass (docs/evaluations/project_integrity_and_laya_readiness_audit.md
+-- findings H1/H2/M1/M2/M3). Purely additive: every column below is nullable
+-- with no default, so every EXISTING row (baseline_v1, baseline_v2, Round 2,
+-- and any other historical run) reads back with these columns simply NULL,
+-- untouched and unreinterpreted. Same protection boundary as the tables
+-- they extend -- neither table is granted to `anonymous` or RLS-enabled,
+-- and this migration does not change that.
+--
+-- backtest_run_configuration gains RUN-LEVEL isolation/provenance fields
+-- (constant for the whole run, verified once before its first cycle):
+-- which Hermes profile/HERMES_HOME ran it, the isolation preflight's own
+-- measured tool/memory state (see run_backtest.preflight/_verify_
+-- backtest_hermes_isolation), and the code/runtime identity that produced
+-- it. Git dirty-tree state is a real, honestly-recorded possibility, not
+-- assumed clean.
+-- ---------------------------------------------------------------------------
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_profile TEXT;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_home TEXT;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_offered_tool_count INTEGER;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_tool_list_sha256 TEXT;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_memory_enabled BOOLEAN;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_system_prompt_sha256 TEXT;
+-- TEXT, not TIMESTAMPTZ: same convention as this table's own start_date/
+-- end_date -- an ISO string compared for exact equality only, never
+-- sorted/range-filtered, and asyncpg's default codec would otherwise
+-- require a Python datetime object instead of the plain str this dict
+-- carries end to end.
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_isolation_verified_at TEXT;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS git_head_sha TEXT;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS git_dirty BOOLEAN;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS gateway_image_digest TEXT;
+
+-- backtest_cycle_evidence gains PER-CYCLE exact-byte evidence: the sha256
+-- of the literal bytes sent to Hermes over stdin (never argv -- see
+-- run_backtest._call_hermes) and of the literal raw response bytes
+-- Hermes printed BEFORE any JSON parse or schema validation touches them,
+-- plus that raw text itself (validated_response, already present, is the
+-- PARSED/validated object -- this is the pre-validation original, so a
+-- parsing or validation bug is distinguishable from a genuine Hermes
+-- response difference). offered_tool_count is this cycle's own measured
+-- value (defense in depth alongside the once-per-run preflight check).
+-- ---------------------------------------------------------------------------
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS prompt_sha256 TEXT;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS raw_response_text TEXT;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS response_sha256 TEXT;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS offered_tool_count INTEGER;
+
+-- Pre-fill news-gate evidence (M3) -- one gate call covers every queued BUY
+-- evaluated on a given simulated day, so this is keyed by that day's own
+-- cycle_id (the same cycle_id record_cycle_evidence uses for the day's
+-- main decision cycle), not a separate table. NULL on every cycle where no
+-- queued BUY needed the gate that day (the ordinary, cheap case -- see
+-- apply_pre_fill_news_gate). pre_fill_gate_verdicts is the durable,
+-- replay-safe outcome (decision_id -> confirm/cancel + reason): a retried
+-- cycle checks this BEFORE re-fetching news or re-asking Hermes -- see
+-- run_backtest.py's checkpoint-replay branch for the gate.
+-- ---------------------------------------------------------------------------
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS pre_fill_gate_prompt_text TEXT;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS pre_fill_gate_prompt_sha256 TEXT;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS pre_fill_gate_raw_response TEXT;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS pre_fill_gate_response_sha256 TEXT;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS pre_fill_gate_verdicts JSONB;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS pre_fill_gate_attempt_count INTEGER;
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-09-27, same hardening pass) -- M4: public Data API
+-- boundary. Prior audit finding: the anonymous role's grant on `trades`/
+-- `agent_activity`/`insight_log` returns EVERY column, including three
+-- free-text fields Hermes writes while reasoning in ALIAS space
+-- (trades.strategy_notes/invalidation_condition, agent_activity.
+-- description, insight_log.insight_text) -- 107 of 306 sampled trades rows
+-- and 695 of 1096 sampled agent_activity rows named a masked alias
+-- alongside the SAME row's real `ticker` column, letting anyone with the
+-- public endpoint reconstruct a run's real ticker<->alias mapping from
+-- data explicitly meant to be public (ordinary portfolio/trade
+-- visibility). portfolio_snapshots/backtest_run_registry/
+-- backtest_run_status carry no free text and no ticker identity at all --
+-- left untouched, still granted directly, no leak surface to close.
+--
+-- Fix: `anonymous`'s direct grant on the three affected tables is
+-- REVOKED; a narrow public VIEW per table re-grants everything except
+-- (trades/agent_activity/insight_log's) free-text column, which is
+-- REDACTED (alias tokens stripped), not dropped outright -- ordinary
+-- portfolio/trade visibility (real tickers, statuses, prices, rule-based
+-- rejection reasons, which are harness-generated from real tickers only
+-- and never mix in an alias) is unaffected; only Hermes' own
+-- alias-space reasoning text loses the specific tokens that could
+-- reconstruct the mapping. redact_aliases() matches anonymize.py's fixed,
+-- never-grown _ALIAS_POOL literally (word-boundary, case-sensitive) --
+-- update it there if that pool is ever extended.
+--
+-- A Postgres view is NOT security-invoker by default (runs as the view's
+-- OWNER, not the querying role), so RLS on the underlying tables plays no
+-- part in what a view returns -- the view's own column list is the entire
+-- enforcement mechanism here, which is exactly right for a COLUMN-level
+-- (not row-level) redaction. No RLS/policy is created on the views
+-- themselves; none is needed.
+-- ---------------------------------------------------------------------------
+REVOKE SELECT ON trades FROM anonymous;
+REVOKE SELECT ON agent_activity FROM anonymous;
+REVOKE SELECT ON insight_log FROM anonymous;
+DROP POLICY IF EXISTS anonymous_read_trades ON trades;
+DROP POLICY IF EXISTS anonymous_read_agent_activity ON agent_activity;
+DROP POLICY IF EXISTS anonymous_read_insight_log ON insight_log;
+
+CREATE OR REPLACE FUNCTION redact_aliases(t TEXT) RETURNS TEXT AS $$
+    SELECT regexp_replace(
+        t,
+        '\y(ALPHA|BRAVO|CHARLIE|DELTA|ECHO|FOXTROT|GOLF|HOTEL|INDIA|JULIET|KILO|LIMA|MIKE|NOVEMBER)\y',
+        '[REDACTED]', 'g'
+    )
+$$ LANGUAGE sql IMMUTABLE;
+
+CREATE OR REPLACE VIEW public_trades AS
+SELECT
+    decision_id, ticker, action, intended_quantity, intended_notional, order_type,
+    limit_price, status, broker_order_id, fill_price, fill_quantity, rejection_reason,
+    redact_aliases(strategy_notes) AS strategy_notes,
+    data_timestamps, created_at, updated_at, execution_mode, confidence, primary_signal,
+    technical_basis, expected_reward_risk,
+    redact_aliases(invalidation_condition) AS invalidation_condition,
+    stop_price, target_price, run_id, strategy_profile, min_reward_risk_used,
+    proposed_entry_price, exit_provenance
+FROM trades;
+
+CREATE OR REPLACE VIEW public_agent_activity AS
+SELECT
+    id, decision_id, event_type, redact_aliases(description) AS description,
+    created_at, mode, run_id, cycle_id, total_tokens, hermes_calls_used
+FROM agent_activity;
+
+CREATE OR REPLACE VIEW public_insight_log AS
+SELECT
+    id, cycle_type, redact_aliases(insight_text) AS insight_text,
+    mode, sample_size, run_id, cycle_id, created_at
+FROM insight_log;
+
+GRANT SELECT ON public_trades TO anonymous;
+GRANT SELECT ON public_agent_activity TO anonymous;
+GRANT SELECT ON public_insight_log TO anonymous;
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-09-27, correction pass) -- fixes three real gaps an
+-- independent two-axis review found in the migration directly above, before
+-- any of it was committed or relied on by a real run. Every column touched
+-- here is brand new from THAT SAME uncommitted migration and still reads
+-- NULL on all 8 historical runs (verified live both before and after this
+-- correction) -- this is not a change to any historical row, it is
+-- correcting this pass's own not-yet-relied-upon shape before it ships.
+--
+-- 1. backtest_run_configuration.hermes_home held an ABSOLUTE PATH under the
+--    user's home directory (e.g. /opt/data/profiles/backtest) -- this
+--    correction pass's own requirement is a non-secret per-run identifier,
+--    not a path. Left in place (still nullable, simply never written to
+--    again) rather than dropped, so nothing that happened to read it before
+--    breaks; hermes_home_fingerprint (a short sha256 of the per-run
+--    ephemeral profile name) replaces it going forward. hermes_context_bytes
+--    persists the SAME "context (AGENTS.md/cwd files)" measurement the
+--    isolation preflight now also fails the run closed on (see
+--    run_backtest._verify_backtest_hermes_isolation) -- proof, not just
+--    trust, that no raw project doc reached the isolated runtime.
+-- 2. backtest_run_configuration gains the isolated runtime's OWN best-effort
+--    model/provider/reasoning-effort configuration (requirement 4) -- read
+--    from the per-run profile's own config.yaml, never fabricated;
+--    hermes_runtime_config_source is 'isolated_profile_config' or
+--    'unavailable', always recorded, never silently omitted.
+-- 3. backtest_cycle_evidence's four flat pre_fill_gate_prompt_text/
+--    prompt_sha256/raw_response/response_sha256 scalar columns held only
+--    the LAST confirmation batch's evidence -- a day needing a second batch
+--    (e.g. a retry that resolves a previously-uncovered order) silently
+--    discarded the first. Replaced by pre_fill_gate_calls JSONB, an ORDERED
+--    LIST of every confirmation call the cycle made, each entry carrying
+--    its own prompt/hash/response/hash/attempt_count/order_ids/aliases (see
+--    run_backtest.apply_pre_fill_news_gate's own docstring). The four old
+--    scalar columns are dropped -- they were written by zero real cycles
+--    (still-uncommitted code) and this list shape supersedes them entirely,
+--    not a data migration.
+-- 4. backtest_cycle_evidence gains an explicit zero-tool-use attestation
+--    (requirement 4) -- tools_used_count/tools_used/
+--    tool_use_attestation_basis, the last naming that zero use is a
+--    STRUCTURAL consequence of zero offered tools, never an independently
+--    observed runtime trace.
+-- ---------------------------------------------------------------------------
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_home_fingerprint TEXT;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_context_bytes INTEGER;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_runtime_model TEXT;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_runtime_provider TEXT;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_runtime_reasoning_effort TEXT;
+ALTER TABLE backtest_run_configuration ADD COLUMN IF NOT EXISTS hermes_runtime_config_source TEXT;
+
+ALTER TABLE backtest_cycle_evidence DROP COLUMN IF EXISTS pre_fill_gate_prompt_text;
+ALTER TABLE backtest_cycle_evidence DROP COLUMN IF EXISTS pre_fill_gate_prompt_sha256;
+ALTER TABLE backtest_cycle_evidence DROP COLUMN IF EXISTS pre_fill_gate_raw_response;
+ALTER TABLE backtest_cycle_evidence DROP COLUMN IF EXISTS pre_fill_gate_response_sha256;
+ALTER TABLE backtest_cycle_evidence DROP COLUMN IF EXISTS pre_fill_gate_attempt_count;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS pre_fill_gate_calls JSONB;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS tools_used_count INTEGER;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS tools_used JSONB;
+ALTER TABLE backtest_cycle_evidence ADD COLUMN IF NOT EXISTS tool_use_attestation_basis TEXT;
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-09-27, same correction pass) -- M4 strong boundary.
+-- The migration above this one redacted alias tokens INSIDE the three
+-- free-text columns (strategy_notes/invalidation_condition, description,
+-- insight_text) but still returned that text to anonymous -- an independent
+-- review flagged this as fragile (token-by-token redaction breaks the
+-- moment an alias scheme changes shape, e.g. to `C-001`-style IDs) and
+-- unnecessarily broad (none of that prose is "ordinary portfolio/trade
+-- visibility"). Fix: the three views now OMIT every model-generated or
+-- arbitrary free-text column entirely -- structured facts only (real
+-- ticker, prices, quantities, status, timestamps, deterministic rule-based
+-- rejection reason/code, confidence, signal enums, aggregate metrics).
+-- redact_aliases() stays defined (still used nowhere in these views, but
+-- harmless to keep -- dropping a function some other session may already
+-- be using is a bigger risk than an unused one).
+--
+-- This is a genuine, deliberate feature reduction, not an oversight: the
+-- dashboards' own rule-citation/rejection-breakdown analytics
+-- (dashboard-v2/js/calc.js: isBlockedRow/rejectionDistribution/
+-- relatedActivity; dashboard/index.html's equivalents) read free text out
+-- of agent_activity.description to find "§2b"-style citations -- with that
+-- column gone from the public view, those specific analytics go dark for
+-- anonymous/public viewers (both already null-guard on a missing
+-- description and degrade to an empty result, not a crash -- see
+-- dashboard-v2/js/pages code and test/calc.test.mjs). Ordinary trade/
+-- portfolio visibility (what a viewer actually watches day to day) is
+-- unaffected.
+-- ---------------------------------------------------------------------------
+-- Postgres refuses `CREATE OR REPLACE VIEW` when it would DROP a column
+-- (InvalidTableDefinitionError: cannot drop columns from view) -- since
+-- this correction removes strategy_notes/invalidation_condition/
+-- description/insight_text entirely (not just re-defining them), each
+-- view must be dropped and recreated, and its GRANT re-issued after.
+DROP VIEW IF EXISTS public_trades;
+DROP VIEW IF EXISTS public_agent_activity;
+DROP VIEW IF EXISTS public_insight_log;
+
+CREATE VIEW public_trades AS
+SELECT
+    decision_id, ticker, action, intended_quantity, intended_notional, order_type,
+    limit_price, status, broker_order_id, fill_price, fill_quantity, rejection_reason,
+    data_timestamps, created_at, updated_at, execution_mode, confidence, primary_signal,
+    technical_basis, expected_reward_risk,
+    stop_price, target_price, run_id, strategy_profile, min_reward_risk_used,
+    proposed_entry_price, exit_provenance
+FROM trades;
+
+CREATE VIEW public_agent_activity AS
+SELECT
+    id, decision_id, event_type,
+    created_at, mode, run_id, cycle_id, total_tokens, hermes_calls_used
+FROM agent_activity;
+
+CREATE VIEW public_insight_log AS
+SELECT
+    id, cycle_type,
+    mode, sample_size, run_id, cycle_id, created_at
+FROM insight_log;
+
+-- The DROP above also dropped each view's own GRANT -- re-issued here.
+-- anonymous can SELECT all three views, never the raw tables (REVOKEd
+-- above), never backtest_cycle_evidence/backtest_run_configuration
+-- (never granted at all).
+GRANT SELECT ON public_trades TO anonymous;
+GRANT SELECT ON public_agent_activity TO anonymous;
+GRANT SELECT ON public_insight_log TO anonymous;

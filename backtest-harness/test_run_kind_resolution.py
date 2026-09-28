@@ -17,7 +17,7 @@ import inspect
 import io
 
 from run_backtest import (  # type: ignore
-    build_arg_parser, resolve_run_kind, RunKindError, main,
+    build_arg_parser, resolve_run_kind, RunKindError, _run_backtest_main,
 )
 
 RUN_ID = "00000000-0000-0000-0000-000000000001"
@@ -124,19 +124,24 @@ def test_archived_impossible_via_cli():
 def test_classification_gate_precedes_the_cycle_loop():
     """The classification decision must happen BEFORE the cycle loop /
     Hermes call path, not just in principle -- prove it structurally
-    against main()'s own real source: the resolve_run_kind(...) call site
+    against _run_backtest_main's own real source (main()'s real body,
+    factored out by the 2026-09-27 correction pass so main() itself can
+    wrap it in a try/finally that cleans up the run's ephemeral Hermes
+    profile -- see run_backtest.main's own docstring; the classification
+    logic itself did not move): the resolve_run_kind(...) call site
     appears strictly before the `while completed < args.days` cycle loop
     that drives run_day() (where the Hermes call ultimately happens)."""
-    source, start_line = inspect.getsourcelines(main)
+    source, start_line = inspect.getsourcelines(_run_backtest_main)
     resolve_call_lines = [i for i, line in enumerate(source) if "resolve_run_kind(" in line and "def " not in line]
     loop_lines = [i for i, line in enumerate(source) if "while completed < args.days" in line]
-    assert resolve_call_lines, "resolve_run_kind(...) call site not found in main()"
-    assert loop_lines, "the cycle loop was not found in main() -- has it been renamed?"
+    assert resolve_call_lines, "resolve_run_kind(...) call site not found in _run_backtest_main()"
+    assert loop_lines, "the cycle loop was not found in _run_backtest_main() -- has it been renamed?"
     assert resolve_call_lines[0] < loop_lines[0], (
         "resolve_run_kind(...) must be called before the cycle loop that "
         "drives Hermes calls, not after"
     )
-    print("ok  the run-kind decision happens before the cycle loop, verified against main()'s real source")
+    print("ok  the run-kind decision happens before the cycle loop, verified against "
+          "_run_backtest_main()'s real source")
 
 
 if __name__ == "__main__":

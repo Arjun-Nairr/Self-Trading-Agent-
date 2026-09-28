@@ -386,9 +386,16 @@ function pairTrades(trades) {
 // old filter never matched a single real row. Requires a §-reference so a
 // coincidental match (an order_rejected row for a broker-side reason with
 // no rule number) isn't miscounted as a RULES.md block.
+//
+// M4 correction pass (2026-09-27): public_agent_activity no longer
+// carries `description` (see the fetch layer's own comment) -- guarded
+// with `|| ""` so this always returns false against the public view
+// rather than relying on `.test()`'s own string coercion of `undefined`.
+// A deliberate, documented feature reduction (see renderAnalysis below),
+// not a bug.
 function isBlockedRow(a) {
   return (a.event_type === "risk_check" || a.event_type === "order_rejected")
-    && /§\d/.test(a.description);
+    && /§\d/.test(a.description || "");
 }
 
 function renderSummary(trades, snaps, blockedActivity, failedCount) {
@@ -508,7 +515,7 @@ function renderFeed(rows) {
     <div class="feed-row">
       <div class="feed-time">${time(r.created_at)}</div>
       <div class="feed-type ${esc(r.event_type)}">${esc(r.event_type).replace(/_/g," ")}</div>
-      <div class="feed-desc">${esc(r.description)}</div>
+      <div class="feed-desc">${esc(r.description) || "(activity text not available on this public view)"}</div>
     </div>`).join("");
 }
 
@@ -592,7 +599,7 @@ function renderAnalysis(trades, blockedActivity) {
   const rules = {};
   for (const a of blockedActivity) {
     if (!isBlockedRow(a)) continue;
-    for (const m of a.description.matchAll(/§[0-9]+[a-z]?/g)) rules[m[0]] = (rules[m[0]] || 0) + 1;
+    for (const m of (a.description || "").matchAll(/§[0-9]+[a-z]?/g)) rules[m[0]] = (rules[m[0]] || 0) + 1;
   }
   const ruleRows = Object.entries(rules).sort((a,b) => b[1]-a[1])
     .map(([k,v]) => `<div class="kv"><span class="kv-key">${esc(k)}</span><span class="kv-val">${v}</span></div>`).join("")
@@ -696,7 +703,7 @@ function renderInsights(rows) {
   if (!rows.length) { el("insights").innerHTML = `<div class="empty">No reflection entries yet — populated during weekly reflection cycles.</div>`; return; }
   el("insights").innerHTML = `<table>
     <thead><tr><th>Cycle</th><th>Insight</th><th>Time</th></tr></thead>
-    <tbody>${rows.map(r=>`<tr><td>${esc(r.cycle_type)}</td><td>${esc(r.insight_text)}</td><td>${time(r.created_at)}</td></tr>`).join("")}</tbody></table>`;
+    <tbody>${rows.map(r=>`<tr><td>${esc(r.cycle_type)}</td><td>${esc(r.insight_text) || "(reflection text not available on this public view)"}</td><td>${time(r.created_at)}</td></tr>`).join("")}</tbody></table>`;
 }
 
 function showSkeletons() {
@@ -752,9 +759,17 @@ async function refresh(withSkeletons = false) {
 
     const runFilter = currentRunId ? `&run_id=eq.${currentRunId}` : "";
 
+    // public_trades / public_agent_activity / public_insight_log
+    // (2026-09-27 hardening pass, M4), not the raw tables -- the
+    // anonymous role's direct grant on trades/agent_activity/insight_log
+    // was revoked (those three carry free-text fields that can leak a
+    // masked alias alongside the same row's real ticker); these views
+    // re-grant every other column unchanged and redact only the alias
+    // tokens inside that text -- see trade-journal-mcp/schema.sql and
+    // dashboard-v2/js/data.js's own copy of this same change.
     const [trades, activity, snaps, blockedActivity, insights, failedCount, lastFailed] = await Promise.all([
-      qAll("trades", `?execution_mode=eq.${m.trades}${runFilter}&order=created_at.desc`),
-      q("agent_activity", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=80`),
+      qAll("public_trades", `?execution_mode=eq.${m.trades}${runFilter}&order=created_at.desc`),
+      q("public_agent_activity", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=80`),
       qAll("portfolio_snapshots", `?mode=eq.${m.snapshots}${runFilter}&order=created_at.desc`),
       // Separate, COMPLETE dataset for the "blocked by rule" whole-run
       // stat -- the 80-row feed above is a recent live tail, not a
@@ -766,10 +781,10 @@ async function refresh(withSkeletons = false) {
       // guarantee of stable row ordering across paginated offset/limit
       // requests, which can duplicate or skip rows across pages on a
       // large blocked-activity dataset.
-      qAll("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=in.(risk_check,order_rejected)&order=created_at.desc`),
-      q("insight_log", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=20`),
-      qCount("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed`),
-      q("agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed&order=created_at.desc&limit=1`),
+      qAll("public_agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=in.(risk_check,order_rejected)&order=created_at.desc`),
+      q("public_insight_log", `?mode=eq.${m.activity}${runFilter}&order=created_at.desc&limit=20`),
+      qCount("public_agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed`),
+      q("public_agent_activity", `?mode=eq.${m.activity}${runFilter}&event_type=eq.cycle_failed&order=created_at.desc&limit=1`),
     ]);
     const { closed, open } = pairTrades(trades);
 

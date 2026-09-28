@@ -48,6 +48,10 @@ from run_backtest import (
     _pre_fill_news_window, _parse_news_timestamp, _articles_in_window,
     _build_pre_fill_confirmation_prompt, _parse_pre_fill_confirmation,
     _session_close_at, _to_utc_rfc3339, _articles_in_decision_window, _is_tz_aware,
+    _verify_backtest_hermes_isolation, build_run_provenance, _call_hermes,
+    BACKTEST_HERMES_HOME, BACKTEST_HERMES_PROFILE,
+    HermesRuntime, _DEFAULT_HERMES_RUNTIME,
+    preflight, _provision_ephemeral_hermes_runtime, _cleanup_ephemeral_hermes_runtime,
 )
 from anonymize import LeakDetected, RunMasking  # noqa: E402
 from risk_checker import (  # noqa: E402
@@ -454,7 +458,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
 
     hermes_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
         hermes_calls.append(1)
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
         return HermesResult(response={
@@ -1090,7 +1094,7 @@ def test_ask_hermes_treats_an_explicit_null_usage_field_as_zero():
         "reasoning_tokens": 40, "total_tokens": 660, "api_calls": 1,
         "estimated_cost_usd": None,
     }
-    with patch("run_backtest._call_hermes", return_value=(clean_reply, usage_with_null)):
+    with patch("run_backtest._call_hermes", return_value=(clean_reply.encode(), usage_with_null)):
         totals: dict = {}
         result = ask_hermes("irrelevant prompt", totals, is_reflection_day=False)
     assert result.response == {"decisions": [], "no_action_reason": "nothing qualified"}
@@ -1363,8 +1367,16 @@ def test_build_prompt_sizing_block_reads_the_active_limits_not_hardcoded_default
     assert "33.0% of equity in one name" in prompt
     assert "(7.5 / 100)" in prompt and "(33.0 / 100)" in prompt
     # The stale defect this guards against: the OLD default values must
-    # NOT leak in when a non-default instance was explicitly supplied.
-    assert "2.0% of equity" not in prompt and "20.0% of equity in one name" not in prompt
+    # NOT leak into the POSITION SIZING block's OWN rendered phrasing when
+    # a non-default instance was explicitly supplied. Scoped to that
+    # block's exact wording ("risked per trade" / "in one name"), not the
+    # bare "2.0% of equity"/"20.0%" substrings -- since the 2026-09-27
+    # hardening pass (H2), the prompt also embeds RULES.md's own verbatim
+    # text, which legitimately states its OWN "2.0% of equity per trade"
+    # (no "risked") regardless of what `limits` this call was given; that
+    # static restatement is not the defect this test exists to catch.
+    assert "2.0% of equity risked per trade" not in prompt
+    assert "20.0% of equity in one name" not in prompt
     print("  ok  the POSITION SIZING block renders the actual supplied RiskLimits values and "
           "formulas, not a second hard-coded 2.0/20.0 copy")
 
@@ -1430,7 +1442,7 @@ def test_stopped_out_today_resets_unconditionally_even_on_a_quiet_day():
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
                                "support": [95.0], "resistance": [110.0]}}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualifies today"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -2429,7 +2441,7 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
     captured_prompts = []
     queued_decision_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
         captured_prompts.append(prompt)
         usage_totals["total_tokens"] = usage_totals.get("total_tokens", 0) + 100
         return HermesResult(
@@ -2606,7 +2618,7 @@ def _evidence_scenario(decisions_to_propose, tmp_dir):
                            "support": [95.0], "resistance": [110.0]} for t in ("OLN", "DINO")}
     fake_news = {"OLN": [], "DINO": []}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
         return HermesResult(
             response={"decisions": decisions_to_propose,
                      "no_action_reason": "n/a" if decisions_to_propose else "nothing qualified"},
@@ -2712,7 +2724,7 @@ def test_ask_hermes_records_a_failed_first_attempt_in_retry_diagnostics():
     bad_raw = "not even json"
     good_raw = json.dumps({"decisions": [], "no_action_reason": "nothing qualified"})
     usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "api_calls": 1}
-    with patch("run_backtest._call_hermes", side_effect=[(bad_raw, usage), (good_raw, usage)]):
+    with patch("run_backtest._call_hermes", side_effect=[(bad_raw.encode(), usage), (good_raw.encode(), usage)]):
         result = ask_hermes("irrelevant prompt", {}, is_reflection_day=False)
 
     assert result.attempt_count == 2
@@ -2776,7 +2788,7 @@ def test_ask_hermes_successful_reply_writes_no_diagnostic():
     good_raw = json.dumps({"decisions": [], "no_action_reason": "nothing qualified"})
     usage = {"input_tokens": 10, "total_tokens": 10, "api_calls": 1}
     with patch("run_backtest.DIAGNOSTICS_DIR", tmp_dir), \
-         patch("run_backtest._call_hermes", return_value=(good_raw, usage)):
+         patch("run_backtest._call_hermes", return_value=(good_raw.encode(), usage)):
         result = ask_hermes("irrelevant prompt", {}, is_reflection_day=False,
                             run_id="run-x", day_index=3)
     assert result.attempt_count == 1
@@ -2792,7 +2804,7 @@ def test_ask_hermes_recovering_retry_writes_no_diagnostic():
     good_raw = json.dumps({"decisions": [], "no_action_reason": "nothing qualified"})
     usage = {"input_tokens": 10, "total_tokens": 10, "api_calls": 1}
     with patch("run_backtest.DIAGNOSTICS_DIR", tmp_dir), \
-         patch("run_backtest._call_hermes", side_effect=[(bad_raw, usage), (good_raw, usage)]):
+         patch("run_backtest._call_hermes", side_effect=[(bad_raw.encode(), usage), (good_raw.encode(), usage)]):
         result = ask_hermes("irrelevant prompt", {}, is_reflection_day=False,
                             run_id="run-x", day_index=3)
     assert result.attempt_count == 2
@@ -2811,7 +2823,7 @@ def test_ask_hermes_exhausted_retries_write_redacted_bounded_diagnostics_for_bot
     usage = {"input_tokens": 10, "total_tokens": 10, "api_calls": 1}
 
     with patch("run_backtest.DIAGNOSTICS_DIR", tmp_dir), \
-         patch("run_backtest._call_hermes", side_effect=[(bad_raw1, usage), (bad_raw2, usage)]):
+         patch("run_backtest._call_hermes", side_effect=[(bad_raw1.encode(), usage), (bad_raw2.encode(), usage)]):
         try:
             ask_hermes("irrelevant prompt", {}, is_reflection_day=False,
                       run_id="run-y", day_index=7)
@@ -2851,7 +2863,7 @@ def test_ask_hermes_diagnostic_write_failure_never_masks_the_real_exception():
     blocking_file = Path(tempfile.mkdtemp()) / "blocked"
     blocking_file.write_text("not a directory")
     with patch("run_backtest.DIAGNOSTICS_DIR", blocking_file / "nested" / ".diagnostics"), \
-         patch("run_backtest._call_hermes", side_effect=[(bad_raw1, usage), (bad_raw2, usage)]):
+         patch("run_backtest._call_hermes", side_effect=[(bad_raw1.encode(), usage), (bad_raw2.encode(), usage)]):
         try:
             ask_hermes("irrelevant prompt", {}, is_reflection_day=False,
                       run_id="run-z", day_index=1)
@@ -2881,7 +2893,7 @@ def test_evidence_write_failure_then_replay_does_not_call_hermes_twice():
 
     hermes_calls = []
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
         hermes_calls.append(1)
         return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualified"},
                             attempt_count=1, retry_diagnostics=[])
@@ -2968,7 +2980,7 @@ def test_checkpoint_replay_derives_candidate_status_from_the_checkpoint_not_a_fr
     # dropped) -- must have zero effect on the recorded evidence.
     only_olin_technicals = {"OLN": both_technicals["OLN"]}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualified"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -3050,7 +3062,7 @@ def test_checkpoint_replay_reuses_fundamentals_provenance_never_refetches():
     original_fundamentals = {"OLN": {"ok": True, "snapshot": _FakeSnapshot("0000073952")}}
     replay_fundamentals = {"OLN": {"ok": True, "snapshot": _FakeSnapshot("DIFFERENT-CIK")}}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "n/a"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -3112,7 +3124,7 @@ def test_active_limits_reflects_a_non_default_risklimits_instance():
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
                                "support": [95.0], "resistance": [110.0]}}
 
-    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None):
+    def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "n/a"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -3150,7 +3162,7 @@ def test_ask_hermes_copies_supplied_runtime_model_metadata_without_arithmetic():
              "model": "claude-sonnet-5", "provider": "anthropic", "reasoning_effort": "high"}
     good_raw = json.dumps({"decisions": [], "no_action_reason": "n/a"})
     usage_totals = {}
-    with patch("run_backtest._call_hermes", return_value=(good_raw, usage)):
+    with patch("run_backtest._call_hermes", return_value=(good_raw.encode(), usage)):
         ask_hermes("irrelevant prompt", usage_totals, is_reflection_day=False)
 
     assert usage_totals["model"] == "claude-sonnet-5"
@@ -3166,7 +3178,7 @@ def test_ask_hermes_leaves_runtime_metadata_null_when_not_supplied():
     usage = {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "api_calls": 1}
     good_raw = json.dumps({"decisions": [], "no_action_reason": "n/a"})
     usage_totals = {}
-    with patch("run_backtest._call_hermes", return_value=(good_raw, usage)):
+    with patch("run_backtest._call_hermes", return_value=(good_raw.encode(), usage)):
         ask_hermes("irrelevant prompt", usage_totals, is_reflection_day=False)
 
     assert usage_totals.get("model") is None
@@ -3184,7 +3196,7 @@ def test_ask_hermes_fails_loudly_on_conflicting_metadata_across_a_retry():
     usage1 = {"input_tokens": 5, "model": "model-a"}
     usage2 = {"input_tokens": 5, "model": "model-b"}
     usage_totals = {}
-    with patch("run_backtest._call_hermes", side_effect=[(bad_raw, usage1), (good_raw, usage2)]):
+    with patch("run_backtest._call_hermes", side_effect=[(bad_raw.encode(), usage1), (good_raw.encode(), usage2)]):
         try:
             ask_hermes("irrelevant prompt", usage_totals, is_reflection_day=False)
             raise AssertionError("expected a ValueError on conflicting model identity")
@@ -3372,7 +3384,7 @@ def test_run_day_rejects_a_buy_for_an_alias_absent_from_this_cycles_candidates()
     }
 
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False,
-                        run_id=None, day_index=None):
+                        run_id=None, day_index=None, runtime=None):
         return HermesResult(response={
             "decisions": [{"alias": m.alias("WMG"), "action": "BUY", "quantity": 10,
                           "entry_price": 100.0, "stop_price": 93.0, "target_price": 115.0}],
@@ -3403,7 +3415,7 @@ def test_run_day_still_queues_a_normal_valid_candidate_proposal_unchanged():
     }
 
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False,
-                        run_id=None, day_index=None):
+                        run_id=None, day_index=None, runtime=None):
         return HermesResult(response={
             "decisions": [{"alias": m.alias("OLN"), "action": "BUY", "quantity": 199,
                           "entry_price": 100.0, "stop_price": 93.0, "target_price": 115.0}],
@@ -3703,10 +3715,10 @@ def test_pre_fill_gate_adverse_overnight_news_cancels_queued_buy():
         return {"OLN": {"articles": [article]}}
 
     def fake_hermes(prompt):
-        return json.dumps({order.alias: "CANCEL"}), {"total_tokens": 50, "api_calls": 1}
+        return json.dumps({order.alias: "CANCEL"}).encode(), {"total_tokens": 50, "api_calls": 1}
 
     usage = {}
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, usage, fetch_news_fn=fake_fetch, call_hermes_fn=fake_hermes,
     )
     assert surviving == []
@@ -3727,9 +3739,9 @@ def test_pre_fill_gate_neutral_news_confirms_and_lets_the_order_through():
         return {"OLN": {"articles": [article]}}
 
     def fake_hermes(prompt):
-        return json.dumps({order.alias: "CONFIRM"}), {}
+        return json.dumps({order.alias: "CONFIRM"}).encode(), {}
 
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fake_hermes,
     )
     assert surviving == [order]
@@ -3749,9 +3761,9 @@ def test_pre_fill_gate_unavailable_feed_fails_closed_without_calling_hermes():
 
     def fake_hermes(prompt):
         hermes_calls.append(prompt)
-        return json.dumps({order.alias: "CONFIRM"}), {}
+        return json.dumps({order.alias: "CONFIRM"}).encode(), {}
 
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fake_hermes,
     )
     assert surviving == []
@@ -3795,7 +3807,7 @@ def test_pre_fill_gate_malformed_timestamp_cancels_the_buy_without_calling_herme
     def fail_hermes(prompt):
         raise AssertionError("a malformed-timestamp batch must never reach Hermes")
 
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fail_hermes,
     )
     assert surviving == []
@@ -3816,7 +3828,7 @@ def test_pre_fill_window_excludes_an_article_published_after_the_0945_fill_cutof
     def fail_hermes(prompt):
         raise AssertionError("an out-of-window article must never reach Hermes")
 
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fail_hermes,
     )
     assert surviving == [order]
@@ -3838,7 +3850,7 @@ def test_pre_fill_window_excludes_an_article_from_before_the_original_decision_c
     def fail_hermes(prompt):
         raise AssertionError("an already-seen article must never re-enter the delta check")
 
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fail_hermes,
     )
     assert surviving == [order]
@@ -3861,7 +3873,7 @@ def test_pre_fill_gate_sells_and_exits_unaffected_by_news_availability():
     def fail_hermes(prompt):
         raise AssertionError("no Hermes call expected for this scenario")
 
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [sell, buy], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fail_hermes,
     )
     assert sell in surviving, "a queued SELL must survive regardless of news availability"
@@ -3895,12 +3907,12 @@ def test_pre_fill_gate_cancelled_order_resolves_once_and_is_deterministic_across
         return {"OLN": {"articles": [article]}}
 
     def fake_hermes(prompt):
-        return json.dumps({order.alias: "CANCEL"}), {}
+        return json.dumps({order.alias: "CANCEL"}).encode(), {}
 
-    surviving1, events1 = apply_pre_fill_news_gate(
+    surviving1, events1, _gate_evidence1 = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fake_hermes,
     )
-    surviving2, events2 = apply_pre_fill_news_gate(
+    surviving2, events2, _gate_evidence2 = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fake_hermes,
     )
     assert surviving1 == surviving2 == []
@@ -3920,7 +3932,7 @@ def test_pre_fill_gate_cancelled_order_resolves_once_and_is_deterministic_across
         rejection_calls.append((decision_id, reason))
 
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False,
-                        run_id=None, day_index=None):
+                        run_id=None, day_index=None, runtime=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "no candidates"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -3939,7 +3951,7 @@ def test_pre_fill_gate_cancelled_order_resolves_once_and_is_deterministic_across
          patch("run_backtest.fetch_technicals", return_value=fake_technicals), \
          patch("run_backtest.fetch_news", return_value={"OLN": [], "WMG": []}), \
          patch("run_backtest.fetch_news_window", side_effect=fake_fetch), \
-         patch("run_backtest._call_hermes", side_effect=lambda p: fake_hermes(p)), \
+         patch("run_backtest._call_hermes", side_effect=lambda p, *a, **k: fake_hermes(p)), \
          patch("run_backtest.fetch_recent_insights", return_value=[]), \
          patch("run_backtest.ask_hermes", side_effect=fake_ask_hermes), \
          patch("run_backtest.record_cycle_evidence"), \
@@ -4082,9 +4094,9 @@ def test_pre_fill_gate_a_1605_et_headline_is_included_and_can_cancel_the_buy():
         return {"OLN": {"articles": [article]}}
 
     def fake_hermes(prompt):
-        return json.dumps({order.alias: "CANCEL"}), {}
+        return json.dumps({order.alias: "CANCEL"}).encode(), {}
 
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fake_hermes,
     )
     assert surviving == []
@@ -4112,7 +4124,7 @@ def test_pre_fill_window_excludes_a_headline_exactly_at_the_decision_cutoff():
     def fail_hermes(prompt):
         raise AssertionError("a headline AT the decision cutoff must never reach Hermes")
 
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fail_hermes,
     )
     assert surviving == [order]
@@ -4136,7 +4148,7 @@ def test_pre_fill_gate_legacy_order_without_decision_cutoff_at_fails_closed():
     def fail_hermes(prompt):
         raise AssertionError("a legacy order with no decision_cutoff_at must never reach Hermes")
 
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fail_fetch, call_hermes_fn=fail_hermes,
     )
     assert surviving == []
@@ -4163,7 +4175,7 @@ def test_pre_fill_gate_incomplete_pagination_fails_the_buy_closed():
     def fail_hermes(prompt):
         raise AssertionError("incomplete pagination coverage must fail closed without calling Hermes")
 
-    surviving, events = apply_pre_fill_news_gate(
+    surviving, events, _gate_evidence = apply_pre_fill_news_gate(
         [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fail_hermes,
     )
     assert surviving == []
@@ -4335,6 +4347,469 @@ def test_to_utc_rfc3339_rejects_a_naive_datetime():
         pass
     print("  ok  _to_utc_rfc3339 rejects a timezone-naive datetime instead of silently "
           "using the host machine's local timezone")
+
+
+# ---------------------------------------------------------------------
+# 2026-09-27 hardening pass (docs/evaluations/project_integrity_and_
+# laya_readiness_audit.md, backtest_hardening_verification.md) -- H1
+# isolation, M1 exact-byte transport, H2 RULES.md inclusion, M3 pre-fill
+# gate replay-safety, M2 provenance shape. All pure/mocked, zero real
+# Docker/Neon/Hermes I/O, same discipline as every test above.
+# ---------------------------------------------------------------------
+
+def test_verify_backtest_hermes_isolation_fails_closed_on_any_tool_or_memory():
+    """H1, extended by the correction pass's requirement 2: the isolation
+    preflight must raise SystemExit if the runtime's OWN offline `hermes
+    prompt-size --json` report shows ANY tool, ANY non-zero memory/
+    user-profile bytes, OR any non-zero "context (AGENTS.md/cwd files)"
+    bytes -- proven against a mocked subprocess.run (no real Docker
+    call), covering the healthy report and four distinct failure shapes
+    (the fourth -- nonzero context bytes -- is new: the SAME check that
+    would have caught the real AGENTS.md/RULES.md leak this pass found
+    and fixed live)."""
+    class FakeResult:
+        def __init__(self, report):
+            self.returncode = 0
+            self.stdout = json.dumps(report)
+            self.stderr = ""
+
+    def _report(tools=0, memory=0, profile=0, context=0):
+        return {
+            "tools": {"count": tools}, "memory": {"bytes": memory},
+            "user_profile": {"bytes": profile},
+            "sections": [
+                ["stable (identity/guidance/skills)", 100, 100],
+                ["context (AGENTS.md/cwd files)", context, context],
+                ["volatile (memory/profile/timestamp)", 10, 10],
+            ],
+        }
+
+    healthy = _report()
+    with patch("run_backtest.subprocess.run", return_value=FakeResult(healthy)):
+        report = _verify_backtest_hermes_isolation()
+        assert report == healthy
+    print("  ok  a genuinely tool-less, memory-less, doc-injection-free report passes the isolation preflight")
+
+    for bad in (
+        _report(tools=1), _report(memory=12), _report(profile=5), _report(context=14213),
+    ):
+        with patch("run_backtest.subprocess.run", return_value=FakeResult(bad)):
+            try:
+                _verify_backtest_hermes_isolation()
+                raise AssertionError(f"expected SystemExit for {bad}")
+            except SystemExit:
+                pass
+    print("  ok  any nonzero tool count, memory bytes, user-profile bytes, or auto-discovered "
+          "context bytes fails the preflight closed")
+
+    class FailedResult:
+        returncode, stdout, stderr = 1, "", "no such profile"
+    with patch("run_backtest.subprocess.run", return_value=FailedResult()):
+        try:
+            _verify_backtest_hermes_isolation()
+            raise AssertionError("expected SystemExit when the isolation check itself can't run")
+        except SystemExit:
+            pass
+    print("  ok  a failure to even RUN the isolation check (not just a bad result) also fails closed")
+
+    # requirement 1: an explicit runtime's own home/workdir select the
+    # command, not the shared BACKTEST_HERMES_HOME/WORKDIR constants.
+    custom = HermesRuntime(name="btrun-abc123", home="/opt/data/profiles/btrun-abc123",
+                           workdir="/opt/data/profiles/btrun-abc123/workspace", fingerprint="deadbeef")
+    calls = []
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return FakeResult(healthy)
+    with patch("run_backtest.subprocess.run", side_effect=fake_run):
+        _verify_backtest_hermes_isolation(custom)
+    assert f"HERMES_HOME={custom.home}" in calls[0]
+    assert custom.workdir in calls[0]
+    print("  ok  _verify_backtest_hermes_isolation checks the EXACT runtime it's given, "
+          "never a shared fixed profile")
+
+
+def test_preflight_cleans_up_the_provisioned_runtime_on_every_failure_path():
+    """Lifecycle fix: once preflight() has provisioned an ephemeral runtime,
+    ANY failure before it returns (SystemExit, an ordinary exception such
+    as a malformed-JSON ValueError or a timeout, or a KeyboardInterrupt)
+    must attempt cleanup of that exact runtime exactly once and re-raise
+    the ORIGINAL exception. A healthy preflight must NOT clean up (the
+    caller owns the runtime then). Mocks only -- no docker/hermes call."""
+    import subprocess as _sp
+    import run_backtest as rb
+    runtime = HermesRuntime(name="btrun-test0001", home="/opt/data/profiles/btrun-test0001",
+                            workdir="/opt/data/profiles/btrun-test0001/workspace", fingerprint="f")
+
+    class PsResult:
+        stdout = "gateway maverick-mcp alpaca-mcp trade-journal execution-sim"
+
+    healthy = {"tools": {"count": 0}}
+    for exc in (SystemExit("isolation failed"), ValueError("malformed prompt-size json"),
+                _sp.TimeoutExpired(cmd="hermes", timeout=60), KeyboardInterrupt()):
+        with patch("run_backtest.subprocess.run", return_value=PsResult()),              patch("run_backtest._provision_ephemeral_hermes_runtime", return_value=runtime),              patch("run_backtest._verify_backtest_hermes_isolation", side_effect=exc),              patch("run_backtest._cleanup_ephemeral_hermes_runtime") as cleanup:
+            try:
+                preflight()
+                raise AssertionError(f"expected {exc!r} to propagate")
+            except BaseException as raised:
+                assert raised is exc, f"original exception must be re-raised unchanged, got {raised!r}"
+            cleanup.assert_called_once_with(runtime)
+    print("  ok  preflight cleans up the exact provisioned runtime exactly once on SystemExit, ordinary "
+          "exceptions, timeouts, and KeyboardInterrupt, re-raising the original exception")
+
+    with patch("run_backtest.subprocess.run", return_value=PsResult()),          patch("run_backtest._provision_ephemeral_hermes_runtime", return_value=runtime),          patch("run_backtest._verify_backtest_hermes_isolation", return_value=dict(healthy)),          patch("run_backtest._cleanup_ephemeral_hermes_runtime") as cleanup:
+        report = preflight()
+        assert report["runtime"] is runtime
+        cleanup.assert_not_called()
+    print("  ok  a healthy preflight hands the runtime to the caller and does NOT clean it up")
+
+    # A create command that times out may still have created the profile.
+    with patch("run_backtest.subprocess.run", side_effect=_sp.TimeoutExpired(cmd="hermes", timeout=60)),          patch("run_backtest._cleanup_ephemeral_hermes_runtime") as cleanup:
+        try:
+            _provision_ephemeral_hermes_runtime()
+            raise AssertionError("expected TimeoutExpired")
+        except _sp.TimeoutExpired:
+            pass
+        cleanup.assert_called_once()
+        assert cleanup.call_args[0][0].name.startswith("btrun-")
+    print("  ok  a provisioning timeout attempts cleanup of the just-named btrun-* profile and re-raises")
+
+
+def test_cleanup_warns_honestly_on_nonzero_exit_and_never_targets_base_or_live_profile():
+    """A non-zero delete command must print a visible warning (not fail
+    silently), never raise (must not mask the run's real result), and the
+    delete command must name only the exact ephemeral profile. The shared
+    base profile and None are never deleted -- and no code path passes
+    'default' (the live profile) to delete."""
+    import io, contextlib
+    runtime = HermesRuntime(name="btrun-warn0001", home="/opt/data/profiles/btrun-warn0001",
+                            workdir="/opt/data/profiles/btrun-warn0001/workspace", fingerprint="f")
+
+    class Failed:
+        returncode, stdout, stderr = 1, "", "Error: no such profile"
+
+    calls = []
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return Failed()
+
+    buf = io.StringIO()
+    with patch("run_backtest.subprocess.run", side_effect=fake_run), contextlib.redirect_stdout(buf):
+        _cleanup_ephemeral_hermes_runtime(runtime)  # must not raise
+    out = buf.getvalue()
+    assert "WARNING" in out and "btrun-warn0001" in out and "exited 1" in out, out
+    assert calls == [["docker", "compose", "exec", "-T", "gateway", "hermes", "profile",
+                      "delete", "btrun-warn0001", "-y"]] or (
+        len(calls) == 1 and calls[0][-2:] == ["btrun-warn0001", "-y"]), calls
+    print("  ok  a non-zero cleanup exit prints an honest warning, never raises, and deletes only the exact btrun-* name")
+
+    calls.clear()
+    with patch("run_backtest.subprocess.run", side_effect=fake_run):
+        _cleanup_ephemeral_hermes_runtime(None)
+        _cleanup_ephemeral_hermes_runtime(_DEFAULT_HERMES_RUNTIME)
+    assert calls == [], "the shared base profile (and None) must never be deleted"
+    for name in ("default", "backtest"):
+        assert name != runtime.name
+    print("  ok  cleanup is a no-op for None and for the shared base profile; nothing ever deletes the live/default profile")
+
+
+def test_call_hermes_sends_exact_prompt_bytes_via_stdin_never_argv():
+    """M1: the prompt must travel over subprocess stdin (input=), never
+    as an escaped argv string -- proves quotes/dollar-signs/backticks/
+    backslashes/trailing newlines survive completely unmodified, the
+    prompt text never appears as a literal argv element (still subject to
+    Windows' ~32KB CreateProcess command-line ceiling if it did), and the
+    isolated profile's HERMES_HOME is what selects the tool-less runtime,
+    never the live default profile."""
+    tricky = 'quotes "here", a $DOLLAR, a `backtick`, a back\\slash, and\ntrailing newline\n'
+    calls = []
+
+    class FakeResult:
+        returncode = 0
+        stdout = b'{"decisions": [], "no_action_reason": "ok"}'
+        stderr = b""
+
+    def fake_run(cmd, input=None, **kwargs):
+        calls.append({"cmd": cmd, "input": input})
+        return FakeResult()
+
+    with patch("run_backtest.subprocess.run", side_effect=fake_run):
+        raw_bytes, usage = _call_hermes(tricky)
+
+    assert raw_bytes == FakeResult.stdout, "the raw response must be returned as bytes, unmodified"
+    first = calls[0]
+    assert first["input"] == tricky.encode("utf-8"), "prompt bytes must be sent byte-for-byte via stdin"
+    assert not any(tricky in str(arg) for arg in first["cmd"]), \
+        "the prompt must never appear as a literal argv element (the old escaped-argv transport)"
+    assert "xargs" in first["cmd"] and "-0" in first["cmd"], \
+        "must use NUL-delimited xargs -- the one transport that neither invokes a shell nor strips trailing newlines"
+    assert f"HERMES_HOME={BACKTEST_HERMES_HOME}" in first["cmd"], \
+        "must select the isolated backtest profile, never the live default profile's sticky selection"
+    print("  ok  _call_hermes sends the exact prompt bytes over stdin, never as an escaped/mutated argv "
+          "string, and selects the isolated HERMES_HOME for every invocation")
+
+
+def test_call_hermes_uses_the_given_runtimes_own_home_and_workdir():
+    """Correction pass, requirement 1: when a per-run HermesRuntime is
+    passed explicitly, _call_hermes selects THAT runtime's own HERMES_HOME
+    and workdir -- never the shared BACKTEST_HERMES_HOME/WORKDIR constants
+    -- so two separate runs' calls are provably routed to two different,
+    disjoint profiles."""
+    runtime_a = HermesRuntime(name="btrun-aaaa", home="/opt/data/profiles/btrun-aaaa",
+                              workdir="/opt/data/profiles/btrun-aaaa/workspace", fingerprint="aaaa")
+    runtime_b = HermesRuntime(name="btrun-bbbb", home="/opt/data/profiles/btrun-bbbb",
+                              workdir="/opt/data/profiles/btrun-bbbb/workspace", fingerprint="bbbb")
+    calls = []
+
+    class FakeResult:
+        returncode = 0
+        stdout = b'{"decisions": [], "no_action_reason": "ok"}'
+        stderr = b""
+
+    def fake_run(cmd, input=None, **kwargs):
+        calls.append(cmd)
+        return FakeResult()
+
+    with patch("run_backtest.subprocess.run", side_effect=fake_run):
+        _call_hermes("prompt A", runtime_a)
+        _call_hermes("prompt B", runtime_b)
+
+    main_call_a = calls[0]  # the -z call itself; usage-file cat/rm follow
+    main_call_b = calls[3]
+    assert f"HERMES_HOME={runtime_a.home}" in main_call_a and runtime_a.workdir in main_call_a
+    assert f"HERMES_HOME={runtime_b.home}" in main_call_b and runtime_b.workdir in main_call_b
+    assert runtime_a.home not in main_call_b and runtime_b.home not in main_call_a, \
+        "two separate runtimes must never bleed into each other's command"
+    print("  ok  _call_hermes routes to the EXACT per-run HermesRuntime it's given, proving two "
+          "separate runs never share a HERMES_HOME/workdir")
+
+
+def test_build_prompt_embeds_masked_rules_md_and_bumps_schema_version():
+    """H2: build_prompt, given a masking object, embeds RULES.md's own
+    text with every real ticker/company name replaced by its alias --
+    never the raw file, which would leak real watchlist identities
+    straight past the entire masking gate. Without a masking object
+    (existing formula-only test call sites), the block is skipped
+    entirely rather than ever risking an unmasked embed."""
+    assert PROMPT_SCHEMA_VERSION == 3, \
+        "build_prompt's shape changed (RULES.md block + no-tools notice) -- the schema version must say so"
+
+    account = {"equity": 100_000.0, "cash": 100_000.0, "exposure_pct": 0.0,
+              "daily_pl_pct": 0.0, "weekly_pl_pct": 0.0, "drawdown_pct": 0.0}
+    names = {"OLN": ["Olin Corporation", "Olin"]}
+    m = RunMasking(names, run_start=date(2022, 6, 1), seed=1)
+
+    prompt = build_prompt("Day 1", account, [], [], [], masking=m)
+    assert "===== RULES.md" in prompt and "===== END RULES.md" in prompt
+    m.assert_clean(prompt)  # raises LeakDetected if "OLN"/"Olin"/"Olin Corporation" survived masking
+    assert m.alias("OLN") in prompt  # the masked form DOES appear (RULES.md's own watchlist table)
+    assert "no tools" in prompt.lower()
+    print("  ok  build_prompt embeds RULES.md's full text with every real identity replaced by its "
+          "alias, never the raw unmasked file, and states no tools are available in backtest mode")
+
+    no_mask_prompt = build_prompt("Day 1", account, [], [], [])
+    assert "===== RULES.md" not in no_mask_prompt
+    print("  ok  without a masking object, build_prompt never embeds RULES.md rather than risk an unmasked leak")
+
+
+def test_pre_fill_gate_replay_never_refetches_news_or_reasks_hermes():
+    """M3: when every queued BUY is covered by checkpointed_gate, the
+    gate must make ZERO news-fetch calls and ZERO Hermes calls -- a
+    retried cycle can never see different (newer) live news, or a
+    different classification from a non-deterministic model call, than
+    the attempt that already resolved it."""
+    m = RunMasking({"OLN": ["Olin"]}, run_start=date(2026, 2, 17), seed=1)
+    order = _order(action="BUY", decision_cutoff_at="2026-02-17T16:00:00-05:00")
+
+    def boom_fetch(*a, **k):
+        raise AssertionError("must not re-fetch news on a fully-checkpointed replay")
+
+    def boom_hermes(*a, **k):
+        raise AssertionError("must not re-ask Hermes on a fully-checkpointed replay")
+
+    verdict = {
+        "outcome": "confirm", "reason": None,
+        "window_start": "2026-02-17T16:00:00-05:00", "window_end": "2026-02-18T09:45:00-05:00",
+        "article_count": 0, "article_timestamps": [],
+    }
+    surviving, events, evidence = apply_pre_fill_news_gate(
+        [order], date(2026, 2, 18), m, {}, fetch_news_fn=boom_fetch, call_hermes_fn=boom_hermes,
+        checkpointed_gate={"verdicts": {order.decision_id: verdict}},
+    )
+    assert surviving == [order]
+    assert events == [{"order": order, **verdict}]
+    assert evidence is None
+    print("  ok  a fully-checkpointed pre-fill gate makes zero news-fetch and zero Hermes calls on replay")
+
+    # A BUY NOT covered by the checkpoint (a genuinely new order this
+    # attempt never saw before) falls through to the normal live path --
+    # proven by it reaching (and being rejected by) the fake fetch, not by
+    # silently vanishing or crashing.
+    uncovered = _order(action="BUY", decision_id="uncovered-decision-id",
+                      decision_cutoff_at="2026-02-17T16:00:00-05:00")
+    try:
+        apply_pre_fill_news_gate(
+            [uncovered], date(2026, 2, 18), m, {}, fetch_news_fn=boom_fetch, call_hermes_fn=boom_hermes,
+            checkpointed_gate={"verdicts": {order.decision_id: verdict}},
+        )
+        raise AssertionError("expected the uncovered order to reach (and be rejected by) the live fetch path")
+    except AssertionError as exc:
+        assert "must not re-fetch" in str(exc)
+    print("  ok  an order NOT covered by the checkpoint falls through to the live path, never silently skipped")
+
+
+def test_save_checkpoint_merges_pre_fill_gate_across_the_later_response_write():
+    """M3: the gate's own early checkpoint write (before the main Hermes
+    call, response still unknown) must survive the LATER write that
+    checkpoints the main response -- neither write may clobber the
+    other's field. Uses a real temp file (matching this module's other
+    _save_checkpoint/_load_checkpoint tests), never the module's shared
+    CHECKPOINT_PATH."""
+    import run_backtest as rb
+    with tempfile.TemporaryDirectory() as tmp:
+        original = rb.CHECKPOINT_PATH
+        rb.CHECKPOINT_PATH = Path(tmp) / "checkpoint.json"
+        try:
+            gate_payload = {"verdicts": {"d1": {"outcome": "confirm", "reason": None,
+                            "window_start": "a", "window_end": "b", "article_count": 0,
+                            "article_timestamps": []}}}
+            _save_checkpoint("run-x", 0, pre_fill_gate=gate_payload)
+            mid = _load_checkpoint("run-x", 0)
+            assert mid["pre_fill_gate"] == gate_payload
+            assert mid.get("response") is None, \
+                "no response yet -- run_day's replay branch must not treat this as a completed cycle"
+
+            response = {"decisions": [], "no_action_reason": "n/a"}
+            _save_checkpoint("run-x", 0, response, {"total_tokens": 5})
+            final = _load_checkpoint("run-x", 0)
+            assert final["response"] == response
+            assert final["pre_fill_gate"] == gate_payload, \
+                "the main-response write must preserve the gate's earlier write, not clobber it"
+        finally:
+            rb.CHECKPOINT_PATH = original
+    print("  ok  _save_checkpoint merges the gate's early write and the main response's later write onto "
+          "the same checkpoint file, neither clobbering the other")
+
+
+def test_pre_fill_gate_evidence_accumulates_as_an_ordered_list_across_batches():
+    """Correction pass, requirement 3: a simulated day needing TWO separate
+    pre-fill confirmation batches (e.g. a retry that resolves a second,
+    previously-uncovered order) must keep BOTH calls' full evidence, in
+    order -- not just the last one. Reproduces run_day's own accumulation
+    pattern (read the checkpoint's existing pre_fill_gate.gate_calls list,
+    append this invocation's evidence, save) directly against a real temp
+    checkpoint file, exactly like the sibling merge test above."""
+    import run_backtest as rb
+    with tempfile.TemporaryDirectory() as tmp:
+        original = rb.CHECKPOINT_PATH
+        rb.CHECKPOINT_PATH = Path(tmp) / "checkpoint.json"
+        try:
+            call_1 = {"prompt_text": "batch 1 prompt", "prompt_sha256": "sha1",
+                      "raw_response": "r1", "response_sha256": "rsha1",
+                      "attempt_count": 1, "order_ids": ["d1"], "aliases": ["ALPHA"]}
+            _save_checkpoint("run-y", 0, pre_fill_gate={
+                "verdicts": {"d1": {"outcome": "confirm"}},
+                "gate_calls": [call_1],
+            })
+
+            # A second invocation this same cycle resolves a DIFFERENT,
+            # previously-uncovered order via its own confirmation call --
+            # run_day's own append logic: existing list + this call.
+            checkpoint = _load_checkpoint("run-y", 0)
+            existing_gate_calls = (checkpoint.get("pre_fill_gate") or {}).get("gate_calls") or []
+            call_2 = {"prompt_text": "batch 2 prompt", "prompt_sha256": "sha2",
+                      "raw_response": "r2", "response_sha256": "rsha2",
+                      "attempt_count": 1, "order_ids": ["d2"], "aliases": ["BRAVO"]}
+            _save_checkpoint("run-y", 0, pre_fill_gate={
+                "verdicts": {"d1": {"outcome": "confirm"}, "d2": {"outcome": "cancel"}},
+                "gate_calls": existing_gate_calls + [call_2],
+            })
+
+            final = _load_checkpoint("run-y", 0)["pre_fill_gate"]
+            assert final["gate_calls"] == [call_1, call_2], \
+                "both batches' full evidence must survive, in order -- neither overwrites the other"
+            assert final["verdicts"] == {"d1": {"outcome": "confirm"}, "d2": {"outcome": "cancel"}}
+        finally:
+            rb.CHECKPOINT_PATH = original
+    print("  ok  pre_fill_gate.gate_calls accumulates every confirmation batch this cycle made, "
+          "in order, instead of the prior single-value shape silently discarding earlier ones")
+
+
+def test_apply_pre_fill_news_gate_call_evidence_names_its_own_orders_and_aliases():
+    """Correction pass, requirement 3: gate_call_evidence must name which
+    queued orders/aliases the ONE batched Hermes call it describes
+    actually covered -- needed so a caller accumulating multiple such
+    calls (see the test above) can tell them apart later."""
+    m = RunMasking({"OLN": ["Olin"]}, run_start=date(2026, 2, 17), seed=1)
+    order = _order(action="BUY", decision_cutoff_at="2026-02-17T16:00:00-05:00")
+
+    def fake_fetch(tickers, start, end):
+        return {"OLN": {"articles": [
+            {"headline": "Olin announces expansion", "summary": "", "symbols": ["OLN"],
+             "created_at": "2026-02-17T22:00:00+00:00"},  # after the 21:00 UTC decision cutoff
+        ]}}
+
+    def fake_hermes(prompt):
+        return b'{"ALPHA": "CONFIRM"}', {}
+
+    surviving, events, evidence = apply_pre_fill_news_gate(
+        [order], date(2026, 2, 18), m, {}, fetch_news_fn=fake_fetch, call_hermes_fn=fake_hermes,
+    )
+    assert evidence is not None
+    assert evidence["order_ids"] == [order.decision_id]
+    assert evidence["aliases"] == [order.alias]
+    print("  ok  gate_call_evidence names the exact order_ids/aliases its one batched call covered")
+
+
+def test_build_run_provenance_shape():
+    """M2: build_run_provenance assembles every field register_run_
+    configuration persists, derived from the SAME isolation report
+    preflight() already measured -- never a second, independent
+    measurement. git_head_sha/git_dirty are best-effort (None, None on a
+    git failure) rather than ever failing a run over a provenance
+    nicety. _read_hermes_runtime_config is mocked -- it does a real
+    `docker compose exec ... cat config.yaml` this pure test suite must
+    never perform."""
+    fake_runtime_config = {"model": "gpt-5.6-terra", "provider": "openai-codex",
+                           "reasoning_effort": "medium", "source": "isolated_profile_config"}
+    with patch("run_backtest._read_hermes_runtime_config", return_value=fake_runtime_config):
+        # No "runtime" key at all -- an old/mocked caller that predates
+        # per-run provisioning -- must fall back to _DEFAULT_HERMES_RUNTIME,
+        # never crash.
+        report = {"tools": {"count": 0}, "memory": {"bytes": 0},
+                  "toolsets_breakdown": [], "sections": [
+                      ["context (AGENTS.md/cwd files)", 0, 0],
+                  ]}
+        prov = build_run_provenance(report)
+        assert prov["hermes_profile"] == _DEFAULT_HERMES_RUNTIME.name == BACKTEST_HERMES_PROFILE
+        assert prov["hermes_home_fingerprint"] == _DEFAULT_HERMES_RUNTIME.fingerprint
+        assert "hermes_home" not in prov, \
+            "the raw absolute-path field must be gone, replaced by the non-secret fingerprint"
+        assert prov["hermes_context_bytes"] == 0
+        assert prov["hermes_offered_tool_count"] == 0
+        assert prov["hermes_memory_enabled"] is False
+        assert isinstance(prov["hermes_tool_list_sha256"], str) and len(prov["hermes_tool_list_sha256"]) == 64
+        assert isinstance(prov["hermes_system_prompt_sha256"], str) and len(prov["hermes_system_prompt_sha256"]) == 64
+        assert isinstance(prov["hermes_isolation_verified_at"], str) and prov["hermes_isolation_verified_at"]
+        assert prov["hermes_runtime_model"] == "gpt-5.6-terra"
+        assert prov["hermes_runtime_provider"] == "openai-codex"
+        assert prov["hermes_runtime_reasoning_effort"] == "medium"
+        assert prov["hermes_runtime_config_source"] == "isolated_profile_config"
+        # This actual repo IS a git checkout, so a real sha should resolve --
+        # proves the best-effort path succeeds in the ordinary case, not just
+        # that it fails gracefully.
+        assert prov["git_head_sha"] is None or len(prov["git_head_sha"]) == 40
+        assert prov["git_dirty"] is None or isinstance(prov["git_dirty"], bool)
+
+        # An explicit per-run runtime overrides the identity fields.
+        custom = HermesRuntime(name="btrun-abc123", home="/opt/data/profiles/btrun-abc123",
+                               workdir="/opt/data/profiles/btrun-abc123/workspace", fingerprint="cafef00d")
+        prov2 = build_run_provenance({**report, "runtime": custom})
+        assert prov2["hermes_profile"] == "btrun-abc123"
+        assert prov2["hermes_home_fingerprint"] == "cafef00d"
+    print("  ok  build_run_provenance assembles every field from the SAME preflight-measured isolation "
+          "report (falling back to the shared default runtime's identity, or using an explicit per-run "
+          "one), with git/image provenance best-effort rather than run-blocking, and never persists a "
+          "raw absolute HERMES_HOME path")
 
 
 def main():

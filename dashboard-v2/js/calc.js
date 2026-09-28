@@ -89,6 +89,16 @@ export function totalReturn(equity, startingEquity = STARTING_EQUITY) {
 // (decision-time) and order_rejected (execution-time) are the two event
 // types a rejection is ever logged under, and a real one always cites a
 // RULES.md §-number.
+//
+// M4 correction pass (2026-09-27): public_agent_activity no longer
+// carries `description` at all (the free-text column an earlier version
+// of this pass merely alias-redacted is now omitted entirely — see
+// data.js's own comment). `a.description || ""` below means this always
+// returns false against the public view, so rejectionDistribution always
+// reports empty and relatedActivity never matches — a deliberate,
+// documented feature reduction (rule-citation/activity-correlation
+// analytics need the free text to work), not a bug: neither function
+// crashes, both degrade to an honest empty result.
 export function isBlockedRow(a) {
   return !!a && (a.event_type === "risk_check" || a.event_type === "order_rejected")
     && /§\d/.test(a.description || "");
