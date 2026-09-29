@@ -295,14 +295,11 @@ unapproved pending that decision.
     citations/provenance are retained on every passage; retrieval is
     cut off by the simulated date (no lookahead); the agent receives
     only the retrieved evidence, never unrestricted document access.
-  - Point-in-time dynamic candidate selector. Status `cancelled for this
-    project`. The fixed 10-ticker watchlist remains the permanent scope for
-    evaluation and any future live-paper pilot. Dynamic selection would create
-    a separate research project with a changed universe, selection-bias
-    controls, and a new baseline; it is intentionally not required to finish
-    or deploy this system. Reaffirmed explicitly 2026-09-15c (fundamentals-
-    measurement block); removed from `dashboard-v2/js/roadmap-data.js`'s
-    Market Intelligence sector — it was never accurate as "next" there.
+  - Point-in-time dynamic candidate selector ("Laya"). Status `discussing`
+    — reopened 2026-09-29; the settled architecture and open questions live
+    in `docs/scopes/LAYA_SELECTOR_V1.md`, the single current scope/
+    discussion record. No implementation approved. See that file before
+    treating anything about Laya as decided.
   - Measurable technical-strategy library. Status `discussing` / `Later`.
     Evaluate a small number of objective swing-trading concepts (for
     example momentum, mean reversion, breakout, relative strength, or
