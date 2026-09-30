@@ -339,6 +339,12 @@ def _provision_ephemeral_hermes_runtime() -> HermesRuntime:
         _cleanup_ephemeral_hermes_runtime(runtime)
         raise
     if result.returncode != 0:
+        # A non-zero exit can still have partially created the profile
+        # (e.g. it failed after the directory/config were written) --
+        # best-effort delete of this exact name before raising, same
+        # discipline as the except BaseException branch above. Cleanup is
+        # best-effort and must never mask this original create failure.
+        _cleanup_ephemeral_hermes_runtime(runtime)
         raise SystemExit(
             "failed to provision a fresh, disposable per-run Hermes profile "
             f"(clone of {BACKTEST_HERMES_PROFILE!r}): {result.stderr[-1000:]}\n"

@@ -4474,6 +4474,53 @@ def test_preflight_cleans_up_the_provisioned_runtime_on_every_failure_path():
     print("  ok  a provisioning timeout attempts cleanup of the just-named btrun-* profile and re-raises")
 
 
+def test_provision_cleans_up_on_a_nonzero_create_exit_after_possible_partial_creation():
+    """Reliability fix: `hermes profile create` can return a NON-ZERO exit
+    code after having partially created the profile on disk (unlike the
+    except BaseException branch above, no exception was raised here at
+    all -- the subprocess simply completed with returncode != 0). Must:
+    (1) attempt cleanup of that exact ephemeral runtime; (2) still raise
+    SystemExit, preserving the original stderr text; (3) never fall back
+    to the shared/default profile or start a backtest; (4) make no real
+    Docker/Neon/LLM/backtest call -- subprocess.run is mocked, and no
+    other I/O function is touched."""
+    calls = []
+
+    class FailedCreate:
+        returncode = 1
+        stdout = ""
+        stderr = "Error: profile directory already partially exists"
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return FailedCreate()
+
+    with patch("run_backtest.subprocess.run", side_effect=fake_run), \
+         patch("run_backtest._cleanup_ephemeral_hermes_runtime") as cleanup:
+        try:
+            _provision_ephemeral_hermes_runtime()
+            raise AssertionError("expected SystemExit on a non-zero create exit")
+        except SystemExit as exc:
+            assert "profile directory already partially exists" in str(exc), \
+                "the original create-failure stderr text must be preserved"
+        cleanup.assert_called_once()
+        cleaned_runtime = cleanup.call_args[0][0]
+        assert cleaned_runtime.name.startswith("btrun-"), \
+            "cleanup must target the exact just-named ephemeral runtime, never a shared one"
+        assert cleaned_runtime.name != BACKTEST_HERMES_PROFILE, \
+            "must never select/clean the shared base profile as a fallback"
+
+    # Only one subprocess call (the create attempt itself) -- no usage-file
+    # cat/rm, no prompt-size check, no fallback to any other profile, and
+    # (since subprocess.run is the only I/O seam and it's fully mocked) no
+    # real Docker/Neon/LLM/backtest call of any kind occurred.
+    assert len(calls) == 1
+    assert calls[0][:7] == ["docker", "compose", "exec", "-T", "gateway", "hermes", "profile"]
+    print("  ok  a non-zero create exit (no exception -- a possible partial creation) still triggers "
+          "cleanup of the exact ephemeral runtime, still raises SystemExit with the original error "
+          "text preserved, and never falls back to the shared/default profile")
+
+
 def test_cleanup_warns_honestly_on_nonzero_exit_and_never_targets_base_or_live_profile():
     """A non-zero delete command must print a visible warning (not fail
     silently), never raise (must not mask the run's real result), and the
