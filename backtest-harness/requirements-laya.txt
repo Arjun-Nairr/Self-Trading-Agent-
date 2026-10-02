@@ -1,0 +1,15 @@
+# OPTIONAL, EXPERIMENTAL -- only the Laya candidate-selector prototype needs
+# these (docs/scopes/LAYA_SELECTOR_V1.md). The default backtest, live path, and
+# every existing test run without them; laya_adapter.py imports `laya` lazily.
+# Install into its OWN virtualenv, not the harness's normal environment:
+#   python -m venv .venv-laya && .venv-laya/Scripts/pip install -r requirements-laya.txt
+# Exact pins from the environment the Phase 1 real-model smoke check ran in.
+# (torch resolves to the CPU wheel on Windows; scoring runs on CPU.)
+laya[structured]==0.3.23
+torch==2.14.1
+transformers==5.18.0
+tokenizers==0.23.2
+safetensors==0.8.0
+huggingface_hub==1.33.0
+numpy==2.5.3
+pydantic==2.13.5

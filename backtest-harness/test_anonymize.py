@@ -270,6 +270,133 @@ def test_frozen_snapshot_prompt_text_stays_alias_masked():
         assert m.alias(ticker) in masked
 
 
+# -- fixed-30 / "opaque" alias scheme (Laya selector prototype, Phase 1) ------
+
+def _fixed30_names():
+    """The real experimental universe, with the real name-variant derivation."""
+    import json
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+    import run_backtest as rb
+
+    raw = json.loads((Path(__file__).parent.parent / "watchlist" / "experimental_fixed30.json")
+                     .read_text(encoding="utf-8"))
+    return {t["symbol"]: rb._name_variants(t["name"], t["symbol"]) for t in raw["tickers"]}
+
+
+def test_default_nato_scheme_is_unchanged_for_the_fixed_10_baseline():
+    """Compat guard: every 10-name run (and every resumed run's frozen alias
+    map) must keep reproducing exactly the aliases the original code gave.
+    Literals computed from the pre-change anonymize.py (HEAD e5ec811+), which
+    was also diffed against this implementation over 200 seeds."""
+    baseline = ["OLN", "WMG", "PLNT", "SFM", "DINO", "RYAN", "BRKR", "ATI", "BRX", "ALGM"]
+    m = RunMasking({t: [] for t in baseline}, run_start=RUN_START, seed=42)
+    assert m.mapping() == {
+        "ALGM": "INDIA", "ATI": "MIKE", "BRKR": "HOTEL", "BRX": "GOLF", "DINO": "NOVEMBER",
+        "OLN": "LIMA", "PLNT": "FOXTROT", "RYAN": "CHARLIE", "SFM": "JULIET", "WMG": "DELTA",
+    }
+    assert RunMasking(NAMES, RUN_START, seed=7).mapping() == {"AAPL": "DELTA", "MSFT": "LIMA"}
+
+
+def test_default_scheme_still_caps_at_14_and_points_at_the_opaque_scheme():
+    names = {f"T{i:02d}": [] for i in range(15)}
+    try:
+        RunMasking(names, run_start=RUN_START, seed=1)
+        raise AssertionError("expected the legacy 14-alias cap to still raise")
+    except ValueError as e:
+        assert "opaque" in str(e)
+    try:
+        RunMasking(NAMES, run_start=RUN_START, seed=1, alias_scheme="bogus")
+        raise AssertionError("unknown scheme must be rejected")
+    except ValueError as e:
+        assert "alias_scheme" in str(e)
+
+
+def test_opaque_scheme_supports_30_names_deterministically_with_unique_aliases():
+    names = _fixed30_names()
+    assert len(names) == 30
+    m1 = RunMasking(names, run_start=RUN_START, seed=42, alias_scheme="opaque")
+    m2 = RunMasking(dict(names), run_start=RUN_START, seed=42, alias_scheme="opaque")
+    assert m1.mapping() == m2.mapping(), "same seed + universe must reproduce the mapping"
+    aliases = list(m1.mapping().values())
+    assert len(aliases) == 30 and len(set(aliases)) == 30, "no duplicate aliases"
+    assert m1.mapping() != RunMasking(names, RUN_START, seed=43, alias_scheme="opaque").mapping()
+    # Reversible through the stored map.
+    for ticker, alias in m1.mapping().items():
+        assert m1.real(alias) == ticker and m1.alias(ticker) == alias
+    # Round-trips through a plain JSON-style dict copy (what a persisted map is).
+    stored = dict(m1.mapping())
+    assert {a: t for t, a in stored.items()} == {m1.alias(t): t for t in names}
+
+
+def test_opaque_aliases_are_not_words_and_survive_mask_text_untouched():
+    import re
+    names = _fixed30_names()
+    for seed in range(100):
+        m = RunMasking(names, run_start=RUN_START, seed=seed, alias_scheme="opaque")
+        for ticker, alias in m.mapping().items():
+            assert re.fullmatch(r"[BCDGHJKLMNPRSTVWXZ]{2}[1-9][0-9]", alias), alias
+            # Never equal to any ticker/name term the masker strips...
+            assert alias not in {ticker.upper(), *(v.upper() for v in names[ticker])}
+            # ...and the date/year redaction pass must not mangle an alias.
+            assert m.mask_text(f"{alias} rose") == f"{alias} rose", alias
+
+
+def test_opaque_aliases_are_stable_when_universe_membership_changes():
+    """Unlike the positional-zip legacy scheme: removing/adding a ticker must
+    not reshuffle everyone else's alias (needed once the pool can rotate)."""
+    names = _fixed30_names()
+    full = RunMasking(names, RUN_START, seed=42, alias_scheme="opaque").mapping()
+    fewer = {t: v for t, v in names.items() if t not in ("OLN", "NUE", "ZBRA")}
+    part = RunMasking(fewer, RUN_START, seed=42, alias_scheme="opaque").mapping()
+    assert all(part[t] == full[t] for t in part)
+
+
+def test_opaque_scheme_does_not_corrupt_ordinary_prose_with_word_like_tickers():
+    """The collision regression: tickers that are also ordinary English words
+    ("ON", "IT", "ALL", "KEY") used to be substituted inside plain prose and
+    then trip assert_clean on innocent text."""
+    names = {
+        "ON": ["ON Semiconductor Corporation", "ON Semiconductor"],
+        "IT": ["Gartner, Inc.", "Gartner"],
+        "ALL": ["Allstate Corporation", "Allstate"],
+        "KEY": ["KeyCorp"],
+    }
+    m = RunMasking(names, run_start=RUN_START, seed=5, alias_scheme="opaque")
+    prose = "Stop placed on support; it holds all week. All in all, a key day -- on balance, fine."
+    assert m.mask_text(prose) == prose, "ordinary lowercase/capitalized prose must be untouched"
+    m.assert_clean(prose)
+
+    # A real, capitalized ticker mention is still masked and still detected.
+    masked = m.mask_text("Shares of ON (NYSE: ON) rose; ALL and KEY lagged")
+    assert not any(_term in masked.split() for _term in ("ON", "ALL", "KEY")), masked
+    assert m.alias("ON") in masked
+    try:
+        m.assert_clean("ON rose")
+        raise AssertionError("an uppercase ticker leak must still be detected")
+    except LeakDetected:
+        pass
+    # Company names stay case-insensitive: headlines are not consistently cased.
+    assert m.alias("ON") in m.mask_text("on semiconductor raised guidance")
+    assert m.alias("ALL") in m.mask_text("ALLSTATE posts results")
+
+    # Contrast: the unchanged legacy scheme DOES corrupt this prose -- the
+    # documented limitation that is why the fixed-30 prototype opts in.
+    legacy = RunMasking({"ON": ["ON Semiconductor"]}, run_start=RUN_START, seed=5)
+    assert legacy.mask_text("Stop placed on support") != "Stop placed on support"
+
+
+def test_opaque_masking_keeps_the_real_headline_forms_masked_for_all_30():
+    names = _fixed30_names()
+    m = RunMasking(names, run_start=RUN_START, seed=42, alias_scheme="opaque")
+    for ticker, variants in names.items():
+        text = f"{variants[0]} ({ticker}) reported strong earnings"
+        masked = m.mask_text(text)
+        m.assert_clean(masked)
+        assert m.alias(ticker) in masked and ticker not in masked.split(), (ticker, masked)
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):

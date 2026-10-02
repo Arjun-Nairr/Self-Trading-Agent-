@@ -295,11 +295,16 @@ unapproved pending that decision.
     citations/provenance are retained on every passage; retrieval is
     cut off by the simulated date (no lookahead); the agent receives
     only the retrieved evidence, never unrestricted document access.
-  - Point-in-time dynamic candidate selector ("Laya"). Status `discussing`
-    — reopened 2026-09-29; the settled architecture and open questions live
-    in `docs/scopes/LAYA_SELECTOR_V1.md`, the single current scope/
-    discussion record. No implementation approved. See that file before
-    treating anything about Laya as decided.
+  - Fixed-30 Laya candidate-selector prototype. Status: approved phased
+    prototype — **Phase 1 (isolated foundation) implemented, not wired into
+    any run**: experimental universe config, identity-free numeric cards,
+    pinned local Laya adapter, deterministic top-10 selector + immutable
+    per-date snapshot, and an opt-in 30-name masking scheme. The fixed-10
+    baseline is unchanged and no evaluation has run. Next: experimental
+    selector wiring behind an opt-in flag. A dynamic, point-in-time
+    market-wide selector stays out of scope. Architecture, the committed
+    30-name list, and the open decisions live in
+    `docs/scopes/LAYA_SELECTOR_V1.md`.
   - Measurable technical-strategy library. Status `discussing` / `Later`.
     Evaluate a small number of objective swing-trading concepts (for
     example momentum, mean reversion, breakout, relative strength, or

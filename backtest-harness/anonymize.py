@@ -61,6 +61,7 @@ Three consequences, all real:
 # real name variants per ticker (yfinance longName + common shorthands).
 """
 
+import hashlib
 import random
 import re
 from datetime import date
@@ -72,6 +73,59 @@ _ALIAS_POOL = [
     "ALPHA", "BRAVO", "CHARLIE", "DELTA", "ECHO", "FOXTROT", "GOLF",
     "HOTEL", "INDIA", "JULIET", "KILO", "LIMA", "MIKE", "NOVEMBER",
 ]
+
+# Alias schemes (RunMasking's `alias_scheme`). "nato" is the original
+# 14-token scheme every existing run was frozen with -- unchanged, so a
+# resumed run reproduces the same mapping. "opaque" is the scale-safe scheme
+# for a larger fixed universe (Laya selector prototype, 30 names): see
+# _opaque_aliases and RunMasking's docstring.
+ALIAS_SCHEME_NATO = "nato"
+ALIAS_SCHEME_OPAQUE = "opaque"
+
+# Opaque-alias letters: no F/Q/Y, because "FY12" / "Q2" are exactly the
+# fiscal-period shapes _DATE_PATTERNS redacts -- an alias must survive
+# mask_text's own date pass.
+_OPAQUE_LETTERS = "BCDGHJKLMNPRSTVWXZ"
+
+
+def _opaque_aliases(
+    tickers: list[str], names: dict[str, list[str]], seed: int
+) -> dict[str, str]:
+    """Ticker -> alias like "KV42": two consonants + two digits.
+
+    Why this shape (vs. extending the NATO list): nearly every NATO token is
+    an ordinary English word ("Delta", "Echo", "Golf", "Mike", "India", ...)
+    that real prose already contains, so reading an alias back out of -- or
+    substituting one into -- ordinary text is ambiguous. A letters+digits
+    code is not a word, so it cannot collide with prose, and it carries no
+    sector/size/ordering hint.
+
+    Each alias is derived from (seed, ticker) by SHA-256, NOT by position in
+    a shuffled pool, so adding or removing a ticker never reshuffles the
+    others (the positional-zip defect the "nato" scheme has). Collisions --
+    two tickers hashing to one alias, or an alias equal to a ticker/name term
+    the masker strips -- are resolved deterministically by re-hashing with the
+    next attempt number, in sorted-ticker order.
+    """
+    reserved = {term.upper() for t in tickers for term in (t, *names[t])}
+    base = len(_OPAQUE_LETTERS)
+    used: set[str] = set()
+    out: dict[str, str] = {}
+    for ticker in sorted(tickers):
+        attempt = 0
+        while True:
+            digest = hashlib.sha256(f"{seed}|{ticker}|{attempt}".encode()).digest()
+            alias = (
+                _OPAQUE_LETTERS[digest[0] % base]
+                + _OPAQUE_LETTERS[digest[1] % base]
+                + f"{10 + int.from_bytes(digest[2:4], 'big') % 90}"
+            )
+            attempt += 1
+            if alias not in used and alias not in reserved:
+                break
+        used.add(alias)
+        out[ticker] = alias
+    return out
 
 # Date shapes that actually show up in financial news text.
 _DATE_PATTERNS = [
@@ -92,7 +146,7 @@ _DATE_REDACTED = "[DATE REDACTED]"
 _YEAR_REDACTED = "[YEAR REDACTED]"
 
 
-def _term_pattern(term: str) -> re.Pattern[str]:
+def _term_pattern(term: str, case_sensitive: bool = False) -> re.Pattern[str]:
     r"""Word-boundary-anchored matcher for a company name or ticker.
 
     `\b` only anchors next to a word character, so a term ending in
@@ -101,10 +155,19 @@ def _term_pattern(term: str) -> re.Pattern[str]:
     That silently left the longest name variant unmatched, so "Apple Inc."
     masked to "<ALIAS> Inc.", leaking the corporate suffix. Anchor only the
     ends that are actually alphanumeric.
+
+    `case_sensitive` is for TICKER terms under the "opaque" scheme: a real
+    ticker is written in capitals, but a ticker that is also an ordinary word
+    ("ON", "IT", "ALL") would otherwise be substituted inside plain prose
+    ("... on support", "it holds") and then trip assert_clean on innocent
+    text. Company names stay case-insensitive -- headlines are not
+    consistently cased.
     """
     prefix = r"\b" if term[:1].isalnum() else ""
     suffix = r"\b" if term[-1:].isalnum() else ""
-    return re.compile(rf"{prefix}{re.escape(term)}{suffix}", re.IGNORECASE)
+    return re.compile(
+        rf"{prefix}{re.escape(term)}{suffix}", 0 if case_sensitive else re.IGNORECASE
+    )
 
 
 class LeakDetected(AssertionError):
@@ -122,6 +185,18 @@ class RunMasking:
     Stable *within* a run so Hermes can track its own positions across
     cycles ("still holding BRAVO"); reshuffled *between* runs (different
     `seed`) so a mapping can't be learned across runs.
+
+    `alias_scheme` ("nato" by default -- byte-for-byte the original
+    behavior, capped at 14 tickers) or "opaque" (any universe size; hashed
+    "KV42"-style aliases that cannot collide with ordinary words, and
+    case-sensitive ticker matching so a ticker that is also a common word
+    does not corrupt prose). The fixed-10 baseline uses "nato"; only the
+    experimental fixed-30 selector prototype opts into "opaque".
+
+    Known trade-off of "opaque": a ticker leaked in lowercase ("oln") is no
+    longer caught by assert_clean, and an ALL-CAPS ordinary word that equals a
+    ticker still masks. Company names stay case-insensitive and the universe
+    avoids word-like added tickers; the detection layer remains the backstop.
     """
 
     def __init__(
@@ -129,33 +204,43 @@ class RunMasking:
         names: dict[str, Iterable[str]],
         run_start: date,
         seed: int = 0,
+        alias_scheme: str = ALIAS_SCHEME_NATO,
     ) -> None:
         """`names` maps each real ticker to its name variants to scrub, e.g.
         {"AAPL": ["Apple Inc.", "Apple"]}. `run_start` is day 1 of the
         simulated window (what relative day indices count from)."""
+        if alias_scheme not in (ALIAS_SCHEME_NATO, ALIAS_SCHEME_OPAQUE):
+            raise ValueError(f"unknown alias_scheme {alias_scheme!r}")
         tickers = sorted(names)
-        if len(tickers) > len(_ALIAS_POOL):
-            raise ValueError(
-                f"{len(tickers)} tickers exceeds the {len(_ALIAS_POOL)}-alias "
-                "pool; extend _ALIAS_POOL"
-            )
-        pool = list(_ALIAS_POOL)
-        random.Random(seed).shuffle(pool)
-
         self._names = {t: list(v) for t, v in names.items()}
-        self._to_alias = dict(zip(tickers, pool))
+        self._case_sensitive_tickers = alias_scheme == ALIAS_SCHEME_OPAQUE
+        if alias_scheme == ALIAS_SCHEME_OPAQUE:
+            self._to_alias = _opaque_aliases(tickers, self._names, seed)
+        else:
+            if len(tickers) > len(_ALIAS_POOL):
+                raise ValueError(
+                    f"{len(tickers)} tickers exceeds the {len(_ALIAS_POOL)}-alias "
+                    f"'nato' pool; pass alias_scheme={ALIAS_SCHEME_OPAQUE!r} for a "
+                    "larger universe"
+                )
+            pool = list(_ALIAS_POOL)
+            random.Random(seed).shuffle(pool)
+            self._to_alias = dict(zip(tickers, pool))
         self._to_real = {a: t for t, a in self._to_alias.items()}
         self._run_start = run_start
 
         # Longest-first so "Apple Inc." is consumed before the bare "Apple"
         # inside it, which would otherwise leave a dangling " Inc." behind.
         self._patterns = [
-            (_term_pattern(term), ticker)
+            (_term_pattern(term, self._is_case_sensitive(term, ticker)), ticker)
             for ticker in tickers
             for term in sorted(
                 [ticker, *self._names[ticker]], key=len, reverse=True
             )
         ]
+
+    def _is_case_sensitive(self, term: str, ticker: str) -> bool:
+        return self._case_sensitive_tickers and term == ticker
 
     # -- identity ---------------------------------------------------------
 
@@ -264,7 +349,7 @@ class RunMasking:
         blob = "\n".join(_strings(payload))
         for ticker, variants in self._names.items():
             for term in (ticker, *variants):
-                if _term_pattern(term).search(blob):
+                if _term_pattern(term, self._is_case_sensitive(term, ticker)).search(blob):
                     raise LeakDetected(
                         f"real identifier {term!r} survived masking in: "
                         f"{blob[:200]}"
