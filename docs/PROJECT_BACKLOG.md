@@ -286,6 +286,8 @@ unapproved pending that decision.
   - Broader dynamic opportunity screening beyond the fixed watchlist.
     Status `discussing`. Prerequisite: avoid hard-coded "safe"
     tickers, survivorship bias, and uncontrolled universe churn.
+    Discussion-stage scope (live/current-universe only, design only — not
+    approved, not built): `docs/scopes/SCALABLE_SCREENER_V1.md`.
   - RAG-backed filing/document retrieval. Status `deferred`. What it is:
     retrieval of the relevant *passages* from a large, point-in-time-
     gated corpus of raw SEC filings, earnings materials, and later news
