@@ -19,6 +19,10 @@ cycle_checkpoint.json
 # retry path -- diagnosis aid only, never Neon/dashboard/committed source.
 backtest-harness/.diagnostics/
 
+# Experimental Laya selector (Phase 2): private per-run selection snapshots and
+# the local Laya worker log -- runtime artifacts, never committed.
+backtest-harness/.selector_snapshots/
+
 # Machine-readable raw output of the human-only offline diagnostics
 # (geometry_scan.py / counterfactual.py / benchmark_sensitivity.py) --
 # regenerate by re-running the script, never the source of truth itself

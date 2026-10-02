@@ -193,10 +193,16 @@ class RunMasking:
     does not corrupt prose). The fixed-10 baseline uses "nato"; only the
     experimental fixed-30 selector prototype opts into "opaque".
 
-    Known trade-off of "opaque": a ticker leaked in lowercase ("oln") is no
-    longer caught by assert_clean, and an ALL-CAPS ordinary word that equals a
-    ticker still masks. Company names stay case-insensitive and the universe
-    avoids word-like added tickers; the detection layer remains the backstop.
+    Ticker case rules under "opaque", via `word_like_tickers`:
+      - None (default): EVERY ticker is matched case-sensitively (the safe
+        choice for prose; a lowercase ticker leak would NOT be caught).
+      - an iterable of tickers: only those are case-sensitive (their
+        lowercase form is an ordinary word/name, e.g. "dino", "ryan"); every
+        OTHER ticker is matched case-insensitively in both mask_text and
+        assert_clean, so a lowercase leak ("oln") is masked/detected without
+        corrupting prose. The fixed-30 experiment passes its declared set.
+    Company names always stay case-insensitive. An ALL-CAPS ordinary word that
+    equals a ticker still masks; the detection layer remains the backstop.
     """
 
     def __init__(
@@ -205,6 +211,7 @@ class RunMasking:
         run_start: date,
         seed: int = 0,
         alias_scheme: str = ALIAS_SCHEME_NATO,
+        word_like_tickers: Iterable[str] | None = None,
     ) -> None:
         """`names` maps each real ticker to its name variants to scrub, e.g.
         {"AAPL": ["Apple Inc.", "Apple"]}. `run_start` is day 1 of the
@@ -214,6 +221,14 @@ class RunMasking:
         tickers = sorted(names)
         self._names = {t: list(v) for t, v in names.items()}
         self._case_sensitive_tickers = alias_scheme == ALIAS_SCHEME_OPAQUE
+        # None -> all tickers case-sensitive (opaque only); else just these.
+        self._word_like = None if word_like_tickers is None else frozenset(word_like_tickers)
+        if self._word_like is not None:
+            if alias_scheme != ALIAS_SCHEME_OPAQUE:
+                raise ValueError("word_like_tickers requires alias_scheme='opaque'")
+            unknown = sorted(self._word_like - set(tickers))
+            if unknown:
+                raise ValueError(f"word_like_tickers not in names: {unknown}")
         if alias_scheme == ALIAS_SCHEME_OPAQUE:
             self._to_alias = _opaque_aliases(tickers, self._names, seed)
         else:
@@ -239,8 +254,16 @@ class RunMasking:
             )
         ]
 
+    @property
+    def word_like_tickers(self) -> tuple[str, ...] | None:
+        """The declared case-sensitive ticker set (opaque scheme), sorted, or
+        None when every ticker is case-sensitive / the scheme is "nato"."""
+        return None if self._word_like is None else tuple(sorted(self._word_like))
+
     def _is_case_sensitive(self, term: str, ticker: str) -> bool:
-        return self._case_sensitive_tickers and term == ticker
+        if not (self._case_sensitive_tickers and term == ticker):
+            return False
+        return self._word_like is None or ticker in self._word_like
 
     # -- identity ---------------------------------------------------------
 

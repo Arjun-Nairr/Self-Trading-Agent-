@@ -93,6 +93,25 @@ def test_universe_hash_is_stable_and_sensitive_to_content(tmp_path):
     assert load_universe(p).hash != u.hash
 
 
+def test_universe_exposes_word_like_tickers_and_brands_and_hashes_them(tmp_path):
+    u = load_universe()
+    assert u.word_like_tickers == ("CF", "DINO", "RYAN")
+    assert {m.symbol for m in u.members if m.brands} >= {"LYV", "OMC", "CHD", "ROL"}
+    raw = json.loads(ls.UNIVERSE_PATH.read_text(encoding="utf-8"))
+    for mutate in (lambda r: r["tickers"][10].update(brands=["Different"]),
+                   lambda r: r.update(word_like_tickers=["DINO"])):
+        r2 = json.loads(json.dumps(raw))
+        mutate(r2)
+        p = tmp_path / "u.json"
+        p.write_text(json.dumps(r2), encoding="utf-8")
+        assert load_universe(p).hash != u.hash, "masking-relevant config must change the universe hash"
+    raw["word_like_tickers"] = ["NOPE"]
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="word_like_tickers"):
+        load_universe(p)
+
+
 @pytest.mark.parametrize("mutate,msg", [
     (lambda r: r.update(experimental=False), "experimental"),
     (lambda r: r["tickers"].append(dict(r["tickers"][0])), "duplicate|expected_count"),
@@ -108,18 +127,26 @@ def test_universe_loader_fails_loudly_on_bad_config(tmp_path, mutate, msg):
         load_universe(p)
 
 
-def test_baseline_loaders_do_not_reference_the_experimental_file():
-    """Default/baseline path isolation: no non-test source file outside the new
-    modules mentions the experimental universe or the selector."""
+def test_default_path_never_imports_the_selector_at_module_level():
+    """Default/baseline path isolation: no non-test source file imports the
+    selector/adapter/worker modules at module level (run_backtest.py imports
+    them lazily, inside the opt-in experimental branch only), and nothing but
+    the experimental wiring references the experimental universe file."""
+    import re
     repo = ls.REPO
-    offenders = []
+    importers, referencers = [], []
     for path in list(repo.glob("*/*.py")) + list(repo.glob("*.py")):
         if "maverick-mcp" in str(path) or path.name.startswith(("test_", "laya_")):
             continue
         text = path.read_text(encoding="utf-8", errors="replace")
-        if "experimental_fixed30" in text or "laya_selector" in text or "laya_adapter" in text:
-            offenders.append(str(path.relative_to(repo)))
-    assert offenders == [], f"baseline code must not import/reference the selector: {offenders}"
+        if re.search(r"^(import|from)\s+laya", text, re.M):
+            importers.append(str(path.relative_to(repo)))
+        if "experimental_fixed30" in text:
+            referencers.append(str(path.relative_to(repo)))
+    assert importers == [], f"module-level selector import in default-path code: {importers}"
+    # run_backtest.py names the file in its opt-in help text/comments only.
+    assert [Path(r).name for r in referencers] == ["run_backtest.py"], (
+        f"unexpected reference to the experimental universe: {referencers}")
 
 
 # -- 2. card contract --------------------------------------------------------
@@ -385,14 +412,87 @@ def test_identical_retry_is_an_idempotent_noop_and_other_runs_are_independent(tm
     assert [f.name for f in p1.parent.iterdir()] == ["2024-03-15.json"], "no temp files left behind"
 
 
-def test_write_is_atomic_a_failed_replace_leaves_nothing_behind(tmp_path, monkeypatch):
+def test_write_is_atomic_a_failed_publish_leaves_nothing_behind(tmp_path, monkeypatch):
     def boom(src, dst):
         raise OSError("disk gone")
-    monkeypatch.setattr(os, "replace", boom)
+    monkeypatch.setattr(os, "link", boom)
     with pytest.raises(OSError, match="disk gone"):
         write_snapshot(tmp_path, "run-1", _snapshot())
     assert list((tmp_path / "run-1").iterdir()) == []
     assert load_snapshot(tmp_path, "run-1", "2024-03-15") is None
+
+
+def test_concurrent_writers_of_different_snapshots_cannot_overwrite_the_original(tmp_path):
+    """The race the first implementation had: check-then-os.replace let two
+    writers each see "no file yet" and the last one win. Publication is now an
+    exclusive link, so exactly ONE content wins and every other differing
+    writer gets SnapshotConflict; the winner is never altered."""
+    import threading
+    writers = 12
+    snaps = [_snapshot(seed=SEED + i) for i in range(writers)]
+    barrier = threading.Barrier(writers)
+    results = [None] * writers
+
+    def work(i):
+        barrier.wait()
+        try:
+            write_snapshot(tmp_path, "race", snaps[i])
+            results[i] = "won"
+        except SnapshotConflict:
+            results[i] = "conflict"
+
+    threads = [threading.Thread(target=work, args=(i,)) for i in range(writers)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert results.count("won") == 1 and results.count("conflict") == writers - 1, results
+    winner = snaps[results.index("won")]
+    stored = (tmp_path / "race" / "2024-03-15.json").read_text(encoding="utf-8")
+    assert stored == snapshot_to_json(winner)
+    assert [f.name for f in (tmp_path / "race").iterdir()] == ["2024-03-15.json"], "no temp files left"
+
+
+def test_concurrent_writers_of_the_identical_snapshot_all_succeed(tmp_path):
+    import threading
+    snap = _snapshot()
+    barrier = threading.Barrier(8)
+    errors = []
+
+    def work():
+        barrier.wait()
+        try:
+            write_snapshot(tmp_path, "same", snap)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    threads = [threading.Thread(target=work) for _ in range(8)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert errors == []
+    assert (tmp_path / "same" / "2024-03-15.json").read_text(encoding="utf-8") == snapshot_to_json(snap)
+
+
+def test_a_reader_never_sees_a_partial_snapshot_during_concurrent_writes(tmp_path):
+    import threading
+    stop = threading.Event()
+    bad = []
+
+    def reader():
+        while not stop.is_set():
+            try:
+                load_snapshot(tmp_path, "r", "2024-03-15")
+            except Exception as exc:  # a half-written file would raise JSONDecodeError here
+                bad.append(exc)
+
+    t = threading.Thread(target=reader)
+    t.start()
+    for i in range(40):
+        try:
+            write_snapshot(tmp_path, "r" if i == 0 else f"r{i}", _snapshot())
+        except SnapshotConflict:
+            pass
+    stop.set()
+    t.join()
+    assert bad == []
 
 
 def test_unsupported_schema_version_and_unsafe_run_id_are_rejected(tmp_path):

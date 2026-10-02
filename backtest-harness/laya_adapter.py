@@ -83,6 +83,16 @@ def _settings_json() -> str:
     )
 
 
+def expected_metadata() -> ScorerMetadata:
+    """The scorer identity every selection snapshot must carry, built from the
+    pins alone (no model load) -- so a controller can validate a stored
+    snapshot, or the worker's handshake, without importing laya or torch."""
+    return ScorerMetadata(
+        provider="laya", package_version=LAYA_PACKAGE_VERSION, checkpoint=LAYA_MODEL_ID,
+        revision=LAYA_REVISION, question=REVIEW_QUESTION, settings=_settings_json(),
+    )
+
+
 class LayaScorer:
     """CardScorer backed by Laya's batched structured decisions.
 

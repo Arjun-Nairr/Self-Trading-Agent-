@@ -70,6 +70,9 @@ class UniverseMember:
     sector: str
     name: str
     group: str  # "baseline" (also in watchlist.json) or "added"
+    # Extra masking terms (brands/subsidiaries/shorthand) beyond the name
+    # variants derived from `name` -- best-effort, never claimed complete.
+    brands: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -77,18 +80,29 @@ class FixedUniverse:
     version: str
     members: tuple[UniverseMember, ...]
     hash: str
+    # Tickers whose lowercase/mixed-case form is an ordinary word or name
+    # ("dino", "ryan", "cf."): RunMasking matches these case-sensitively so
+    # prose is not corrupted. Every other ticker is matched case-insensitively
+    # so a lowercase ticker leak is detected.
+    word_like_tickers: tuple[str, ...] = ()
 
     @property
     def symbols(self) -> tuple[str, ...]:
         return tuple(m.symbol for m in self.members)
 
 
-def universe_hash(members: Sequence[UniverseMember]) -> str:
-    """SHA-256 over the canonical (symbol, sector, name) list, sorted by
-    symbol -- independent of file key order/whitespace, and of `group`
-    (a label, not identity). Any change to a symbol/sector/name changes it."""
+def universe_hash(
+    members: Sequence[UniverseMember], word_like_tickers: Sequence[str] = ()
+) -> str:
+    """SHA-256 over the canonical (symbol, sector, name, sorted brands) list,
+    sorted by symbol, plus the sorted word-like-ticker list -- independent of
+    file key order/whitespace and of `group` (a label, not identity). Any
+    change to a symbol/sector/name/brand/masking-case rule changes it."""
     canon = json.dumps(
-        sorted([m.symbol, m.sector, m.name] for m in members),
+        [
+            sorted([m.symbol, m.sector, m.name, sorted(m.brands)] for m in members),
+            sorted(word_like_tickers),
+        ],
         separators=(",", ":"), ensure_ascii=True,
     )
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
@@ -106,6 +120,7 @@ def load_universe(path: Path = UNIVERSE_PATH) -> FixedUniverse:
         UniverseMember(
             symbol=str(t["symbol"]), sector=str(t["sector"]),
             name=str(t["name"]), group=str(t["group"]),
+            brands=tuple(str(b) for b in t.get("brands", ())),
         )
         for t in raw["tickers"]
     )
@@ -119,8 +134,12 @@ def load_universe(path: Path = UNIVERSE_PATH) -> FixedUniverse:
     bad = [m.symbol for m in members if m.group not in ("baseline", "added")]
     if bad:
         raise ValueError(f"{path}: unknown group for {bad}")
+    word_like = tuple(str(x) for x in raw.get("word_like_tickers", ()))
+    unknown = [x for x in word_like if x not in symbols]
+    if unknown:
+        raise ValueError(f"{path}: word_like_tickers not in universe: {unknown}")
     return FixedUniverse(version=str(raw["version"]), members=members,
-                         hash=universe_hash(members))
+                         hash=universe_hash(members, word_like), word_like_tickers=word_like)
 
 
 # --------------------------------------------------------------------------
@@ -521,15 +540,21 @@ def snapshot_path(base_dir: Path, run_id: str, as_of: str) -> Path:
 
 
 def write_snapshot(base_dir: Path, run_id: str, snap: SelectionSnapshot) -> Path:
-    """Atomic (temp file + os.replace, same directory) and immutable per
-    (run_id, as_of). A retry that rebuilds the identical snapshot is a no-op
-    that returns the existing path. A DIFFERENT snapshot for the same date --
-    changed inputs, scores, seed, universe, or scorer -- raises
-    SnapshotConflict instead of replacing the stored one; the existing file
-    stays untouched so the original selection remains the record."""
+    """Atomic AND exclusive: the first writer for a (run_id, as_of) wins and
+    nobody can ever replace it. The content is written to a temp file, then
+    published with `os.link` -- an atomic create-if-absent that fails with
+    FileExistsError if another writer got there first (os.replace would
+    silently overwrite, which is the race this closes). A retry that rebuilds
+    the IDENTICAL snapshot is a no-op returning the existing path; a
+    DIFFERENT snapshot for the same date -- changed inputs, scores, seed,
+    universe, or scorer, whether from a later retry or a concurrent writer --
+    raises SnapshotConflict and leaves the stored file untouched, so the
+    original selection stays the record. A reader never sees a partial
+    file: the link exposes only fully written content."""
     path = snapshot_path(base_dir, run_id, snap.as_of)
     text = snapshot_to_json(snap)
-    if path.exists():
+
+    def _check_existing() -> Path:
         existing = path.read_text(encoding="utf-8")
         if existing == text:
             return path
@@ -539,6 +564,9 @@ def write_snapshot(base_dir: Path, run_id: str, snap: SelectionSnapshot) -> Path
             f"(stored inputs_digest {old.inputs_digest[:12]}, new {snap.inputs_digest[:12]}); "
             "snapshots are immutable per date"
         )
+
+    if path.exists():
+        return _check_existing()
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=".selection_", suffix=".tmp")
     try:
@@ -546,14 +574,16 @@ def write_snapshot(base_dir: Path, run_id: str, snap: SelectionSnapshot) -> Path
             f.write(text)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(tmp, path)
-    except BaseException:
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return _check_existing()
+        return path
+    finally:
         try:
             os.unlink(tmp)
         except OSError:
             pass
-        raise
-    return path
 
 
 def load_snapshot(base_dir: Path, run_id: str, as_of: str) -> SelectionSnapshot | None:

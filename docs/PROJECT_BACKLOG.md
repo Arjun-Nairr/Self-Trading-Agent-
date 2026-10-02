@@ -296,15 +296,16 @@ unapproved pending that decision.
     cut off by the simulated date (no lookahead); the agent receives
     only the retrieved evidence, never unrestricted document access.
   - Fixed-30 Laya candidate-selector prototype. Status: approved phased
-    prototype — **Phase 1 (isolated foundation) implemented, not wired into
-    any run**: experimental universe config, identity-free numeric cards,
-    pinned local Laya adapter, deterministic top-10 selector + immutable
-    per-date snapshot, and an opt-in 30-name masking scheme. The fixed-10
-    baseline is unchanged and no evaluation has run. Next: experimental
-    selector wiring behind an opt-in flag. A dynamic, point-in-time
-    market-wide selector stays out of scope. Architecture, the committed
-    30-name list, and the open decisions live in
-    `docs/scopes/LAYA_SELECTOR_V1.md`.
+    prototype — **Phase 1 (foundation) and Phase 2 (strictly opt-in
+    experimental wiring behind `--selector-mode laya_fixed30_experimental`)
+    implemented; no selector evaluation or activation completed.** The
+    default (`off`) fixed-10 path, rules, risk limits, Neon schema, and
+    dashboard are unchanged. Still open: the 30-symbol coverage preflight has
+    not yet been run on real data (Docker was down), and the next and only
+    next block is a controlled Laya-vs-random-vs-deterministic selector
+    evaluation. A dynamic, point-in-time market-wide selector stays out of
+    scope. Architecture, the committed 30-name list, and open decisions live
+    in `docs/scopes/LAYA_SELECTOR_V1.md`.
   - Measurable technical-strategy library. Status `discussing` / `Later`.
     Evaluate a small number of objective swing-trading concepts (for
     example momentum, mean reversion, breakout, relative strength, or

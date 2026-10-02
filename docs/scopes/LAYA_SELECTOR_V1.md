@@ -1,14 +1,17 @@
 # Laya candidate-selector — scope v1
 
-**status: approved phased prototype — Phase 1 (isolated foundation) implemented; selector NOT wired into any run**
+**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; no selector evaluation or activation has happened**
 
 This is the single current scope record for the Laya candidate-selector
 prototype. It records the fixed-universe experiment approved for phased
 implementation and the gates that must pass before it can influence trading.
-Phase 1 (the isolated foundation — see "Phase 1 — implemented" below) is
-built and tested, but the selector is **not wired into any backtest, Hermes
-prompt, risk check, or live path**, no run has used it, and no performance
-claim is made. No rules, schema, dashboard, or baseline change accompanies it.
+Phase 1 (the isolated foundation) and Phase 2 (strictly opt-in wiring into
+the experimental backtest path — see the two "implemented" sections below)
+are built and tested. With `--selector-mode` omitted (`off`, the default) the
+backtest is unchanged. **No run has used the selector, no selector evaluation
+has been done, nothing is activated, and no performance claim is made.** No
+rules, risk-limit, schema, dashboard, Docker, or baseline change accompanies
+either phase.
 
 This supersedes `docs/PROJECT_BACKLOG.md` §2's now-outdated cancellation
 line. It does **not** reopen a dynamic market-wide selector: that larger
@@ -138,9 +141,12 @@ selector experiment before activation; it is not merely harmless plumbing.
 Config: `watchlist/experimental_fixed30.json` (`fixed30-v1`, flagged
 `experimental`). It is a separate file from the baseline
 `watchlist/watchlist.json`, which is untouched and still exactly the fixed
-10; nothing in the default backtest, live path, risk checker, or Docker mount
-reads the new file. `universe_hash` (SHA-256 over the sorted
-symbol/sector/name triples) is recorded in every selection snapshot.
+10; nothing in the default (`off`) backtest, live path, risk checker, or
+Docker mount reads the new file — only the Phase 2 opt-in mode does.
+`universe_hash` (SHA-256 over the sorted symbol/sector/name/brand triples and
+the word-like-ticker list) is recorded in every selection snapshot. The config
+also carries best-effort extra masking `brands` for some names and a
+`word_like_tickers` list (`CF`, `DINO`, `RYAN`) for the masker's case rules.
 
 | Sector | Baseline (kept) | Added |
 |---|---|---|
@@ -174,7 +180,7 @@ before any run. The list is chosen with present-day knowledge, so it is
 survivorship-biased for historical windows exactly as the baseline is; every
 result must be labelled a fixed-universe prototype result.
 
-### Components (all new, all unwired)
+### Components (Phase 1 — wired into a run only by Phase 2's opt-in mode)
 
 - `backtest-harness/laya_selector.py` — universe loader/validator + hash;
   `CandidateCard` (exactly: opaque row ID, 5-day return, SMA-20 distance,
@@ -220,36 +226,143 @@ quality, calibration, or usefulness on real cards; Laya reports `noul` to four
 decimals (exact ties are possible and handled by the seeded tie-break) and its
 checkpoint is documented as over-confident as shipped.
 
-### Remaining before experimental wiring (Phase 2)
+### Remaining after Phase 1 (status as of Phase 2)
 
-1. Verify the 20 added names against the baseline screen criteria and news
-   coverage (above).
-2. Build real cards from the existing point-in-time technicals path (no card
-   producer exists yet — Phase 1 takes prepared numbers only) and decide the
-   exact normalized-MACD and relative-volume formulas.
-3. Opt-in flag in the backtest controller; `not_selected` candidate status;
-   fetch full evidence only for the selected pool; mask with
-   `alias_scheme="opaque"`; checkpoint the day's selection before use and
-   replay it on retry; held / pending exclusion; decide the fail-closed
-   fallback.
-4. Redefine what "watchlist" means to the risk checker for the experiment
-   (frozen 30 vs. the day's pool) — a rules-level decision for Arjun.
-5. Private Neon selector evidence (additive) — nothing has been written to
-   Neon.
-6. Pre-registered control arms (random-10, simple deterministic top-10) and a
-   shadow evaluation of the Laya scores before any activation.
+Done in Phase 2: the real card producer, the opt-in flag, `not_selected`
+status, selected-only evidence fetches, opaque masking, snapshot replay,
+held/pending exclusion, and the fail-closed fallback. Still open: verifying the
+20 added names against the screen criteria and news coverage (preflight
+command exists, not yet run against real data); Neon selector evidence;
+pre-registered control arms and a shadow evaluation before any activation.
+
+---
+
+## Phase 2 — implemented (opt-in experimental wiring; no evaluation, no activation)
+
+### How to turn it on (and why nothing else can)
+
+```
+python backtest-harness/run_backtest.py --run-kind smoke \
+    --selector-mode laya_fixed30_experimental \
+    --laya-python <laya-venv>/python --laya-checkpoint <provisioned checkpoint dir> ...
+```
+
+`--selector-mode` defaults to `off` and is never read from the environment, a
+manifest, Docker, or the dashboard. On a fresh run it must be passed
+explicitly; a resumed run keeps its stored mode and a conflicting request
+fails closed; `--laya-python` / `--laya-checkpoint` are rejected unless the
+experimental mode is selected. The selector modules are imported lazily inside
+the opt-in branch, so the default path never imports them, torch, or laya.
+Experimental runs record `selector_mode`, the universe hash, and the declared
+word-like-ticker set in `backtest_state.json` (those keys exist only in
+experimental runs); a changed universe file fails a resume.
+
+### What the experimental mode does each day
+
+1. **Universe/config.** Loads only `watchlist/experimental_fixed30.json` (never
+   `watchlist.json`); the 30 names become the run's frozen watchlist snapshot
+   — so the risk checker's watchlist membership is simply the frozen
+   universe, exactly as for the fixed-10 baseline. No rule or limit changes.
+2. **Eligibility.** Names already held (or with an unresolved pending entry)
+   are excluded from new-entry selection. They keep their own independent
+   technicals/news fetch and appear in Hermes' position list, so exit
+   management never depends on the selector.
+3. **Cards.** For each remaining name, the exact eight-field card is built from
+   daily OHLCV through the simulated date, read from maverick's existing
+   smart-cache price source (the one `fetch_technicals` uses). Every bar after
+   the date is dropped on the host; a card whose as-of bar is missing is stale;
+   missing/short/degenerate history makes the card `data_unavailable`, never a
+   technical rejection. Formulas (`laya_cards.py`): 5-day return = c[t]/c[t-5]-1;
+   SMA-20 distance = c[t]/SMA20-1; Wilder RSI-14; MACD direction =
+   tanh(histogram / close / 0.005) with MACD(12,26,9); relative volume = v[t] /
+   mean of the 20 prior volumes; realized volatility = stdev of the last 20
+   daily log returns x sqrt(252); 20-day range position = (c-low20)/(high20-low20).
+   At least 40 usable bars are required.
+4. **Scoring — one private local worker.** The controller process never loads
+   Laya. It starts `laya_worker.py` once, lazily, under the *separate* Laya
+   virtualenv's python, and talks to it over that child's own stdin/stdout
+   pipes — no port, no HTTP, no public endpoint. The worker loads the pinned
+   checkpoint once (package version, repo commit, and weight SHA-256 verified;
+   local directory; CPU), blocks all network access, runs with a scrubbed
+   environment (no API keys/DB URLs), and exits when the controller does. Each
+   day's eligible cards go in **one batched request** (never a call per card).
+   The handshake must match the pinned scorer or the day fails closed.
+5. **Selection.** The existing deterministic top-10: descending
+   `review_probability`, seeded row-ID-hash tie-break, no exploration.
+   `review_probability` means only "worth full review"; no threshold, and
+   `answer_confidence` is logged only.
+6. **Immutable per-date snapshot.** Written to the git-ignored
+   `backtest-harness/.selector_snapshots/<run_id>/<date>.json`. A retry or
+   replay of a date that already has a valid snapshot **reuses it — no
+   re-scoring, no history fetch, the model is not even started** — after
+   validating universe hash, seed, scorer pins, k, and the eligible set. The
+   Phase 1 write race is fixed: publication is an exclusive atomic link, so two
+   writers can never replace each other's content (`SnapshotConflict`; the
+   first writer wins; an identical rewrite is a no-op).
+7. **Full evidence only for the selected pool.** Technicals and news are fetched
+   only for the selected names plus held names. Hermes receives only those
+   masked candidates — never Laya scores, ranks, probabilities, confidences, or
+   row IDs. Candidate status in the private cycle evidence is now explicit:
+   `not_selected`, `selector_data_unavailable`, `selector_unavailable`
+   (whole-day failure), distinct from `technical_fetch_error`.
+8. **Explicit entry boundary.** For experimental new entries, only that day's
+   selected names may be bought — a separate "selector boundary" check, not a
+   risk-rule change.
+9. **Masking.** One private `alias_scheme="opaque"` mapping over all 30 names for
+   the whole run. Tickers that are ordinary words/names (`CF`, `DINO`, `RYAN`,
+   declared in the universe config) stay case-sensitive; every other ticker is
+   matched case-insensitively, so a lowercase leak (`oln`) is now masked and, if
+   it slips through, caught by `assert_clean` before the packet reaches Hermes —
+   without corrupting ordinary prose. Best-effort extra brand terms
+   (Ticketmaster, Orkin, ...) are frozen into the run's watchlist snapshot; they
+   are not a complete list, and the known masking ceiling in `anonymize.py`
+   still applies.
+10. **Fail closed, new entries only.** If history fetch, card building, the worker,
+    scoring, or snapshot replay fails, that day has an empty pool and a run-local
+    `failed_closed` selector event with the reason (printed as a `SELECTOR` line
+    and kept in the cycle checkpoint; no Neon write). Hermes is still called,
+    held-position exits are unaffected, and the next day is independent.
+
+### Coverage preflight
+
+`python backtest-harness/laya_preflight.py --start <date> --end <date>` reports
+PASS/FAIL per symbol for daily-price availability (a bar on every expected
+trading day, enough warm-up history, no malformed bars) and the existing news
+criterion (`check_news_coverage.py`: at least 6 articles across three 14-day
+probes, complete pagination). Read-only; exit 0 = all pass, 1 = a failure, 2 =
+containers unreachable (nothing verified). **It has not yet been run against the
+real data: the Docker daemon was not running when Phase 2 was built**, so the 20
+added names remain unverified (see the Phase 1 caveat).
+
+### Verified, and what is not
+
+Unit and integration tests drive the real `run_day()` with only I/O mocked and a
+deterministic fake scorer; a separate end-to-end check ran the controller →
+private worker (real pinned Laya, network blocked) → snapshot → replay on
+synthetic bars (no market data, no run). Not done: any real-data card run, any
+selector evaluation, calibration or benchmarking of Laya on real cards, Neon
+selector evidence, a risk-semantics decision beyond the explicit entry
+boundary above, or activation.
+
+### Caveat for the evaluation phase
+
+The masked `RULES.md` block that is part of every prompt still contains the
+baseline 10-name watchlist table (as masked aliases) and talks about a 10-name
+watchlist. That is unchanged rules text (rules were out of scope) but it means
+Hermes sees ten masked rows that are not necessarily today's pool; revisit
+before a controlled evaluation.
 
 ---
 
 ## Build and test phases
 
-1. **Foundation — no trading-path change. ✅ Phase 1 implemented (see above).** Build the fixed-30 configuration,
+1. **Foundation — no trading-path change. ✅ Phase 1 implemented.** Build the fixed-30 configuration,
    numeric-card builder, local pinned Laya adapter, `decide_batch` call,
    deterministic top-10 ranking, and immutable per-date selection snapshot.
    Unit tests prove card shape, identity exclusion, fewer-than-ten behavior,
    retry replay, held/pending exclusion, deterministic ties, and Laya failure
    handling. Hermes, risk, execution, and existing baselines remain untouched.
-2. **Selector wiring — new experimental path only.** Expand the backtest
+2. **Selector wiring — new experimental path only. ✅ Phase 2 implemented (opt-in, unevaluated).** Expand the backtest
    masker safely from 14 to at least 30 aliases; add an explicit
    `not_selected` candidate status; fetch full evidence only for the selected
    up-to-10 pool; and pass that masked pool to Hermes. Existing fixed-10
@@ -299,8 +412,8 @@ unilaterally, and not implied answers anywhere above.
 
 ## Explicitly not started
 
-Selector wiring into any run, real-card production, Neon selector evidence, a
-rules change, any change to `watchlist/watchlist.json`, any backtest or
-evaluation run, calibration/benchmarking of Laya on real cards, and dashboard
-work. Phase 1 added code, tests, one config file, and one optional
-requirements file only.
+Any selector evaluation or controlled comparison, any backtest/training/
+smoke/live-paper run using the selector, running the coverage preflight on
+real data, calibration/benchmarking of Laya on real cards, Neon selector
+evidence, a rules or risk-limit change, any change to
+`watchlist/watchlist.json`, activation, and dashboard work.

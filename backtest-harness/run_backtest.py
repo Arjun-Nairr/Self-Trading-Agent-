@@ -1625,6 +1625,116 @@ def _resolve_fundamentals_enabled(is_resume: bool, stored: bool | None, requeste
     )
 
 
+# -- Experimental fixed-30 Laya selector (opt-in; docs/scopes/LAYA_SELECTOR_V1.md)
+# Everything below is inert unless `--selector-mode laya_fixed30_experimental`
+# is passed. The modules are imported lazily, inside these functions, so the
+# default (selector-off) path never imports them, torch, or laya.
+SELECTOR_MODE_OFF = "off"
+SELECTOR_MODE_LAYA_FIXED30 = "laya_fixed30_experimental"
+_ACTIVE_SELECTOR = None  # the run's SelectorContext, closed by main()'s finally
+
+
+def _resolve_selector_mode(is_resume: bool, stored: str | None, requested: str | None) -> str:
+    """Durable per-run selector-mode invariant -- same discipline as
+    _resolve_fundamentals_enabled. The default is `off` and is NEVER derived
+    from the environment, a manifest, Docker, or the dashboard: only an
+    explicit --selector-mode on a FRESH run turns the experiment on. A
+    resumed run reuses its stored mode; a legacy state file (no stored mode)
+    is `off`; an explicit conflicting request fails closed before any fetch,
+    prompt, journal write, or state mutation."""
+    if not is_resume:
+        return requested or SELECTOR_MODE_OFF
+    effective = stored or SELECTOR_MODE_OFF
+    if requested is None or requested == effective:
+        return effective
+    raise SystemExit(
+        f"--selector-mode {requested!r} conflicts with this run's stored selector mode "
+        f"({effective!r}{' -- legacy state, no stored mode' if stored is None else ''}) in "
+        f"{STATE_PATH.name} -- a resumed run must keep its selector mode; changing it "
+        "mid-run would silently change which names Hermes is shown. Use --reset to "
+        "start a genuinely new run instead."
+    )
+
+
+def _experimental_watchlist_entries(universe) -> list[dict]:
+    """The frozen per-run watchlist snapshot for the fixed-30 experiment:
+    symbol/sector/name plus the best-effort `brands` masking terms (frozen
+    into the snapshot so a resume masks exactly as the original run did)."""
+    return [
+        {"symbol": m.symbol, "sector": m.sector, "name": m.name, "brands": list(m.brands)}
+        for m in universe.members
+    ]
+
+
+def _load_current_watchlist(selector_mode: str):
+    """-> (watchlist entries, FixedUniverse | None). `off` reads exactly the
+    baseline watchlist/watchlist.json (unchanged); the experimental mode reads
+    ONLY watchlist/experimental_fixed30.json and never the baseline file."""
+    if selector_mode == SELECTOR_MODE_OFF:
+        return json.loads((REPO / "watchlist" / "watchlist.json").read_text())["tickers"], None
+    from laya_selector import load_universe
+    universe = load_universe()
+    return _experimental_watchlist_entries(universe), universe
+
+
+def _names_for_masking(watchlist: list[dict]) -> dict[str, list[str]]:
+    """ticker -> every term to mask: the derived name variants plus any
+    frozen `brands` (absent on every baseline entry, so the baseline mapping
+    is exactly the original `_name_variants` result)."""
+    return {
+        t["symbol"]: sorted({*_name_variants(t["name"], t["symbol"]), *t.get("brands", [])})
+        for t in watchlist
+    }
+
+
+def fetch_card_history(tickers: list[str], day: date) -> dict:
+    """Real I/O (experimental selector only): daily OHLCV through `day`
+    inclusive from maverick's smart-cache price source -- the same one
+    fetch_technicals reads. Cards are computed from this on the host, which
+    drops any bar dated after `day` (see laya_cards._clean_bars)."""
+    from laya_cards import history_script
+    return json_from(run_in("maverick-mcp", history_script(tickers, day)))["history"]
+
+
+def _build_selector_context(universe, seed: int, run_id: str, args):
+    from laya_experiment import SNAPSHOT_DIR, LayaWorkerScorer, SelectorContext
+    scorer = LayaWorkerScorer(
+        args.laya_python, args.laya_checkpoint,
+        log_path=SNAPSHOT_DIR / run_id / "laya_worker.log",
+    )
+    return SelectorContext(
+        universe=universe, seed=seed, run_id=run_id, snapshot_dir=SNAPSHOT_DIR,
+        scorer=scorer, fetch_history=fetch_card_history,
+    )
+
+
+def _validate_selector_args(selector_mode: str, args) -> None:
+    """Explicit flags only (no env defaults). Experimental mode needs a
+    separate Laya virtualenv's python and a provisioned local checkpoint
+    directory; off mode must not be given them (a silent no-op is a trap)."""
+    if selector_mode == SELECTOR_MODE_OFF:
+        if args.laya_python or args.laya_checkpoint:
+            raise SystemExit("--laya-python/--laya-checkpoint were given but --selector-mode "
+                             f"is off; pass --selector-mode {SELECTOR_MODE_LAYA_FIXED30} to use them")
+        return
+    missing = [f for f, v in (("--laya-python", args.laya_python),
+                              ("--laya-checkpoint", args.laya_checkpoint)) if not v]
+    if missing:
+        raise SystemExit(f"--selector-mode {selector_mode} requires {' and '.join(missing)}")
+    if not Path(args.laya_python).is_file():
+        raise SystemExit(f"--laya-python {args.laya_python!r} is not a file")
+    if not Path(args.laya_checkpoint).is_dir():
+        raise SystemExit(f"--laya-checkpoint {args.laya_checkpoint!r} is not a directory "
+                         "(provision it once with laya_adapter.provision_checkpoint())")
+
+
+def _close_active_selector() -> None:
+    global _ACTIVE_SELECTOR
+    ctx, _ACTIVE_SELECTOR = _ACTIVE_SELECTOR, None
+    if ctx is not None:
+        ctx.close()
+
+
 def _check_reset_allowed(existing_state: dict | None, confirmed: bool) -> None:
     """Pure decision logic for correction pass item F (prior audit M3):
     --reset must not silently discard an existing run's progress.
@@ -4161,7 +4271,8 @@ def _check_candidate_coverage(unheld_tickers: list[str], technicals: dict[str, d
 
 def _full_candidate_status(all_tickers: list[str], held_tickers: list[str],
                            candidates: list[dict], response: dict,
-                           masking: "RunMasking") -> list[dict]:
+                           masking: "RunMasking",
+                           selector_status: "dict | None" = None) -> list[dict]:
     """Correction pass item B.2 (prior audit H2): a per-ticker
     accountability record for EVERY expected watchlist name this cycle --
     not just the ones that survived to become a candidate. _candidate_status
@@ -4195,10 +4306,30 @@ def _full_candidate_status(all_tickers: list[str], held_tickers: list[str],
         if ticker in held_tickers:
             out.append({"alias": alias, "status": "held"})
         elif alias not in candidate_aliases:
-            out.append({"alias": alias, "status": "excluded", "reason": "technical_fetch_error"})
+            out.append(_non_candidate_status(ticker, alias, selector_status))
         else:
             out.append({"alias": alias, "status": proposed_status.get(alias, "no_proposal")})
     return out
+
+
+def _non_candidate_status(ticker: str, alias: str, selector_status: "dict | None") -> dict:
+    """Status of an unheld name that never became a candidate. Default path
+    (`selector_status is None`): exactly the original technical-fetch-error
+    record. Experimental selector mode: a name the selector did not pick is
+    `not_selected`, a card that could not be built is `selector_data_unavailable`,
+    and a whole-day selector failure is `selector_unavailable` -- none of them
+    is ever disguised as a technical rejection. A SELECTED name that is
+    absent here genuinely failed its technical fetch."""
+    if selector_status is None:
+        return {"alias": alias, "status": "excluded", "reason": "technical_fetch_error"}
+    st = selector_status.get(ticker)
+    if st is None:
+        return {"alias": alias, "status": "selector_unavailable", "reason": "selector_failed_closed"}
+    if st[0] == "not_selected":
+        return {"alias": alias, "status": "not_selected"}
+    if st[0] == "data_unavailable":
+        return {"alias": alias, "status": "selector_data_unavailable", "reason": "selector_card_unavailable"}
+    return {"alias": alias, "status": "excluded", "reason": "technical_fetch_error"}
 
 
 def _candidate_status(candidates: list[dict], response: dict) -> list[dict]:
@@ -4650,7 +4781,8 @@ def required_entry_quantity(trade: ProposedTrade, ctx: Context) -> int | None:
 def run_day(day: date, day_index: int, portfolio: Portfolio,
             masking: RunMasking, watchlist: list[dict], limits_ctx: dict,
             run_key: str, fundamentals_enabled: bool = False,
-            runtime: "HermesRuntime | None" = None) -> tuple[Portfolio, dict, "Callable[[], None]"]:
+            runtime: "HermesRuntime | None" = None,
+            selector: "Any | None" = None) -> tuple[Portfolio, dict, "Callable[[], None]"]:
     """Run one simulated trading day. Returns (new_portfolio, summary,
     do_observability).
 
@@ -5104,16 +5236,39 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # One combined fetch (not two) -- fewer real docker-exec round trips.
     held_tickers = list(working.holdings)
     unheld_tickers = [t for t in tickers if t not in working.holdings]
-    all_technicals = fetch_technicals(unheld_tickers + held_tickers, day)
-    news = fetch_news(unheld_tickers + held_tickers, day, decision_cutoff_at)
-    technicals = {t: all_technicals[t] for t in unheld_tickers if t in all_technicals}
+    # -- experimental fixed-30 Laya selector (opt-in; `selector` is None --
+    # and every line of this block inert -- unless --selector-mode was
+    # passed). New-entry candidates become ONLY today's selected mini-pool;
+    # held names are excluded from selection and keep their own independent
+    # technicals/news fetch below, so exit management never depends on the
+    # selector. A selector failure yields an empty pool (fail closed for new
+    # entries) and an explicit event -- never a fake technical rejection.
+    selector_outcome = None
+    candidate_tickers = unheld_tickers
+    if selector is not None:
+        from laya_experiment import SelectorOutcome
+        _cp = checkpoint or {}
+        if _cp.get("response") is not None and _cp.get("selector") is not None:
+            # A retry of an already-decided cycle must report the SAME
+            # selection that cycle ran with (never a fresh/different one).
+            selector_outcome = SelectorOutcome.from_record(_cp["selector"])
+        else:
+            selector_outcome = selector.select_for_day(
+                day, set(working.holdings) | {o.ticker for o in working.pending_orders})
+        candidate_tickers = list(selector_outcome.selected)
+        summary["selector"] = dict(selector_outcome.event)
+    all_technicals = (fetch_technicals(candidate_tickers + held_tickers, day)
+                      if candidate_tickers + held_tickers else {})
+    news = (fetch_news(candidate_tickers + held_tickers, day, decision_cutoff_at)
+            if candidate_tickers + held_tickers else {})
+    technicals = {t: all_technicals[t] for t in candidate_tickers if t in all_technicals}
     held_technicals = {t: all_technicals[t] for t in held_tickers if t in all_technicals}
     # Correction pass item B.2 (prior audit H2): a technicals outage must
     # halt the cycle like any other data failure, BEFORE any Hermes call,
     # rather than silently continue with a shrunken candidate set that
     # would journal as an ordinary quiet day. See
     # InsufficientCandidateCoverageError.
-    _check_candidate_coverage(unheld_tickers, technicals)
+    _check_candidate_coverage(candidate_tickers, technicals)
 
     # Fundamentals V1 (opt-in, default off): CANDIDATES only, never held
     # positions -- exits stay technical/news-only, unaffected. Fetched
@@ -5329,6 +5484,9 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             **_load_checkpoint(run_key, day_index),
             "prompt_sha256": prompt_sha256, "raw_response": raw_response,
             "response_sha256": response_sha256,
+            # Experimental mode only: the selection this cycle's response was
+            # produced under, so a replay reports it faithfully.
+            **({"selector": selector_outcome.to_record()} if selector_outcome is not None else {}),
         })
 
     # -- ESSENTIAL: persist this cycle's exact evidence (2026-08-31) ------
@@ -5350,7 +5508,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # candidate -- held and technical-fetch-excluded names get their own
     # honest status instead of silently vanishing from the record.
     candidate_status = _full_candidate_status(
-        tickers, held_tickers, input_payload["candidates"], response, masking)
+        tickers, held_tickers, input_payload["candidates"], response, masking,
+        selector_status=(None if selector_outcome is None else selector_outcome.status_by_ticker))
     usage_for_evidence = summary["usage"] or {}
     record_cycle_evidence(
         cycle_id=cycle_id, run_id=run_key, day_label=masking.day_index(day),
@@ -5483,6 +5642,18 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         action = decision.get("action", "").upper()
         if action not in ("BUY", "SELL"):
             summary["blocked"].append(f"{real_ticker}: unsupported action {action!r}")
+            continue
+        if (action == "BUY" and selector_outcome is not None
+                and decision["alias"] not in {masking.alias(t) for t in selector_outcome.selected}):
+            # Experimental mode's explicit, separate new-entry boundary: only
+            # today's selected names may be bought. Not a risk-rule change --
+            # the risk checker's own watchlist membership is untouched.
+            line = (
+                f"{real_ticker}: selector boundary rejected -- alias {decision['alias']!r} "
+                "is not in today's selected mini-pool (new entries limited to selected names)"
+            )
+            summary["blocked"].append(line)
+            activity.append(("risk_check", line, None))
             continue
         if action == "BUY" and decision["alias"] not in candidate_aliases:
             line = (
@@ -5736,6 +5907,25 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "backtest_state.json's 'fundamentals_enabled' field) -- "
                              "passing a conflicting value fails closed instead of "
                              "silently changing what Hermes is shown mid-run.")
+    # Experimental fixed-30 Laya candidate selector -- opt-in only. default=
+    # None (omitted) means `off` on a fresh run and "reuse the stored mode" on
+    # a resume; it is never read from the environment. See
+    # docs/scopes/LAYA_SELECTOR_V1.md.
+    parser.add_argument("--selector-mode", choices=[SELECTOR_MODE_OFF, SELECTOR_MODE_LAYA_FIXED30],
+                        default=None,
+                        help="EXPERIMENTAL candidate selector. 'off' (the default) is the "
+                             "unchanged fixed-10 behavior. 'laya_fixed30_experimental' "
+                             "narrows watchlist/experimental_fixed30.json's 30 names to a "
+                             "daily top-10 mini-pool with a private local Laya worker. "
+                             "Requires --laya-python and --laya-checkpoint. A RESUMED run "
+                             "must keep its stored mode.")
+    parser.add_argument("--laya-python", default=None,
+                        help="python executable of the SEPARATE Laya virtualenv "
+                             "(only with --selector-mode laya_fixed30_experimental)")
+    parser.add_argument("--laya-checkpoint", default=None,
+                        help="local pinned Laya checkpoint directory from "
+                             "laya_adapter.provision_checkpoint() (only with "
+                             "--selector-mode laya_fixed30_experimental)")
     return parser
 
 
@@ -5810,9 +6000,23 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
     if args.reset:
         _clear_checkpoint()  # a reset run has no relationship to any stale checkpoint
 
-    current_watchlist = json.loads(
-        (REPO / "watchlist" / "watchlist.json").read_text()
-    )["tickers"]
+    # Experimental selector mode is resolved FIRST -- before any fetch,
+    # prompt, journal write, or state mutation -- and defaults to `off`,
+    # which leaves everything below exactly as it always was.
+    _existing_state = json.loads(STATE_PATH.read_text()) if STATE_PATH.exists() else None
+    selector_mode = _resolve_selector_mode(
+        _existing_state is not None, (_existing_state or {}).get("selector_mode"),
+        args.selector_mode)
+    _validate_selector_args(selector_mode, args)
+    current_watchlist, selector_universe = _load_current_watchlist(selector_mode)
+    if selector_universe is not None:
+        if _existing_state is not None and (
+                _existing_state.get("selector_universe_hash") != selector_universe.hash):
+            raise SystemExit(
+                "watchlist/experimental_fixed30.json changed since this run started (stored "
+                f"universe hash {str(_existing_state.get('selector_universe_hash'))[:12]}, "
+                f"current {selector_universe.hash[:12]}) -- a resumed experimental run must "
+                "keep its frozen universe. Restore the file or use --reset.")
 
     is_resume = STATE_PATH.exists()
     if is_resume:
@@ -5865,8 +6069,21 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
         watchlist = _resolve_watchlist_snapshot(False, None, current_watchlist)
 
     start = date.fromisoformat(start_str)
-    names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
-    masking = RunMasking(names, run_start=start, seed=seed)
+    if selector_mode == SELECTOR_MODE_OFF:
+        names = {t["symbol"]: _name_variants(t["name"], t["symbol"]) for t in watchlist}
+        masking = RunMasking(names, run_start=start, seed=seed)
+    else:
+        # Experimental fixed-30: one private opaque mapping over all 30 names
+        # for the whole run (never reshuffled by selection/rotation), with the
+        # universe's declared word-like tickers matched case-sensitively and
+        # every other ticker case-insensitively so a lowercase leak is caught.
+        # A resumed run reuses the word-like set stored at run start.
+        word_like = (
+            _existing_state.get("selector_word_like_tickers")
+            if _existing_state is not None else list(selector_universe.word_like_tickers)
+        )
+        masking = RunMasking(_names_for_masking(watchlist), run_start=start, seed=seed,
+                             alias_scheme="opaque", word_like_tickers=word_like)
     # Reproducibility/audit record of the frozen ticker<->alias mapping --
     # local state only, never sent to Hermes (the prompt only ever carries
     # aliases). watchlist_snapshot_hash/alias_mapping_hash let a later
@@ -5945,6 +6162,14 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
     completed = 0
     run_usage = {"total_tokens": 0, "api_calls": 0, "estimated_cost_usd": 0.0}
 
+    selector_ctx = None
+    if selector_mode != SELECTOR_MODE_OFF:
+        global _ACTIVE_SELECTOR
+        selector_ctx = _ACTIVE_SELECTOR = _build_selector_context(
+            selector_universe, seed, run_id, args)
+        print(f"selector mode: {selector_mode} (EXPERIMENTAL -- universe "
+              f"{selector_universe.version}, {len(selector_universe.members)} names)")
+
     # Run-status indicator (dashboard-v2 Overview banner): "running", with
     # this invocation's target = wherever the run already stands plus what
     # it was just asked to do (args.days). Best-effort, training-only --
@@ -5978,7 +6203,8 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
         todays_limits_ctx = _limits_for_profile(portfolio.profile_level)
         result, halted = _run_cycle_or_halt(
             lambda: run_day(cursor, day_index, portfolio, masking, watchlist, todays_limits_ctx, run_key,
-                            fundamentals_enabled=fundamentals_enabled, runtime=runtime),
+                            fundamentals_enabled=fundamentals_enabled, runtime=runtime,
+                            selector=selector_ctx),
             day_label=masking.day_index(cursor),
             run_id=run_id,
         )
@@ -6004,6 +6230,12 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
             print(f"  TRADE   {line}")
         for line in summary["blocked"]:
             print(f"  BLOCKED {line}")
+        if "selector" in summary:  # experimental mode only; local console, no ticker fields
+            ev = summary["selector"]
+            print(f"  SELECTOR {ev['status']}"
+                  f"{' (replayed snapshot)' if ev.get('replayed') else ''}: "
+                  f"{ev['selected']} selected of {ev['eligible']} eligible"
+                  f"{'' if ev['status'] == 'selected' else ' -- ' + str(ev['reason'])}")
         if not summary["decisions"] and not summary["blocked"]:
             print(f"  no trade — {summary['no_action_reason'][:160]}")
 
@@ -6015,14 +6247,18 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
                   f"({u.get('api_calls', 0)} call{'s' if u.get('api_calls') != 1 else ''}, "
                   f"{u.get('reasoning_tokens', 0)} reasoning)")
 
-        _atomic_write_json(
-            STATE_PATH,
-            {"portfolio": portfolio.to_dict(), "cursor": str(cursor + timedelta(days=1)),
-             "run_id": run_id, "seed": seed, "start": start_str, "end": end_str,
-             "fundamentals_enabled": fundamentals_enabled,
-             "watchlist_snapshot": watchlist, "watchlist_snapshot_hash": watchlist_snapshot_hash,
-             "alias_mapping": alias_mapping, "alias_mapping_hash": alias_mapping_hash},
-        )
+        _state_out = {"portfolio": portfolio.to_dict(), "cursor": str(cursor + timedelta(days=1)),
+                      "run_id": run_id, "seed": seed, "start": start_str, "end": end_str,
+                      "fundamentals_enabled": fundamentals_enabled,
+                      "watchlist_snapshot": watchlist, "watchlist_snapshot_hash": watchlist_snapshot_hash,
+                      "alias_mapping": alias_mapping, "alias_mapping_hash": alias_mapping_hash}
+        if selector_mode != SELECTOR_MODE_OFF:  # keys exist ONLY for experimental runs
+            _state_out.update({
+                "selector_mode": selector_mode,
+                "selector_universe_hash": selector_universe.hash,
+                "selector_word_like_tickers": list(masking.word_like_tickers or ()),
+            })
+        _atomic_write_json(STATE_PATH, _state_out)
         # Only NOW -- the atomic local-state commit for this exact cycle
         # has actually succeeded -- is this cycle's checkpoint (if any) no
         # longer needed. Clearing any earlier would let a crash between
@@ -6104,6 +6340,7 @@ def main() -> None:
     try:
         _run_backtest_main(args, isolation_report, runtime)
     finally:
+        _close_active_selector()
         _cleanup_ephemeral_hermes_runtime(runtime)
 
 
