@@ -5,13 +5,19 @@ it has not been exercised on live data. Stages 2–3 remain discussion-stage:
 not approved, not built.**
 
 Stage 1 code: `watchlist/scalable_screener.py` (tests:
-`watchlist/test_scalable_screener.py`; snapshots go to the git-ignored
+`watchlist/test_scalable_screener.py`; records go to the git-ignored
 `watchlist/.screen_snapshots/`). No live screen has been run, so pool size,
-rejection mix, and news-API cost are still unknown. Stage 1 follows the
-recommendations in §4 with two settled differences: carry-forward lasts **one**
-refresh interval (not two), and there is **no minimum pool size** — an empty
-pool is a valid result. The sector cap belongs to the Laya shortlist and is
-not part of Stage 1; the screener records sector mix only.
+rejection mix, and news-API cost are still unknown. Settled for Stage 1:
+carry-forward lasts **one** refresh interval and only after a recorded failed
+refresh; there is **no minimum pool size** — an empty pool is a valid result.
+The sector cap belongs to the Laya shortlist and is not part of Stage 1; the
+screener records sector mix only.
+
+**A live screen is always today's.** `--dry-run` and `--write` fetch *current*
+membership and facts, so they are only ever recorded under the real current
+UTC calendar date; any other `--screen-date` is refused before a container is
+touched. Only `--usable --on-date <any date>` takes another date, because it
+reads stored records and fetches nothing.
 
 How the screener grows past the fixed 10 names. This document changes no
 code, rule, watchlist, Docker service, Neon schema, or dashboard. The fixed
@@ -104,22 +110,59 @@ name is still in the pool or the shortlist.
 
 ## 3. State and snapshot design
 
-Two immutable, write-once records (same exclusive-link pattern as
-`laya_selector.write_snapshot`). Nothing is ever edited or overwritten; there
-is no mutable "current pool" object.
+Every record is immutable and write-once (the exclusive-link pattern used by
+`laya_selector.write_snapshot`). Nothing is edited or overwritten, and there
+is no mutable "current pool" pointer.
 
-**Screen snapshot — one per refresh** (`screen_id` = screen date + config hash)
+**Logical screen vs attempt.** The *logical screen* is one refresh:
+`screen_id` = screen date + config hash. An *attempt* is one actual run of it.
+
+| Record | File | Meaning |
+|---|---|---|
+| Attempt | `attempts/<screen_id>.a<NNN>.json` | Every run, successful or failed. A same-day retry is a new numbered attempt beside the earlier ones. |
+| Result | `results/<screen_id>.json` | The one successful attempt for that logical screen, as a byte-identical copy. At most one, forever: a different successful attempt for the same screen fails loudly and replaces nothing. |
+
+Re-running a logical screen that already has a result validates and returns
+it without fetching anything.
+
+**Record fields**
 
 | Field | Content |
 |---|---|
 | `schema_version`, `screener_version` | Code/version identity |
+| `screen_id`, `attempt`, `attempt_id`, `screen_date` | Logical screen and which attempt this is |
+| `started_at`, `finished_at` | Real UTC timestamps of the run |
 | `config`, `config_hash` | Every threshold and filter order; SHA-256 of the canonical config |
 | `universe` | Source name, URL, `fetched_at` (UTC), constituent count, constituents hash |
-| `data` | Provider(s), `fetched_at` per provider, news probe windows |
+| `news_windows` | The trailing probe windows derived from the screen date |
+| `telemetry` | Per stage: start time, elapsed seconds, requested / ok / unavailable counts, request and retry counts, a bounded error summary (short codes only — never messages, tracebacks, credentials, or remote payloads), and the request limits in force |
 | `rows` (one per constituent) | Symbol; raw filter inputs (market cap, avg volume, price, sector, industry, history bars, news counts per probe); `status`; ordered `reasons` |
-| `pool`, `pool_hash` | Sorted eligible symbols and their hash |
-| `screen_status` | `ok` or `failed` (a failed screen publishes no pool) |
-| `effective_from` / `supersedes` | First trading day this pool applies; previous `screen_id` |
+| `counts`, `pool`, `pool_hash`, `sector_mix` | Status counts; sorted eligible symbols, their hash, and their sector mix |
+| `screen_status`, `failure_reasons` | `ok` or `failed`; a failed attempt carries no pool and no effective date |
+| `effective_from` / `previous_ok_screen` | The Monday the pool starts to apply; the previous successful screen |
+| `content_hash` | Hash of everything above |
+
+A record is trusted only after full validation, not just a matching content
+hash: required keys and types, filename / attempt ID / screen ID agreement,
+config hash, sorted-unique rows, counts, pool and pool hash, sector mix,
+`effective_from`, and a valid status/failure combination. A result must also
+have its matching attempt record.
+
+**Which pool is usable on a date** (`usable_pool`, read-only, fails closed):
+
+- the latest result already in effect is `current` during its own week;
+- the week after, it is `carried_forward` only if the refresh that should
+  have replaced it has a recorded *failed* attempt — a refresh nobody ran is
+  not a failure and authorizes nothing;
+- after one carried-forward week, or with any invalid record in the
+  directory, the pool is `unavailable`.
+
+**Bounded live workload.** Each stage runs with a small fixed concurrency, a
+minimum spacing between request starts, a per-request timeout, and at most
+three tries with capped exponential backoff; the container call for a whole
+stage has its own computed ceiling. Incomplete news pagination is terminal
+for that probe (fail closed, not retried). News is still requested only for
+names that passed the cheap checks and the history check.
 
 **Laya handoff — one selection snapshot per trading day.** The existing
 selection snapshot, with `screen_id` + `pool_hash` recorded in place of the
@@ -129,7 +172,7 @@ screens; cards stay identity-free. Laya scores, ranks, and row IDs never
 reach Hermes.
 
 **Why rotation is unambiguous.** Membership on a date is never read from a
-current list — it is "the pool of the latest `ok` screen snapshot with
+current list — it is "the pool of the latest successful result with
 `effective_from` ≤ that date". A name that leaves and returns appears as
 `rejected` (with the reason and the numbers that caused it) in one snapshot
 and `eligible` in a later one; both records persist. So "was X eligible on
@@ -143,10 +186,10 @@ already per-symbol and stable when membership changes.
 
 | Decision | Recommendation | Alternative |
 |---|---|---|
-| **Pool bounds / policy** | No target count and no ceiling in v1: the pool is everything that passes. One floor only — fewer than 20 eligible names marks the screen `failed`. Revisit a ceiling after stage 1 shows the real pool size. | Bound the pool (e.g. 30–100); when over, trim deterministically by distance from median liquidity (the existing narrative-avoidance tiebreak). |
+| **Pool bounds / policy** | **Settled:** no target count, no ceiling, and no minimum pool size — the pool is everything that passes, and an empty pool is a valid result. Revisit a ceiling after stage 1 shows the real pool size. | Bound the pool (e.g. 30–100); when over, trim deterministically by distance from median liquidity (the existing narrative-avoidance tiebreak). |
 | **Refresh cadence** | Weekly, on the weekend; the snapshot applies to the following week's trading days. Laya runs daily on that frozen pool. | Monthly — less churn and fewer news-API calls, but slower to drop a name that stops qualifying. |
 | **Sector diversification** | No cap at the screener; apply it at the shortlist: at most 3 of the 10 from one sector, filled deterministically by next-ranked name. Record the sector mix either way. | No cap anywhere in v1; record the mix and decide from observed concentration. |
-| **Incomplete coverage/data** | Fail closed. A name with missing data is `data_unavailable`, never eligible. If the universe fetch fails, the news check is incomplete, or more than 10% of constituents are `data_unavailable`, the screen is `failed`; the last `ok` snapshot stays in effect for one further refresh interval only (settled), then new entries stop. Exits are never affected. | Strict: no carry-forward — any failed refresh means no new entries until a clean screen. |
+| **Incomplete coverage/data** | Fail closed. A name with missing data is `data_unavailable`, never eligible. If the universe fetch fails, the news check is incomplete, or more than 10% of constituents are `data_unavailable`, the screen is `failed`; the last successful result stays in effect for one further refresh interval only, and only when that refresh has a recorded failed attempt (settled); then new entries stop. Exits are never affected. | Strict: no carry-forward — any failed refresh means no new entries until a clean screen. |
 
 Not a screener decision, but it follows from the third row: once the pool is
 broad, the reason `RULES.md:118-120` gives for deferring a sector-exposure
@@ -181,7 +224,7 @@ Each stage needs its own explicit go-ahead; none is approved by this document.
 
 1. **Screener-only validation — code implemented, live validation not yet run.** A new screener module beside the existing
    one (the existing script and `watchlist.json` untouched) that writes screen
-   snapshots. Pure-function tests for filters, reason codes, config hash, and
+   records. Pure-function tests for filters, reason codes, config hash, and
    snapshot immutability. Run at least two refreshes on current data and
    review pool size, rejection-reason distribution, churn between screens,
    sector mix, and news-API cost. No Laya, no Hermes.
