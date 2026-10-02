@@ -1,15 +1,19 @@
 """
 laya_worker.py -- the private local Laya process for the experimental
-fixed-30 selector. Run it with the SEPARATE Laya virtualenv's python; the
-normal harness runtime never imports torch or laya.
+fixed-30 selector, run inside its dedicated Docker container; the normal
+harness runtime never imports torch or laya.
 
-    <laya-venv>/python laya_worker.py <checkpoint_dir>
+    python laya_worker.py <checkpoint_dir>        # container entrypoint
 
 It loads the pinned checkpoint ONCE (laya_adapter.LayaScorer.load: exact
 package version, pinned commit, weight SHA-256 verified, local directory,
-CPU), blocks all network access at the socket layer, then serves JSON lines
+CPU), applies a defensive Python-level socket deny (a second line of defence --
+the real boundary is the container's `--network none`), then serves JSON lines
 over its own stdin/stdout PIPES -- no port, no HTTP, no public endpoint. It
 exits when stdin closes, so it can never outlive the controller.
+
+In production it runs ONLY inside the dedicated worker container
+(laya_experiment.docker_run_command); there is no host-worker mode.
 
 Protocol (one JSON object per line):
   worker -> controller, once after load:
@@ -33,12 +37,25 @@ from typing import IO, Any
 from laya_selector import CardScorer, ScorerMetadata, build_card
 
 
+_BLOCKED_SOCKET_METHODS = ("connect", "connect_ex", "bind", "listen", "accept", "sendto",
+                           "sendmsg", "sendfile")
+_BLOCKED_SOCKET_FUNCS = ("getaddrinfo", "gethostbyname", "gethostbyname_ex", "gethostbyaddr",
+                         "getnameinfo", "create_connection", "create_server", "fromfd")
+
+
 def _deny_network() -> None:
-    """Scoring must be local: make any socket connect / DNS lookup fail."""
+    """SECOND line of defence only. Make every Python-level socket capability
+    that could reach, resolve, or serve a network fail. This does NOT constrain
+    native code (torch, Rust/C extensions can open sockets directly), so it is
+    not the security boundary: the boundary is the worker CONTAINER's
+    `--network none` (see laya_experiment.docker_run_command). Local
+    `socketpair` is left alone."""
     def deny(*_a: Any, **_k: Any):
         raise RuntimeError("network access is disabled in the Laya worker")
-    socket.socket.connect = deny          # type: ignore[method-assign]
-    socket.getaddrinfo = deny             # type: ignore[assignment]
+    for name in _BLOCKED_SOCKET_METHODS:
+        setattr(socket.socket, name, deny)
+    for name in _BLOCKED_SOCKET_FUNCS:
+        setattr(socket, name, deny)
 
 
 def serve(scorer: CardScorer, stdin: IO[str], stdout: IO[str]) -> None:

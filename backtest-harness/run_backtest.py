@@ -1697,9 +1697,9 @@ def fetch_card_history(tickers: list[str], day: date) -> dict:
 
 
 def _build_selector_context(universe, seed: int, run_id: str, args):
-    from laya_experiment import SNAPSHOT_DIR, LayaWorkerScorer, SelectorContext
+    from laya_experiment import LAYA_WORKER_IMAGE, SNAPSHOT_DIR, LayaWorkerScorer, SelectorContext
     scorer = LayaWorkerScorer(
-        args.laya_python, args.laya_checkpoint,
+        args.laya_checkpoint, image=args.laya_image or LAYA_WORKER_IMAGE,
         log_path=SNAPSHOT_DIR / run_id / "laya_worker.log",
     )
     return SelectorContext(
@@ -1709,20 +1709,18 @@ def _build_selector_context(universe, seed: int, run_id: str, args):
 
 
 def _validate_selector_args(selector_mode: str, args) -> None:
-    """Explicit flags only (no env defaults). Experimental mode needs a
-    separate Laya virtualenv's python and a provisioned local checkpoint
-    directory; off mode must not be given them (a silent no-op is a trap)."""
+    """Explicit flags only (no env defaults). Experimental mode needs a local
+    pinned Laya checkpoint directory (the worker runs in a dedicated Docker
+    container -- there is no host-process worker); off mode must not be given
+    the laya flags (a silent no-op is a trap). Pure flag checks; the Docker
+    availability check is verify_docker_worker_available (see main)."""
     if selector_mode == SELECTOR_MODE_OFF:
-        if args.laya_python or args.laya_checkpoint:
-            raise SystemExit("--laya-python/--laya-checkpoint were given but --selector-mode "
+        if args.laya_image or args.laya_checkpoint:
+            raise SystemExit("--laya-image/--laya-checkpoint were given but --selector-mode "
                              f"is off; pass --selector-mode {SELECTOR_MODE_LAYA_FIXED30} to use them")
         return
-    missing = [f for f, v in (("--laya-python", args.laya_python),
-                              ("--laya-checkpoint", args.laya_checkpoint)) if not v]
-    if missing:
-        raise SystemExit(f"--selector-mode {selector_mode} requires {' and '.join(missing)}")
-    if not Path(args.laya_python).is_file():
-        raise SystemExit(f"--laya-python {args.laya_python!r} is not a file")
+    if not args.laya_checkpoint:
+        raise SystemExit(f"--selector-mode {selector_mode} requires --laya-checkpoint")
     if not Path(args.laya_checkpoint).is_dir():
         raise SystemExit(f"--laya-checkpoint {args.laya_checkpoint!r} is not a directory "
                          "(provision it once with laya_adapter.provision_checkpoint())")
@@ -5917,15 +5915,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "unchanged fixed-10 behavior. 'laya_fixed30_experimental' "
                              "narrows watchlist/experimental_fixed30.json's 30 names to a "
                              "daily top-10 mini-pool with a private local Laya worker. "
-                             "Requires --laya-python and --laya-checkpoint. A RESUMED run "
+                             "Requires --laya-checkpoint (and Docker). A RESUMED run "
                              "must keep its stored mode.")
-    parser.add_argument("--laya-python", default=None,
-                        help="python executable of the SEPARATE Laya virtualenv "
-                             "(only with --selector-mode laya_fixed30_experimental)")
     parser.add_argument("--laya-checkpoint", default=None,
                         help="local pinned Laya checkpoint directory from "
-                             "laya_adapter.provision_checkpoint() (only with "
-                             "--selector-mode laya_fixed30_experimental)")
+                             "laya_adapter.provision_checkpoint(), mounted READ-ONLY into the "
+                             "private worker container (only with --selector-mode "
+                             "laya_fixed30_experimental)")
+    parser.add_argument("--laya-image", default=None,
+                        help="worker image tag (default hermes-laya-worker:1; build it with "
+                             "backtest-harness/laya_worker_image/Dockerfile). Docker is "
+                             "required -- there is no host-worker fallback.")
     return parser
 
 
@@ -6008,6 +6008,12 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
         _existing_state is not None, (_existing_state or {}).get("selector_mode"),
         args.selector_mode)
     _validate_selector_args(selector_mode, args)
+    if selector_mode != SELECTOR_MODE_OFF:
+        # Fail closed BEFORE anything else happens: the experimental worker
+        # runs only in its Docker container; no Docker/image/checkpoint means
+        # no run (never a fallback to a host-process worker).
+        from laya_experiment import LAYA_WORKER_IMAGE, verify_docker_worker_available
+        verify_docker_worker_available(args.laya_checkpoint, args.laya_image or LAYA_WORKER_IMAGE)
     current_watchlist, selector_universe = _load_current_watchlist(selector_mode)
     if selector_universe is not None:
         if _existing_state is not None and (

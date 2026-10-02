@@ -1,5 +1,15 @@
 # Laya component-only validation
 
+> **Status (latest): Round 2 — GREEN, component-readiness only** (see
+> "Round 2" at the end of this file). **Round 1 below returned RED on
+> 2026-10-02 and is preserved unmodified as historical evidence**; its two
+> findings (lenient worker-reply parsing, incomplete Python-only network
+> block) were real and were fixed before Round 2. GREEN means only that the
+> component is ready to *discuss* the screener — not that Laya is useful,
+> calibrated, profitable, or ready for Hermes.
+
+# Round 1 (2026-10-02) — historical, verdict RED
+
 **Date:** 2026-10-02 · **Verdict: RED** (two criteria; both small, fixable, and
 independent of the model itself — see §6) · **Scope:** the already-built local
 Laya component (`laya_selector.py`, `laya_adapter.py`, `laya_worker.py`,
@@ -246,3 +256,139 @@ reject duplicate `row_id`s there), and in `laya_worker`, deny *all* socket
 egress and listening (not just `connect`/`getaddrinfo`) or enforce it at the OS
 level (e.g. a firewall rule or no-network job object), then correct the scope
 doc's "network blocked" wording to match what is enforced.
+
+
+---
+
+---
+
+# Round 2 — hardening and revalidation (2026-10-02)
+
+**Verdict: GREEN — the Laya component is ready to discuss the screener, and
+nothing more.** Round 1 above is preserved unmodified as historical evidence:
+it returned RED, and its two findings were real. Round 2 fixes exactly those
+two boundaries and repeats the same component-only validation.
+
+## R2.1 What changed
+
+1. **Strict worker-reply contract** (`laya_experiment.parse_score_reply`,
+   `parse_handshake`): the success envelope must be exactly `{id, records}` (an
+   error reply exactly `{id, error}`); each record exactly
+   `{row_id, review_probability, answer_confidence}`; `row_id` a string equal to
+   the request's id at the same position (so duplicate, reordered, unknown, and
+   count-mismatched ids are all rejected); both numbers genuine JSON floats —
+   `bool`, `int`, `str`, `null`, lists/dicts rejected — finite and in [0, 1].
+   Every failure raises `ScorerError` (no raw `KeyError`/`TypeError`). Duplicate
+   `row_id`s are now rejected *before* scoring, in both `score_complete_cards`
+   and `LayaWorkerScorer.score`. A worker that sends a malformed reply is
+   dropped; a malformed reply selects nobody that day.
+2. **Real network isolation: a dedicated worker container** instead of a host
+   process. `docker run --rm -i --init --network none --read-only --tmpfs
+   /tmp:rw,noexec,nosuid,size=256m --cap-drop ALL --security-opt
+   no-new-privileges --pids-limit 512 --user 10001:10001`, offline-flag `-e`
+   values only, one read-only checkpoint mount, no `-p`, no host environment.
+   Image: `backtest-harness/laya_worker_image/` (base image pinned by digest,
+   CPU-only torch, the pinned Laya packages, exactly three project modules, a
+   default-deny build context). The controller verifies the **live** container
+   with `docker inspect` after every worker start and refuses to score if the
+   configuration differs. JSON-lines over stdin/stdout is unchanged; the model
+   is still loaded once per run (lazily); the Python-level socket deny is now
+   complete (`connect`, `connect_ex`, `bind`, `listen`, `accept`, `sendto`,
+   `sendmsg`, `sendfile`, `getaddrinfo`, `gethostbyname[_ex]`, `gethostbyaddr`,
+   `getnameinfo`, `create_connection`, `create_server`, `fromfd`) but is
+   documented as a second line of defence only.
+3. **No host-worker fallback.** `--laya-python` was removed. In experimental
+   mode, before any other work, the controller requires a reachable Docker
+   daemon, the worker image, and the pinned-commit checkpoint snapshot, else
+   `SystemExit` ("there is no host-worker fallback") — verified with tests that
+   fail if any process is spawned or any run side effect occurs.
+   `--selector-mode` off is untouched.
+
+## R2.2 Commands run
+
+`<scratch>` = the session scratchpad (outside the repository). Scripts were not
+committed. Round 2 added `val4_container.py`, `val5_raw.py`, `xplat.py`, and
+re-ran the Round 1 response scripts against the new parser.
+
+```
+docker pull python:3.12-slim                                   # base image; digest pinned in the Dockerfile
+docker build -f backtest-harness/laya_worker_image/Dockerfile -t hermes-laya-worker:1 backtest-harness
+PYTHONPATH=backtest-harness <scratch>\laya-venv\Scripts\python -c "...provision_checkpoint(cache_dir=...)"   # only network step besides the build
+python val4_container.py                      # real controller + real container worker: determinism, edge cases, docker-level isolation, cleanup
+docker run --rm --network none --read-only ... --entrypoint python hermes-laya-worker:1 /val/val5_raw.py       # raw output / no prose / offline load
+python val3_malformed.py ; python val3b_nan.py                # 26 malformed replies + NaN/Infinity vs the new strict parser
+<scratch>\laya-venv\Scripts\python xplat.py                   # Windows host vs Linux container, same 30 cards
+python -m pytest -q backtest-harness ; python verify.py       # selector-off behavior
+```
+The validation also used `docker exec`, `docker inspect`, `docker port`,
+`docker kill`, `docker ps -a`, and `docker rm -f` on the worker containers it
+created. No trading, evaluation, Hermes, backtest, or live-paper command ran;
+only synthetic identity-free cards were scored.
+
+## R2.3 Results
+
+| # | Requirement | Round 2 result |
+|---|---|---|
+| 1 | Package / checkpoint / weight pins | **Match, measured inside the container.** `laya 0.3.23`; mount dir = commit `55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851` (equals the provider's reviewed pin); `model.safetensors` SHA-256 `891102d3…cbc8d86c` computed in the container over 842,609,210 bytes = the project pin. torch `2.14.1+cpu`, transformers 5.18.0, tokenizers 0.23.2, safetensors 0.8.0, huggingface_hub 1.33.0, numpy 2.5.3, pydantic 2.13.5 — all equal to `requirements-laya.txt`. Image `sha256:797acd3c…725e`, 364 MB, linux/amd64, Python 3.12.15. |
+| 2 | Offline local load | **Pass** — the model loaded (24.6 s in a one-off container; 30.2 s start→ready as the production worker) under `--network none` with the checkpoint on a read-only mount. |
+| 3 | Determinism | **Byte-identical at the provider's 4-decimal output precision**: 5 repeats on one worker; a fresh container; 30 individual calls vs the batch; 64 cards (two internal passes) vs individual; 6 shuffled orders (mapping and ranking). Also identical between the Windows host venv and the Linux container on the same 30 cards (0 rows differ). |
+| 4 | Strict rejection | **All rejected.** Inputs (via the real worker protocol): 12 forbidden fields, name-like row id, incomplete cards, string/bool/list/dict/10^400/NaN/±inf/`1e999`, 7 out-of-range cases, 6 malformed protocol lines (an empty `cards` list returns an empty result, not an error) — worker alive after each and re-scoring byte-identical. Responses: **all 26 malformed replies raise `ScorerError`** — including the three Round 1 accepted (numeric string, boolean, extra prose field) — plus duplicate/reordered/unknown ids and NaN/Infinity with full-length replies. Duplicate `row_id`: `ScorerError` at both `score_complete_cards` and `LayaWorkerScorer.score`, before any scoring. |
+| 5 | No generated prose | **Pass** — the only string in the raw provider output is the literal `type = "noul"`; records have exactly three fields; model input is the seven numeric floats (no row id); `state_tokens_dropped = 0`. |
+| 6 | Cleanup | **Pass** — normal close: container gone in 0.3 s; `docker kill` mid-run: next call restarted a fresh container with identical output; request timeout: closed and removed in 0.3 s; **controller hard-exit (`os._exit`): container gone in 1.9 s**; `docker ps -a --filter label=hermes.laya.worker=1` empty before, between, and after. |
+| 7 | Docker-level boundary | **Pass** — see below. |
+| 8 | Selector-off unchanged | **Pass** — harness suite 447 passed (392 before; net +55 tests — only worker/CLI tests of the experimental mode were edited, no selector-off test was modified), `verify.py` 12/12; the off-mode `run_day` equivalence test, the lazy-import isolation test, and the baseline-mapping pins all pass unmodified; `run_backtest.py`'s diff touches only experimental-mode code and flags. |
+
+**Docker-level isolation, probed inside the live production worker container**
+(native Python sockets via `docker exec`, so the Python-level deny layer is
+*not* in play):
+
+| Probe | Result |
+|---|---|
+| TCP to `1.1.1.1:443`, `8.8.8.8:53`, `172.17.0.1:80` (Docker host gateway) | `Network is unreachable` (errno 101) |
+| `connect_ex` to `1.1.1.1:443` | returns 101 |
+| UDP `sendto` `8.8.8.8:53` | `Network is unreachable` |
+| DNS `getaddrinfo` / `gethostbyname("example.com")` | `Temporary failure in name resolution` |
+| Network interfaces (`/proc/net/dev`) | `lo` only |
+| IPv4 routes / non-loopback IPv6 routes | none |
+| Listening TCP sockets (`/proc/net/tcp`, `tcp6`) | none |
+| `docker port`, `NetworkSettings.Ports`, `PortBindings`, `ExposedPorts` | empty / null |
+| `docker inspect` | `NetworkMode none`; networks `[none]`; `ReadonlyRootfs true`; not privileged; `CapDrop [ALL]` (`CapEff 0`); `no-new-privileges`; user `10001:10001`; `PidsLimit 512`; one mount: the checkpoint, `RW false` |
+| Writes: `/`, `/app`, checkpoint mount | refused; `/tmp` writable (tmpfs, `noexec`, 256 MB) |
+| Environment (dummy `ALPACA_API_KEY`, `DATABASE_URL`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `HF_TOKEN`, `HERMES_HOME`, … set in the controller) | **none present**; container keys are only the offline flags, `HOME`, `PATH`, Python/pip settings, and the base image's public build metadata (`GPG_KEY`, `PYTHON_SHA256`, `PYTHON_VERSION`) |
+| `/app` contents; trading/Hermes/secret files anywhere in the filesystem | only `laya_worker.py`, `laya_adapter.py`, `laya_selector.py`; none of `run_backtest`, `risk_checker`, `anonymize`, `watchlist.json`, `RULES.md`, `SOUL.md`, `.env`, `docker-compose.yml`, `schema.sql` exist; none of the trading/Hermes/DB modules import |
+
+Honest notes: opening a *loopback* listening socket inside the container still
+succeeds (a network namespace with only `lo` — nothing outside can reach it, and
+no listener exists); the Python-level deny remains defence in depth only; the
+boundary is the container runtime (here Docker Desktop's Linux VM on Windows),
+not a proof against container escapes; the image tag `hermes-laya-worker:1` is
+a local mutable tag — the validated image id is recorded above; the model still
+shows the provider's invalid-temperature warning (§3), unchanged.
+
+**Measurements (CPU, Docker Desktop):** cold container start→ready 30.2 s;
+first 30-card batch 17.9 s; warm batches 12.5–17.5 s, median **13.6 s**
+(≈0.45 s/card). Ties: 30 varied cards → 30 distinct values; 150 random cards →
+133 distinct, 16 tied groups covering 33 rows, largest tie 3 (the Windows host
+gave 134/15 earlier; synthetic statistics, resolved by the seeded tie-break).
+
+**Environment note.** Docker Desktop was not running; starting it for this work
+also restarted the existing compose services under their `restart:
+unless-stopped` policy. `docker-compose.yml` and those services were not
+changed.
+
+## R2.4 Verdict — GREEN
+
+Every stated component boundary passes: pins exact; offline local load;
+deterministic repeated, fresh-worker, batch-vs-single, and shuffled results;
+every malformed input and response shape rejected with a clear `ScorerError`;
+no model-generated prose; cleanup on normal close, failure, timeout, and
+controller exit; a Docker-level no-network, no-port, no-secret, no-trading-code
+boundary; and unchanged selector-off behavior. Both Round 1 RED conditions
+("malformed output accepted", "network exposure while scoring") are resolved
+with direct evidence.
+
+**This GREEN means only: the Laya component is component-ready to discuss the
+screener.** It does **not** show that Laya is useful for ranking companies, that
+its probabilities or confidences are calibrated, that it predicts anything
+profitable, or that it is ready for Hermes. Round 1's §7 limits still apply
+unchanged (synthetic data only; one OS/hardware/runtime; batch sizes 1–150).

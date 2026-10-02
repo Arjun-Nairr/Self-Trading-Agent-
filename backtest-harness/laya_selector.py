@@ -312,6 +312,9 @@ def score_complete_cards(
     confidence -- and fails closed (ScorerError) on any violation rather than
     letting a malformed batch influence selection."""
     complete = [c for c in cards if c.data_complete]
+    ids = [c.row_id for c in complete]
+    if len(set(ids)) != len(ids):
+        raise ScorerError("duplicate row_id among the cards to score")
     if not complete:
         return {}
     records = scorer.score(complete)

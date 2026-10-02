@@ -167,7 +167,7 @@ def _selected(tmp, run_id="run-t"):
 
 def test_selector_mode_defaults_to_off_and_is_never_implicit():
     args = build_arg_parser().parse_args([])
-    assert args.selector_mode is None and args.laya_python is None and args.laya_checkpoint is None
+    assert args.selector_mode is None and args.laya_image is None and args.laya_checkpoint is None
     assert _resolve_selector_mode(False, None, None) == SELECTOR_MODE_OFF
     assert _resolve_selector_mode(False, None, SELECTOR_MODE_LAYA_FIXED30) == SELECTOR_MODE_LAYA_FIXED30
     with pytest.raises(SystemExit):  # unknown values are not accepted
@@ -183,20 +183,21 @@ def test_resume_keeps_stored_selector_mode_and_conflicts_fail_closed():
         _resolve_selector_mode(True, SELECTOR_MODE_LAYA_FIXED30, SELECTOR_MODE_OFF)
 
 
-def test_laya_flags_require_the_experimental_mode_and_existing_paths(tmp_path):
+def test_laya_flags_require_the_experimental_mode_and_an_existing_checkpoint(tmp_path):
     parse = build_arg_parser().parse_args
     with pytest.raises(SystemExit, match="is off"):
-        _validate_selector_args(SELECTOR_MODE_OFF, parse(["--laya-python", "x"]))
+        _validate_selector_args(SELECTOR_MODE_OFF, parse(["--laya-image", "x"]))
+    with pytest.raises(SystemExit, match="is off"):
+        _validate_selector_args(SELECTOR_MODE_OFF, parse(["--laya-checkpoint", str(tmp_path)]))
     _validate_selector_args(SELECTOR_MODE_OFF, parse([]))
-    with pytest.raises(SystemExit, match="requires --laya-python and --laya-checkpoint"):
+    with pytest.raises(SystemExit, match="requires --laya-checkpoint"):
         _validate_selector_args(SELECTOR_MODE_LAYA_FIXED30, parse([]))
-    py = tmp_path / "python.exe"
-    py.write_text("")
     with pytest.raises(SystemExit, match="not a directory"):
-        _validate_selector_args(SELECTOR_MODE_LAYA_FIXED30,
-                                parse(["--laya-python", str(py), "--laya-checkpoint", str(tmp_path / "no")]))
-    _validate_selector_args(SELECTOR_MODE_LAYA_FIXED30,
-                            parse(["--laya-python", str(py), "--laya-checkpoint", str(tmp_path)]))
+        _validate_selector_args(SELECTOR_MODE_LAYA_FIXED30, parse(["--laya-checkpoint", str(tmp_path / "no")]))
+    _validate_selector_args(SELECTOR_MODE_LAYA_FIXED30, parse(["--laya-checkpoint", str(tmp_path)]))
+    # the host-process worker flag no longer exists
+    with pytest.raises(SystemExit):
+        parse(["--laya-python", "x"])
 
 
 def test_off_mode_loads_only_the_baseline_watchlist_and_experimental_only_the_fixed30():
@@ -603,7 +604,7 @@ def _cards(n=3):
 
 def test_worker_scorer_loads_once_batches_every_request_and_answers_in_order(tmp_path):
     log = tmp_path / "w.log"
-    s = lx.LayaWorkerScorer(sys.executable, "unused", worker_cmd=[sys.executable, "-c", _FAKE_WORKER], log_path=log)
+    s = lx.LayaWorkerScorer("unused", worker_cmd=[sys.executable, "-c", _FAKE_WORKER], log_path=log)
     try:
         first = s.score(_cards(3))
         second = s.score(_cards(2))
@@ -620,7 +621,7 @@ def test_worker_scorer_loads_once_batches_every_request_and_answers_in_order(tmp
 def test_worker_handshake_must_match_the_pinned_scorer(tmp_path):
     bad = _FAKE_WORKER.replace("laya_adapter.expected_metadata()",
                                "laya_adapter.expected_metadata().__class__('laya','9.9','x','r','q','s')")
-    s = lx.LayaWorkerScorer(sys.executable, "unused", worker_cmd=[sys.executable, "-c", bad])
+    s = lx.LayaWorkerScorer("unused", worker_cmd=[sys.executable, "-c", bad])
     with pytest.raises(ls.ScorerError, match="handshake"):
         s.score(_cards(1))
     assert s._proc is None
@@ -628,10 +629,10 @@ def test_worker_handshake_must_match_the_pinned_scorer(tmp_path):
 
 def test_worker_death_and_timeout_fail_closed_and_a_later_call_restarts_it(tmp_path):
     die = _FAKE_WORKER.replace("return [ls.ScoreRecord", "import os; os._exit(3)\n        return [ls.ScoreRecord")
-    s = lx.LayaWorkerScorer(sys.executable, "unused", worker_cmd=[sys.executable, "-c", die])
+    s = lx.LayaWorkerScorer("unused", worker_cmd=[sys.executable, "-c", die])
     with pytest.raises(ls.ScorerError, match="exited"):
         s.score(_cards(1))
-    ok = lx.LayaWorkerScorer(sys.executable, "unused", worker_cmd=[sys.executable, "-c", _FAKE_WORKER])
+    ok = lx.LayaWorkerScorer("unused", worker_cmd=[sys.executable, "-c", _FAKE_WORKER])
     try:
         assert len(ok.score(_cards(1))) == 1
         ok.close()                                   # simulate a dead worker
@@ -639,7 +640,7 @@ def test_worker_death_and_timeout_fail_closed_and_a_later_call_restarts_it(tmp_p
     finally:
         ok.close()
     slow = _FAKE_WORKER.replace("return [ls.ScoreRecord", "import time; time.sleep(30)\n        return [ls.ScoreRecord")
-    s2 = lx.LayaWorkerScorer(sys.executable, "unused", worker_cmd=[sys.executable, "-c", slow], request_timeout=1.0)
+    s2 = lx.LayaWorkerScorer("unused", worker_cmd=[sys.executable, "-c", slow], request_timeout=1.0)
     with pytest.raises(ls.ScorerError, match="did not answer"):
         s2.score(_cards(1))
 
@@ -663,21 +664,41 @@ def test_worker_rejects_cards_with_forbidden_fields_and_reports_instead_of_dying
     assert lines[2]["id"] == 2 and lines[2]["records"][0]["review_probability"] == 0.5
 
 
-def test_worker_environment_is_scrubbed_and_offline(monkeypatch):
+def test_docker_cli_environment_is_scrubbed(monkeypatch):
     monkeypatch.setenv("ALPACA_API_KEY", "secret")
     monkeypatch.setenv("DATABASE_URL", "postgres://x")
-    env = lx._worker_env()
-    assert "ALPACA_API_KEY" not in env and "DATABASE_URL" not in env
-    assert env["HF_HUB_OFFLINE"] == "1" and env["TRANSFORMERS_OFFLINE"] == "1"
+    monkeypatch.setenv("HERMES_HOME", "/h")
+    env = lx._docker_cli_env()
+    assert not {"ALPACA_API_KEY", "DATABASE_URL", "HERMES_HOME"} & set(env)
 
 
-def test_worker_blocks_network_access(monkeypatch):
+def test_worker_defensive_socket_deny_covers_every_python_level_capability():
     import laya_worker
-    monkeypatch.setattr(socket.socket, "connect", socket.socket.connect)
-    monkeypatch.setattr(socket, "getaddrinfo", socket.getaddrinfo)
-    laya_worker._deny_network()
-    with pytest.raises(RuntimeError, match="network access is disabled"):
-        socket.create_connection(("127.0.0.1", 9), timeout=1)
+    missing = object()  # some methods (sendmsg, ...) do not exist on every platform
+    saved_methods = {n: getattr(socket.socket, n, missing) for n in laya_worker._BLOCKED_SOCKET_METHODS}
+    saved_funcs = {n: getattr(socket, n, missing) for n in laya_worker._BLOCKED_SOCKET_FUNCS}
+    try:
+        laya_worker._deny_network()
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        calls = [lambda: s.connect(("127.0.0.1", 9)), lambda: s.connect_ex(("127.0.0.1", 9)),
+                 lambda: s.bind(("127.0.0.1", 0)), lambda: s.listen(1), lambda: s.accept(),
+                 lambda: socket.socket(socket.AF_INET, socket.SOCK_DGRAM).sendto(b"x", ("127.0.0.1", 9)),
+                 lambda: socket.getaddrinfo("localhost", 80), lambda: socket.gethostbyname("localhost"),
+                 lambda: socket.gethostbyname_ex("localhost"), lambda: socket.gethostbyaddr("127.0.0.1"),
+                 lambda: socket.getnameinfo(("127.0.0.1", 80), 0),
+                 lambda: socket.create_connection(("127.0.0.1", 9), timeout=1),
+                 lambda: socket.create_server(("127.0.0.1", 0))]
+        for call in calls:
+            with pytest.raises(RuntimeError, match="network access is disabled"):
+                call()
+    finally:
+        for owner, saved in ((socket.socket, saved_methods), (socket, saved_funcs)):
+            for n, f in saved.items():
+                if f is missing:
+                    delattr(owner, n) if hasattr(owner, n) else None
+                else:
+                    setattr(owner, n, f)
+        s.close()
 
 
 # -- preflight --------------------------------------------------------------------------

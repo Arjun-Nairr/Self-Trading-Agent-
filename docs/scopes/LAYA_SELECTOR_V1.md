@@ -244,14 +244,17 @@ pre-registered control arms and a shadow evaluation before any activation.
 ```
 python backtest-harness/run_backtest.py --run-kind smoke \
     --selector-mode laya_fixed30_experimental \
-    --laya-python <laya-venv>/python --laya-checkpoint <provisioned checkpoint dir> ...
+    --laya-checkpoint <provisioned checkpoint snapshot dir> [--laya-image hermes-laya-worker:1] ...
 ```
 
 `--selector-mode` defaults to `off` and is never read from the environment, a
 manifest, Docker, or the dashboard. On a fresh run it must be passed
 explicitly; a resumed run keeps its stored mode and a conflicting request
-fails closed; `--laya-python` / `--laya-checkpoint` are rejected unless the
-experimental mode is selected. The selector modules are imported lazily inside
+fails closed; `--laya-checkpoint` / `--laya-image` are rejected unless the
+experimental mode is selected. **Docker is required**: before anything else
+happens the controller checks that the daemon is reachable, the worker image
+exists, and the checkpoint is the snapshot of the pinned commit — otherwise the
+run refuses to start. There is no host-process worker and no fallback to one. The selector modules are imported lazily inside
 the opt-in branch, so the default path never imports them, torch, or laya.
 Experimental runs record `selector_mode`, the universe hash, and the declared
 word-like-ticker set in `backtest_state.json` (those keys exist only in
@@ -278,15 +281,31 @@ experimental runs); a changed universe file fails a resume.
    mean of the 20 prior volumes; realized volatility = stdev of the last 20
    daily log returns x sqrt(252); 20-day range position = (c-low20)/(high20-low20).
    At least 40 usable bars are required.
-4. **Scoring — one private local worker.** The controller process never loads
-   Laya. It starts `laya_worker.py` once, lazily, under the *separate* Laya
-   virtualenv's python, and talks to it over that child's own stdin/stdout
-   pipes — no port, no HTTP, no public endpoint. The worker loads the pinned
-   checkpoint once (package version, repo commit, and weight SHA-256 verified;
-   local directory; CPU), blocks all network access, runs with a scrubbed
-   environment (no API keys/DB URLs), and exits when the controller does. Each
-   day's eligible cards go in **one batched request** (never a call per card).
-   The handshake must match the pinned scorer or the day fails closed.
+4. **Scoring — one private worker container.** The controller process never
+   loads Laya. It starts, once and lazily, a dedicated Docker container
+   (`hermes-laya-worker:1`, built from `backtest-harness/laya_worker_image/`)
+   and talks to it over the `docker run -i` stdin/stdout pipes — no port, no
+   HTTP, no public endpoint. The container runs with `--network none` (no
+   interface or route at all), a read-only root filesystem with only a small
+   `noexec` `/tmp`, all capabilities dropped, `no-new-privileges`, a non-root
+   user, the checkpoint mounted read-only (the only mount), only offline
+   environment flags (no host environment, keys, or credentials forwarded), and
+   only three project modules inside (worker, adapter, card/selector types —
+   no trading, risk, Hermes, masking, Neon, or Alpaca code). After the
+   handshake the controller `docker inspect`s the live container and refuses to
+   score unless that configuration holds. The worker loads the pinned
+   checkpoint once (package version, repo commit, and weight SHA-256
+   verified; CPU) and exits when the controller does; the controller also
+   `docker rm -f`s it on every close path. A Python-level socket deny inside
+   the worker is a *second* line of defence only — it cannot constrain native
+   code and is not the security boundary; the container is. Each day's
+   eligible cards go in **one batched request** (never a call per card). Every
+   worker reply is parsed strictly (exactly the expected fields; `row_id` a
+   string matching the request in order; both numbers genuine JSON floats,
+   finite, in [0,1]; no booleans, strings, nulls, integers, extra fields,
+   duplicates, or count mismatches) and any malformed reply raises a
+   `ScorerError`, selecting nobody for that day. The handshake must match the
+   pinned scorer or the day fails closed.
 5. **Selection.** The existing deterministic top-10: descending
    `review_probability`, seeded row-ID-hash tie-break, no exploration.
    `review_probability` means only "worth full review"; no threshold, and
@@ -337,9 +356,12 @@ added names remain unverified (see the Phase 1 caveat).
 ### Verified, and what is not
 
 Unit and integration tests drive the real `run_day()` with only I/O mocked and a
-deterministic fake scorer; a separate end-to-end check ran the controller →
-private worker (real pinned Laya, network blocked) → snapshot → replay on
-synthetic bars (no market data, no run). Not done: any real-data card run, any
+deterministic fake scorer. A separate **component-only validation**
+(`docs/evaluations/laya_component_validation.md`) ran the real pinned model on
+synthetic identity-free cards: Round 1 (host-process worker) was **RED** for an
+incomplete network block and a lenient reply parser; both were fixed, and
+Round 2 (container worker, strict parser) is **GREEN** for component
+readiness only — it says nothing about ranking quality, calibration, or value. Not done: any real-data card run, any
 selector evaluation, calibration or benchmarking of Laya on real cards, Neon
 selector evidence, a risk-semantics decision beyond the explicit entry
 boundary above, or activation.

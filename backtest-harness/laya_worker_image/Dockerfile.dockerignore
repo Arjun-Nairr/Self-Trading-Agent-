@@ -1,0 +1,6 @@
+# Default-deny build context: only what the Dockerfile COPYs may enter.
+*
+!requirements-laya.txt
+!laya_worker.py
+!laya_adapter.py
+!laya_selector.py
