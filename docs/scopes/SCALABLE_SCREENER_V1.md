@@ -1,6 +1,17 @@
 # Scalable screener — scope v1
 
-**status: discussing — design only. Nothing here is approved, built, or run.**
+**status: Stage 1 (screener only) implemented and tested with injected data;
+it has not been exercised on live data. Stages 2–3 remain discussion-stage:
+not approved, not built.**
+
+Stage 1 code: `watchlist/scalable_screener.py` (tests:
+`watchlist/test_scalable_screener.py`; snapshots go to the git-ignored
+`watchlist/.screen_snapshots/`). No live screen has been run, so pool size,
+rejection mix, and news-API cost are still unknown. Stage 1 follows the
+recommendations in §4 with two settled differences: carry-forward lasts **one**
+refresh interval (not two), and there is **no minimum pool size** — an empty
+pool is a valid result. The sector cap belongs to the Laya shortlist and is
+not part of Stage 1; the screener records sector mix only.
 
 How the screener grows past the fixed 10 names. This document changes no
 code, rule, watchlist, Docker service, Neon schema, or dashboard. The fixed
@@ -135,7 +146,7 @@ already per-symbol and stable when membership changes.
 | **Pool bounds / policy** | No target count and no ceiling in v1: the pool is everything that passes. One floor only — fewer than 20 eligible names marks the screen `failed`. Revisit a ceiling after stage 1 shows the real pool size. | Bound the pool (e.g. 30–100); when over, trim deterministically by distance from median liquidity (the existing narrative-avoidance tiebreak). |
 | **Refresh cadence** | Weekly, on the weekend; the snapshot applies to the following week's trading days. Laya runs daily on that frozen pool. | Monthly — less churn and fewer news-API calls, but slower to drop a name that stops qualifying. |
 | **Sector diversification** | No cap at the screener; apply it at the shortlist: at most 3 of the 10 from one sector, filled deterministically by next-ranked name. Record the sector mix either way. | No cap anywhere in v1; record the mix and decide from observed concentration. |
-| **Incomplete coverage/data** | Fail closed. A name with missing data is `data_unavailable`, never eligible. If the universe fetch fails, the news check is incomplete, or more than 10% of constituents are `data_unavailable`, the screen is `failed`; the last `ok` snapshot stays in effect for at most two refresh periods, then new entries stop. Exits are never affected. | Strict: no carry-forward — any failed refresh means no new entries until a clean screen. |
+| **Incomplete coverage/data** | Fail closed. A name with missing data is `data_unavailable`, never eligible. If the universe fetch fails, the news check is incomplete, or more than 10% of constituents are `data_unavailable`, the screen is `failed`; the last `ok` snapshot stays in effect for one further refresh interval only (settled), then new entries stop. Exits are never affected. | Strict: no carry-forward — any failed refresh means no new entries until a clean screen. |
 
 Not a screener decision, but it follows from the third row: once the pool is
 broad, the reason `RULES.md:118-120` gives for deferring a sector-exposure
@@ -168,7 +179,7 @@ Until a point-in-time membership source (and as-of filter inputs) exists:
 
 Each stage needs its own explicit go-ahead; none is approved by this document.
 
-1. **Screener-only validation.** A new screener module beside the existing
+1. **Screener-only validation — code implemented, live validation not yet run.** A new screener module beside the existing
    one (the existing script and `watchlist.json` untouched) that writes screen
    snapshots. Pure-function tests for filters, reason codes, config hash, and
    snapshot immutability. Run at least two refreshes on current data and

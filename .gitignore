@@ -23,6 +23,10 @@ backtest-harness/.diagnostics/
 # the local Laya worker log -- runtime artifacts, never committed.
 backtest-harness/.selector_snapshots/
 
+# Scalable screener (Stage 1): local write-once screen snapshots -- runtime
+# data, never committed.
+watchlist/.screen_snapshots/
+
 # Machine-readable raw output of the human-only offline diagnostics
 # (geometry_scan.py / counterfactual.py / benchmark_sensitivity.py) --
 # regenerate by re-running the script, never the source of truth itself
