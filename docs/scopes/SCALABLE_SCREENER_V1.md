@@ -14,10 +14,16 @@ The sector cap belongs to the Laya shortlist and is not part of Stage 1; the
 screener records sector mix only.
 
 **A live screen is always today's.** `--dry-run` and `--write` fetch *current*
-membership and facts, so they are only ever recorded under the real current
-UTC calendar date; any other `--screen-date` is refused before a container is
-touched. Only `--usable --on-date <any date>` takes another date, because it
-reads stored records and fetches nothing.
+membership and facts, so they only ever screen the UTC calendar date the run
+starts on. That date is captured once at start and never re-checked, so a run
+accepted at 23:59 UTC finishes normally after midnight. Any other
+`--screen-date` is refused before a container is touched.
+
+| Mode | Date it may use | Writes | Fetches |
+|---|---|---|---|
+| `--dry-run` | today (UTC), any day of the week | nothing | yes |
+| `--write` | today (UTC), **Saturday or Sunday only** — the weekly refresh, effective the following Monday | one attempt record (and the result, if it succeeds) | yes |
+| `--usable --on-date <date>` | any date, past or future | nothing | no — reads stored records only |
 
 How the screener grows past the fixed 10 names. This document changes no
 code, rule, watchlist, Docker service, Neon schema, or dashboard. The fixed
@@ -142,11 +148,17 @@ it without fetching anything.
 | `effective_from` / `previous_ok_screen` | The Monday the pool starts to apply; the previous successful screen |
 | `content_hash` | Hash of everything above |
 
-A record is trusted only after full validation, not just a matching content
-hash: required keys and types, filename / attempt ID / screen ID agreement,
-config hash, sorted-unique rows, counts, pool and pool hash, sector mix,
-`effective_from`, and a valid status/failure combination. A result must also
-have its matching attempt record.
+A record is trusted only after full validation — a matching content hash
+alone proves nothing, because anyone can re-hash an edited file. Every nested
+value is type-checked (universe block, each row's fields, finite non-negative
+numbers, history-bar counts, news-count list shape, telemetry counters,
+timezone-aware ordered timestamps, `previous_ok_screen`), and every
+conclusion is re-derived from the record's own evidence: each row's status
+and reasons from its recorded numbers, the counts, pool, pool hash, and
+sector mix from the rows, and the screen's failure state from the telemetry
+and the unavailable fraction. A result must also have its own validated,
+byte-identical attempt record; an orphaned result is neither a usable pool
+nor a valid predecessor.
 
 **Which pool is usable on a date** (`usable_pool`, read-only, fails closed):
 
@@ -157,12 +169,21 @@ have its matching attempt record.
 - after one carried-forward week, or with any invalid record in the
   directory, the pool is `unavailable`.
 
-**Bounded live workload.** Each stage runs with a small fixed concurrency, a
-minimum spacing between request starts, a per-request timeout, and at most
-three tries with capped exponential backoff; the container call for a whole
-stage has its own computed ceiling. Incomplete news pagination is terminal
-for that probe (fail closed, not retried). News is still requested only for
-names that passed the cheap checks and the history check.
+**Bounded live workload.** Every underlying request (one company's facts, one
+history fetch, one news probe, the universe page) runs in its own child
+process inside the provider container. A fixed number of workers each run one
+child at a time and do not move on until that child has exited or been killed
+and reaped. So the number of requests in flight can never exceed the stage's
+concurrency, a timed-out request is dead before its slot is reused, and a
+retry cannot overlap an earlier try. Each stage also has a minimum spacing
+between request starts, at most three tries with capped exponential backoff,
+and a deadline after which nothing new starts — the stage ends by itself even
+if an upstream library hangs, with a host-side ceiling as the backstop.
+Incomplete news pagination is terminal for that probe (fail closed, not
+retried). News is still requested only for names that passed the cheap checks
+and the history check. All four stages, the universe fetch included, record
+the same telemetry: requested / ok / unavailable counts, request and retry
+counts, elapsed time, and short error codes only.
 
 **Laya handoff — one selection snapshot per trading day.** The existing
 selection snapshot, with `screen_id` + `pool_hash` recorded in place of the

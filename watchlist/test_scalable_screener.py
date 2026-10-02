@@ -283,10 +283,58 @@ def test_cli_defaults_to_today_and_records_real_timestamps(tmp_path, capsys):
     assert ss.main(["--write", "--output-dir", str(tmp_path)], Fake(names(4)), clock) == 0
     snap = ss.load_result(tmp_path, ss.screen_id(SAT, ss.DEFAULT_CONFIG))
     assert snap["screen_date"] == "2026-10-03" and "recorded" in capsys.readouterr().out
-    assert snap["started_at"] == "2026-10-03T12:00:02+00:00" < snap["universe"]["fetched_at"] < snap["finished_at"]
+    assert snap["started_at"] == "2026-10-03T12:00:01+00:00" < snap["universe"]["fetched_at"] < snap["finished_at"]
     assert all(snap["telemetry"][k]["started_at"].startswith("2026-10-03T12:00") for k in ss.STAGES)
     assert ss.main(["--write", "--screen-date", "2026-10-03", "--output-dir", str(tmp_path)], Fake([]), clock) == 0
     assert "reused existing result" in capsys.readouterr().out  # explicit today is accepted too
+
+
+class LiveFake(Fake):
+    live = True  # date-locked like the real providers, but still no network
+
+
+def test_a_run_accepted_before_midnight_survives_crossing_it(tmp_path):
+    ticks = iter([datetime(2026, 10, 3, 23, 59, 59, tzinfo=timezone.utc)]
+                 + [datetime(2026, 10, 4, 0, 0, n, tzinfo=timezone.utc) for n in range(1, 40)])
+    clock = lambda: next(ticks)  # noqa: E731 -- the first reading is Saturday, every later one is Sunday
+    fake = LiveFake(names(6))
+    assert ss.main(["--write", "--output-dir", str(tmp_path)], fake, clock) == 0
+    snap = ss.load_result(tmp_path, ss.screen_id(SAT, ss.DEFAULT_CONFIG))
+    assert snap["screen_date"] == "2026-10-03" and snap["started_at"].startswith("2026-10-03T23:59:59")
+    assert snap["finished_at"].startswith("2026-10-04T00:00") and fake.asked["facts"] == names(6)
+    # the library keeps the same rule: one captured start instant, never re-read
+    late = iter([datetime(2026, 10, 4, 0, 0, n, tzinfo=timezone.utc) for n in range(1, 40)])
+    ok = ss.run_screen(SAT, LiveFake(names(3)), clock=lambda: next(late),
+                       started=datetime(2026, 10, 3, 23, 59, 59, tzinfo=timezone.utc))
+    assert ok["screen_status"] == "ok"
+    with pytest.raises(ss.LiveDateError):                      # ...and a start on the 4th cannot screen the 3rd
+        ss.run_screen(SAT, LiveFake(names(3)), clock=lambda: datetime(2026, 10, 4, 0, 0, 1, tzinfo=timezone.utc))
+
+
+def test_write_is_weekend_only_and_dry_run_works_any_weekday(monkeypatch, tmp_path, capsys):
+    def boom(*a, **k):
+        raise AssertionError("a container/provider call was made")
+    monkeypatch.setattr(ss.subprocess, "run", boom)
+    monkeypatch.setattr(ss, "_run_in", boom)
+    for day in range(5, 10):                                   # Mon 2026-10-05 .. Fri 2026-10-09
+        weekday = lambda d=day: datetime(2026, 10, d, 15, 0, tzinfo=timezone.utc)  # noqa: E731
+        fake = Fake(names(4))
+        with pytest.raises(SystemExit) as e:
+            ss.main(["--write", "--output-dir", str(tmp_path)], fake, weekday)
+        assert e.value.code == 2 and fake.asked == {}
+        with pytest.raises(SystemExit):                        # before the live providers even exist
+            ss.main(["--write", "--output-dir", str(tmp_path)], clock=weekday)
+        assert "Saturday or Sunday" in capsys.readouterr().err
+        assert ss.main(["--dry-run", "--output-dir", str(tmp_path)], Fake(names(4)), weekday) == 0
+        assert f"effective from 2026-10-12" in capsys.readouterr().out
+    assert not tmp_path.exists() or not list(tmp_path.iterdir())
+    for day in (10, 11):                                       # Saturday and Sunday are accepted
+        weekend = lambda d=day: datetime(2026, 10, d, 15, 0, tzinfo=timezone.utc)  # noqa: E731
+        assert ss.main(["--write", "--output-dir", str(tmp_path)], Fake(names(4)), weekend) == 0
+    with pytest.raises(ss.LiveDateError, match="Saturday or Sunday"):   # the library rule for live providers
+        ss.screen(date(2026, 10, 7), LiveFake(names(4)), tmp_path,
+                  clock=lambda: datetime(2026, 10, 7, 15, 0, tzinfo=timezone.utc))
+    assert ss.screen(date(2026, 10, 7), Fake(names(4)), tmp_path)[0]["screen_status"] == "ok"  # fixtures: any date
 
 
 def test_usable_is_the_only_mode_that_takes_another_date(tmp_path, capsys):
@@ -311,54 +359,104 @@ def test_cli_dry_run_writes_nothing(tmp_path, capsys):
 
 # 8. bounded live workload ----------------------------------------------
 
-LIM = {"concurrency": 1, "attempts": 3, "timeout_s": 5, "backoff_base_s": 1, "backoff_cap_s": 3, "min_interval_s": 0}
+LIM = {"concurrency": 1, "attempts": 3, "timeout_s": 20, "backoff_base_s": 1, "backoff_cap_s": 3, "min_interval_s": 0}
+
+# A child request that proves it is alive: it appends a heartbeat every 10 ms
+# to a file named after the item and ITS OWN process id. "hang-*" never returns.
+HEARTBEAT = """
+import os, time
+LOG = {log!r}
+def one(item):
+    path = os.path.join(LOG, item + "." + str(os.getpid()))
+    end = time.time() + (600 if item.startswith("hang") else 0.2)
+    while time.time() < end:
+        with open(path, "a") as f:
+            f.write(repr(time.time()) + "\\n")
+        time.sleep(0.01)
+    return item.upper()
+"""
 
 
-def test_bounded_map_caps_concurrency():
-    lock, active, peak = threading.Lock(), [0], [0]
-
-    def one(item):
-        with lock:
-            active[0] += 1
-            peak[0] = max(peak[0], active[0])
-        time.sleep(0.02)
-        with lock:
-            active[0] -= 1
-        return item * 2
-
-    out, stats = ss.bounded_map(range(12), one, **{**LIM, "concurrency": 3})
-    assert out == {i: {"ok": i * 2} for i in range(12)} and 1 < peak[0] <= 3
-    assert stats == {"requests": 12, "retries": 0}
+def _lifetimes(log):
+    """{filename: (first heartbeat, last heartbeat)} -- one entry per child process."""
+    out = {}
+    for p in sorted(log.iterdir()):
+        beats = [float(x) for x in p.read_text().split()]
+        out[p.name] = (beats[0], beats[-1])
+    return out
 
 
-def test_bounded_map_retries_with_capped_backoff_then_gives_up():
-    sleeps, tries = [], {"flaky": 0}
+def _peak(spans):
+    events = sorted([(a, 1) for a, _ in spans] + [(b, -1) for _, b in spans], key=lambda e: (e[0], -e[1]))
+    peak = live = 0
+    for _, step in events:
+        live += step
+        peak = max(peak, live)
+    return peak
 
-    def one(item):
-        if item == "flaky":
-            tries["flaky"] += 1
-            if tries["flaky"] < 3:
-                raise ConnectionError("https://api.example/v1?key=SECRET")
-            return "fine"
-        raise ValueError("token=SECRET")
 
-    out, stats = ss.bounded_map(["flaky"], one, **LIM, sleep=sleeps.append)
+def test_timed_out_requests_are_killed_and_true_in_flight_work_never_exceeds_the_limit(tmp_path):
+    items = ["hang-a", "ok-1", "hang-b", "ok-2", "ok-3", "hang-c", "ok-4", "ok-5"]
+    out, stats = ss.bounded_map(items, HEARTBEAT.format(log=str(tmp_path)), concurrency=2, attempts=3,
+                                timeout_s=1.2, backoff_base_s=0, backoff_cap_s=0)
+    assert out == {**{i: {"error": "timeout"} for i in items if i.startswith("hang")},
+                   **{i: {"ok": i.upper()} for i in items if i.startswith("ok")}}
+    assert stats == {"requests": 3 * 3 + 5, "retries": 6}
+
+    lives = _lifetimes(tmp_path)
+    assert len(lives) == 14                                   # one real process per request
+    assert _peak(list(lives.values())) <= 2                   # TRUE in-flight work, measured in the children
+    for item in ("hang-a", "hang-b", "hang-c"):
+        tries = sorted(v for k, v in lives.items() if k.startswith(item + "."))
+        assert len(tries) == 3                                # every retry was a fresh process...
+        assert all(a[1] < b[0] for a, b in zip(tries, tries[1:]))   # ...started after the previous one stopped
+        assert all(end - start < 1.2 + 1.0 for start, end in tries)  # none outlived its timeout
+
+    sizes = {p.name: p.stat().st_size for p in tmp_path.iterdir()}
+    time.sleep(0.4)                                           # nothing is still running afterwards
+    assert {p.name: p.stat().st_size for p in tmp_path.iterdir()} == sizes
+
+
+def test_concurrency_one_is_strictly_serial(tmp_path):
+    out, _ = ss.bounded_map(["ok-1", "ok-2", "ok-3"], HEARTBEAT.format(log=str(tmp_path)), **LIM)
+    assert all("ok" in v for v in out.values()) and _peak(list(_lifetimes(tmp_path).values())) == 1
+
+
+def test_bounded_map_retries_with_capped_backoff_then_gives_up(tmp_path):
+    counter = str(tmp_path / "tries")
+    flaky = f"""
+import os
+def one(item):
+    n = int(open({counter!r}).read()) if os.path.exists({counter!r}) else 0
+    open({counter!r}, "w").write(str(n + 1))
+    if n < 2:
+        raise ConnectionError("https://api.example/v1?key=SECRET")
+    return "fine"
+"""
+    sleeps = []
+    out, stats = ss.bounded_map(["flaky"], flaky, **LIM, sleep=sleeps.append)
     assert out == {"flaky": {"ok": "fine"}} and sleeps == [1, 2] and stats == {"requests": 3, "retries": 2}
 
+    dead = 'def one(item):\n    raise ValueError("token=SECRET")\n'
     sleeps.clear()
-    out, stats = ss.bounded_map(["dead"], one, **{**LIM, "attempts": 5}, sleep=sleeps.append)
+    out, stats = ss.bounded_map(["dead"], dead, **{**LIM, "attempts": 5}, sleep=sleeps.append)
     assert out == {"dead": {"error": "ValueError"}}        # class name only, never the message
     assert sleeps == [1, 2, 3, 3] and stats == {"requests": 5, "retries": 4}  # bounded, capped
-    assert ss.bounded_map(["dead"], one, **{**LIM, "attempts": 0}, sleep=sleeps.append)[1]["requests"] == 1
+    assert ss.bounded_map(["dead"], dead, **{**LIM, "attempts": 0}, sleep=sleeps.append)[1]["requests"] == 1
+    broken, _ = ss.bounded_map(["x"], "import no_such_module_xyz\n", **{**LIM, "attempts": 1})
+    assert broken == {"x": {"error": "child_failed"}}       # a child that cannot even start is contained
+    exits, _ = ss.bounded_map(["x"], "def one(i):\n    raise SystemExit(3)\n", **{**LIM, "attempts": 1})
+    assert exits == {"x": {"error": "SystemExit"}}
 
 
-def test_bounded_map_times_out_a_hung_request_and_paces_starts():
-    out, stats = ss.bounded_map(["hang"], lambda _: time.sleep(0.5), sleep=lambda s: None,
-                                **{**LIM, "attempts": 2, "timeout_s": 0.05})
-    assert out == {"hang": {"error": "timeout"}} and stats == {"requests": 2, "retries": 1}
+def test_bounded_map_paces_starts_and_honours_the_stage_deadline():
+    echo = "def one(item):\n    return item\n"
     waits = []
-    ss.bounded_map(range(4), lambda i: i, **{**LIM, "min_interval_s": 30}, sleep=waits.append)
+    ss.bounded_map(["a", "b", "c", "d"], echo, **{**LIM, "min_interval_s": 30}, sleep=waits.append)
     assert len(waits) == 3 and all(25 < w <= 90 for w in waits)  # each start waits for its slot
+    out, stats = ss.bounded_map(["a", "b"], echo, **LIM, deadline_s=0)
+    assert out == {"a": {"error": "stage_deadline"}, "b": {"error": "stage_deadline"}}
+    assert stats == {"requests": 0, "retries": 0}             # past the deadline nothing new starts
 
 
 def test_limits_are_conservative_bounded_and_overridable():
@@ -370,46 +468,60 @@ def test_limits_are_conservative_bounded_and_overridable():
     for bad in ({"concurrency": 0}, {"concurrency": 9}, {"attempts": 6}, {"timeout_s": 500}):
         with pytest.raises(ValueError):
             ss.make_limits(**bad)
-    assert ss._exec_timeout(400, ss.DEFAULT_LIMITS["facts"]) < 3 * 3600  # the whole stage is bounded too
+    facts = ss.DEFAULT_LIMITS["facts"]
+    assert ss._stage_deadline(400, facts) < ss._exec_timeout(400, facts) < 4 * 3600  # the whole stage is bounded
+    script = ss._container_script("def one(i):\n    return i\n", ["A"], facts)
+    assert f"deadline_s={ss._stage_deadline(1, facts)}" in script and "subprocess.Popen" in script
+    assert "threading.Thread(" not in script                  # no un-killable request threads
     with pytest.raises(SystemExit):
         ss.main(["--dry-run", "--concurrency", "50"], clock=lambda: NOON)
 
 
-def _stub_containers(monkeypatch, universe, bad=(), incomplete=()):
-    """Run the REAL generated container scripts in-process against stub
-    yfinance / httpx / pandas / alpaca `server` modules. No Docker, no network."""
-    class Ticker:
-        def __init__(self, s):
-            self.s = s
+STUBS = {
+    "yfinance.py": """
+class Ticker:
+    def __init__(self, s):
+        self.s = s
+    @property
+    def info(self):
+        if self.s == "BAD":
+            raise KeyError("https://query.example/?crumb=SECRET")
+        return {"shortName": self.s + " Inc", "sector": "Energy", "industry": "Oil", "marketCap": 5e9,
+                "averageVolume": 2e6, "currentPrice": 30.0}
+    def history(self, period):
+        return [0] * 1000
+""",
+    "httpx.py": """
+class _R:
+    text = "<html>"
+    def raise_for_status(self):
+        pass
+def get(*a, **k):
+    return _R()
+""",
+    "pandas.py": """
+class _Table:
+    columns = ["Symbol", "Security"]
+    def __getitem__(self, col):
+        return UNIVERSE
+def read_html(_):
+    return [_Table()]
+UNIVERSE = {universe!r}
+""",
+    "server.py": """
+async def get_historical_news(symbol, start_at, end_at):
+    return {"articles": [{}] * 4, "complete": symbol != "T03"}
+""",
+}
 
-        @property
-        def info(self):
-            if self.s in bad:
-                raise KeyError("https://query.example/?crumb=SECRET")
-            return {"shortName": f"{self.s} Inc", "sector": "Energy", "industry": "Oil", "marketCap": 5e9,
-                    "averageVolume": 2e6, "currentPrice": 30.0}
 
-        def history(self, period):
-            return [0] * 1000
-
-    class Table:
-        columns = ["Symbol", "Security"]
-
-        def __getitem__(self, col):
-            return list(universe)
-
-    async def get_historical_news(symbol, start_at, end_at):
-        return {"articles": [{}] * 4, "complete": symbol not in incomplete}
-
-    for name, attrs in {
-        "yfinance": {"Ticker": Ticker},
-        "httpx": {"get": lambda *a, **k: types.SimpleNamespace(raise_for_status=lambda: None, text="<html>")},
-        "pandas": {"read_html": lambda _: [Table()]},
-        "server": {"get_historical_news": get_historical_news},
-    }.items():
-        mod = types.ModuleType(name)
-        mod.__dict__.update(attrs)
-        monkeypatch.setitem(sys.modules, name, mod)
+def _stub_containers(monkeypatch, tmp_path, universe):
+    """Run the REAL generated container scripts in-process; their child
+    requests are real processes that import stub yfinance / httpx / pandas /
+    alpaca `server` modules from PYTHONPATH. No Docker, no network."""
+    for name, src in STUBS.items():
+        (tmp_path / name).write_text(src.replace("{universe!r}", repr(list(universe))))
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
     calls = []
 
     def run_in(service, script, timeout):
@@ -424,15 +536,16 @@ def _stub_containers(monkeypatch, universe, bad=(), incomplete=()):
     return calls
 
 
-FAST = {s: {**lim, "min_interval_s": 0, "backoff_base_s": 0, "backoff_cap_s": 0} for s, lim in ss.DEFAULT_LIMITS.items()}
+FAST = {s: {**lim, "concurrency": 4, "min_interval_s": 0, "backoff_base_s": 0, "backoff_cap_s": 0}
+        for s, lim in ss.DEFAULT_LIMITS.items()}
 
 
-def test_live_providers_end_to_end_through_the_real_container_scripts(monkeypatch):
+def test_live_providers_end_to_end_through_the_real_container_scripts(monkeypatch, tmp_path):
     universe = [f"T{i:02d}" for i in range(18)] + ["BRK.B", "BAD"]
-    calls = _stub_containers(monkeypatch, universe, bad={"BAD"}, incomplete={"T03"})
+    calls = _stub_containers(monkeypatch, tmp_path, universe)
     snap = ss.run_screen(SAT, ss.LiveProviders(FAST), clock=ticking())
     assert [c[0] for c in calls] == ["maverick-mcp", "maverick-mcp", "maverick-mcp", "alpaca-mcp"]
-    assert all(isinstance(c[1], int) and 0 < c[1] < 3 * 3600 for c in calls)
+    assert all(isinstance(c[1], int) and 0 < c[1] < 4 * 3600 for c in calls)
     assert snap["screen_status"] == "ok" and "BRK-B" in snap["pool"] and len(snap["pool"]) == 18
     assert row(snap, "BAD")["reasons"] == ["facts_fetch_error"]
     assert row(snap, "T03")["reasons"] == [f"news_probe_{i}_unavailable" for i in (1, 2, 3)]  # fail closed
@@ -442,9 +555,27 @@ def test_live_providers_end_to_end_through_the_real_container_scripts(monkeypatc
     assert (t["history"]["requested"], t["news"]["requested"]) == (19, 19)
     assert t["news"]["errors"] == {"incomplete_pagination": 3} and t["news"]["requests"] == 57
     assert t["news"]["retries"] == 0  # incomplete pagination is terminal, not retried
-    assert t["limits"]["news"]["concurrency"] == 2 and t["universe"]["ok"] is True
+    assert t["limits"]["news"]["concurrency"] == 4
+    assert t["universe"] == {**t["universe"], "requested": 1, "ok": 1, "unavailable": 0, "errors": {},
+                             "requests": 1, "retries": 0, "stage_error": None}
+    assert set(t["universe"]) == set(t["facts"])               # one telemetry contract for every stage
     assert "SECRET" not in ss.snapshot_to_json(snap)
     ss.validate_snapshot(snap, kind="attempt")
+
+
+def test_universe_telemetry_records_a_failed_fetch_like_any_other_stage(monkeypatch, tmp_path):
+    _stub_containers(monkeypatch, tmp_path, ["A"])
+    (tmp_path / "httpx.py").write_text('def get(*a, **k):\n    raise OSError("https://secret.example/?token=SECRET")\n')
+    snap = ss.run_screen(SAT, ss.LiveProviders(FAST), clock=ticking())
+    u = snap["telemetry"]["universe"]
+    assert snap["failure_reasons"] == ["universe_fetch_failed"]
+    assert {k: u[k] for k in ("requested", "ok", "unavailable", "errors", "requests", "retries", "stage_error")} == {
+        "requested": 1, "ok": 0, "unavailable": 1, "errors": {"OSError": 1}, "requests": 3, "retries": 2,
+        "stage_error": "OSError"}
+    assert isinstance(u["elapsed_s"], float) and "SECRET" not in ss.snapshot_to_json(snap)
+    ss.validate_snapshot(snap, kind="attempt")
+    empty = ss.run_screen(SAT, Fake([], stats={"requests": 1, "retries": 0}), clock=ticking())
+    assert empty["telemetry"]["universe"]["errors"] == {"empty": 1} and empty["telemetry"]["universe"]["ok"] == 0
 
 
 def test_container_failures_become_sanitized_stage_failures(monkeypatch):
@@ -480,7 +611,9 @@ def test_telemetry_is_bounded_and_never_leaks_exception_detail():
     assert failed["telemetry"]["facts"]["requests"] is None and failed["telemetry"]["limits"] is None
     assert "hunter2" not in ss.snapshot_to_json(failed)
     gone = ss.run_screen(SAT, Fake(names(5), fail=("universe",)))
-    assert gone["telemetry"]["universe"] == {**gone["telemetry"]["universe"], "ok": False, "stage_error": "RuntimeError"}
+    assert gone["telemetry"]["universe"] == {**gone["telemetry"]["universe"], "requested": 1, "ok": 0,
+                                             "unavailable": 1, "errors": {"RuntimeError": 1},
+                                             "stage_error": "RuntimeError"}
     assert "hunter2" not in ss.snapshot_to_json(gone)
 
 
@@ -550,6 +683,29 @@ def test_a_result_without_its_attempt_record_is_not_usable(tmp_path):
         ss.screen(SAT, Fake(names(6)), tmp_path)
     assert ss.usable_pool(tmp_path, date(2026, 10, 6)) == {
         "state": "unavailable", "reason": "snapshot_invalid", "screen_id": None, "pool": None, "evidence": []}
+
+
+def test_an_orphaned_result_is_neither_a_predecessor_nor_a_usable_pool(tmp_path, capsys):
+    good, _ = ss.screen(SAT, Fake(names(6)), tmp_path)
+    ss.attempt_path(tmp_path, good["attempt_id"]).unlink()    # the result file is intact and self-consistent
+    assert ss.load_snapshot(ss.result_path(tmp_path, good["screen_id"]), "result") == good
+    with pytest.raises(ss.SnapshotCorrupt, match="orphaned"):
+        ss.load_result(tmp_path, good["screen_id"])
+    later = Fake(names(6))
+    with pytest.raises(ss.SnapshotCorrupt, match="orphaned"):  # never named as previous_ok_screen...
+        ss.run_screen(date(2026, 10, 10), later, snapshot_dir=tmp_path)
+    assert later.asked == {}                                   # ...and found out before any fetch
+    sat = lambda: datetime(2026, 10, 10, 12, 0, tzinfo=timezone.utc)  # noqa: E731
+    for mode in ("--dry-run", "--write"):
+        cli = Fake(names(6))
+        assert ss.main([mode, "--output-dir", str(tmp_path)], cli, sat) == 2 and cli.asked == {}
+        assert "REFUSED" in capsys.readouterr().err
+    assert ss.usable_pool(tmp_path, date(2026, 10, 6))["reason"] == "snapshot_invalid"
+    # a backing attempt that exists but differs is no better
+    other = ss.run_screen(SAT, Fake(names(5)))
+    ss.write_attempt(tmp_path, other)
+    with pytest.raises(ss.SnapshotCorrupt, match="differs"):
+        ss.load_result(tmp_path, good["screen_id"])
 
 
 # 10. carry-forward needs a recorded failure ----------------------------
@@ -706,7 +862,7 @@ def test_wrong_ids_filenames_and_attempt_state_are_rejected(tmp_path):
     for field, value in (("pool", []), ("pool_hash", ss._hash([])), ("sector_mix", {}), ("effective_from", "2026-10-05")):
         with pytest.raises(ss.SnapshotCorrupt, match="failed attempt"):
             ss.validate_snapshot(rehash({**failed, field: value}), kind="attempt")
-    with pytest.raises(ss.SnapshotCorrupt, match="disagree"):
+    with pytest.raises(ss.SnapshotCorrupt, match="recorded evidence"):
         ss.validate_snapshot(rehash({**failed, "failure_reasons": []}), kind="attempt")
     with pytest.raises(ss.SnapshotCorrupt, match="altered"):
         ss.validate_snapshot({**good, "pool": good["pool"][:-1]}, kind="attempt")  # edited, not re-hashed
@@ -716,6 +872,157 @@ def test_wrong_ids_filenames_and_attempt_state_are_rejected(tmp_path):
     with pytest.raises(ss.SnapshotCorrupt):                                    # nothing invalid is ever written
         ss.write_attempt(tmp_path, rehash({**good, "counts": {}}))
     assert not list(tmp_path.rglob("*.json"))
+
+
+def _row(i, **changes):
+    return lambda s: s["rows"][i].update(changes)
+
+
+def _tel(stage, **changes):
+    return lambda s: s["telemetry"][stage].update(changes)
+
+
+def _forge_success(s):
+    """A failed attempt dressed up as a success, internally consistent except for the evidence."""
+    s.update(screen_status="ok", failure_reasons=[], pool=[], pool_hash=ss._hash([]), sector_mix={},
+             effective_from="2026-10-05")
+
+
+PREV = {"screen_id": "2026-09-26_" + ss.config_hash(ss.DEFAULT_CONFIG)[:12], "content_hash": "a" * 64}
+
+# base "ok": S000-S011, S003 rejected at facts (price), everything else eligible.
+NESTED = {
+    # universe
+    "universe source empty": _set(["universe", "source"], ""),
+    "universe url not text": _set(["universe", "url"], 7),
+    "universe extra key": _set(["universe", "payload"], "<html>"),
+    "universe timestamp naive": _set(["universe", "fetched_at"], "2026-10-03T12:00:03"),
+    "universe timestamp missing": _set(["universe", "fetched_at"], None),
+    "universe timestamp before the run": _set(["universe", "fetched_at"], "2026-10-03T11:00:00+00:00"),
+    "universe count is a bool": _set(["universe", "count"], True),
+    # rows: types
+    "row name is a number": _row(0, name=5),
+    "row market cap is text": _row(0, market_cap="5e9"),
+    "row market cap negative": _row(0, market_cap=-5e9),
+    "row price is a bool": _row(0, price=True),
+    "row history bars negative": _row(0, history_bars=-1),
+    "row history bars fractional": _row(0, history_bars=1200.5),
+    "row history bars bool": _row(0, history_bars=True),
+    "row news counts wrong length": _row(0, news_counts=[9, 9]),
+    "row news counts negative": _row(0, news_counts=[9, -1, 9]),
+    "row news counts text": _row(0, news_counts=["3", "3", "3"]),
+    "row news counts not a list": _row(0, news_counts=9),
+    "row reason is prose": _row(3, reasons=["Traceback (most recent call last): key=SECRET"]),
+    # rows: a status the recorded numbers do not produce
+    "eligible but price below the floor": _row(0, price=1.0),
+    "eligible but cap above the ceiling": _row(0, market_cap=9e10),
+    "eligible but excluded industry": _row(0, industry="Biotechnology"),
+    "eligible but too little history": _row(0, history_bars=10),
+    "eligible but too little news": _row(0, news_counts=[1, 1, 1]),
+    "eligible but a news probe missing": _row(0, news_counts=[9, None, 9]),
+    "eligible but no facts at all": _row(0, name=None, sector=None, industry=None, market_cap=None,
+                                         avg_volume=None, price=None),
+    "rejected for the wrong reason": _row(3, reasons=["market_cap_below_min"]),
+    "rejected but its numbers pass": _row(3, price=40.0),
+    "rejected at facts yet has history": _row(3, history_bars=1200),
+    "rejected at facts yet has news": _row(3, news_counts=[3, 3, 3]),
+    "unavailable with invented reason": _row(3, status="data_unavailable", reasons=["facts_fetch_error"]),
+    # telemetry
+    "telemetry stage missing a key": lambda s: s["telemetry"]["facts"].pop("retries"),
+    "telemetry extra stage": _set(["telemetry", "laya"], {}),
+    "telemetry negative requested": _tel("facts", requested=-1),
+    "telemetry counters do not add up": _tel("facts", ok=3),
+    "telemetry requested mismatch": _tel("history", requested=12, ok=12),
+    "telemetry news requested mismatch": _tel("news", requested=1, ok=1),
+    "telemetry requests negative": _tel("news", requests=-4),
+    "telemetry retries text": _tel("news", retries="2"),
+    "telemetry elapsed negative": _tel("facts", elapsed_s=-1.0),
+    "telemetry elapsed text": _tel("facts", elapsed_s="fast"),
+    "telemetry timestamp naive": _tel("history", started_at="2026-10-03T12:00:05"),
+    "telemetry timestamp outside the run": _tel("history", started_at="2027-01-01T00:00:00+00:00"),
+    "telemetry error key is a message": _tel("facts", errors={"HTTP 401 for https://x/?apikey=SECRET": 1}),
+    "telemetry error count zero": _tel("facts", errors={"KeyError": 0}),
+    "telemetry too many error codes": _tel("facts", errors={f"E{i}": 1 for i in range(20)}),
+    "telemetry stage error is prose": _tel("news", stage_error="Traceback: boom at line 3"),
+    "telemetry universe requested 2": _tel("universe", requested=2, ok=2),
+    "telemetry universe says it failed": _tel("universe", ok=0, unavailable=1),
+    "telemetry limits malformed": _set(["telemetry", "limits"], {"facts": {"concurrency": "lots"}}),
+    # timestamps
+    "finished before started": _set(["finished_at"], "2026-10-03T11:59:00+00:00"),
+    "finished naive": _set(["finished_at"], "2026-10-03T12:30:00"),
+    # sector mix
+    "sector mix bool value": _set(["sector_mix"], {"Industrials": True}),
+    "sector mix negative": _set(["sector_mix"], {"Industrials": 12, "Energy": -1}),
+    "sector mix zero entry": _set(["sector_mix"], {"Industrials": 11, "Energy": 0}),
+    "sector mix right total wrong sector": _set(["sector_mix"], {"Energy": 11}),
+    # lineage
+    "previous empty": _set(["previous_ok_screen"], {}),
+    "previous extra key": _set(["previous_ok_screen"], {**PREV, "pool": ["S000"]}),
+    "previous id malformed": _set(["previous_ok_screen"], {**PREV, "screen_id": "last week"}),
+    "previous is this screen": _set(["previous_ok_screen"], {**PREV, "screen_id": "2026-10-03_" + PREV["screen_id"][11:]}),
+    "previous is in the future": _set(["previous_ok_screen"], {**PREV, "screen_id": "2026-12-05_" + PREV["screen_id"][11:]}),
+    "previous is another config": _set(["previous_ok_screen"], {**PREV, "screen_id": "2026-09-26_" + "b" * 12}),
+    "previous hash malformed": _set(["previous_ok_screen"], {**PREV, "content_hash": "abc"}),
+    # news windows / config
+    "news windows altered": _set(["news_windows", 0, "end_at"], "2026-10-02T00:00:00+00:00"),
+    "news windows dropped": lambda s: s["news_windows"].pop(),
+    # state forgery
+    "ok relabelled failed": lambda s: s.update(screen_status="failed", failure_reasons=["universe_fetch_failed"],
+                                               pool=None, pool_hash=None, sector_mix=None, effective_from=None),
+    "ok with an invented stage failure": _tel("news", stage_error="RuntimeError"),
+}
+
+
+@pytest.mark.parametrize("label", NESTED)
+def test_nested_corrupt_but_rehashed_records_are_rejected(label, tmp_path):
+    good = _ok_snapshot()
+    control = rehash({**copy.deepcopy(good), "previous_ok_screen": dict(PREV)})
+    ss.validate_snapshot(control, kind="result", stem=good["screen_id"])   # a valid predecessor reference passes
+    bad = copy.deepcopy(good)
+    NESTED[label](bad)
+    rehash(bad)
+    for kind in ("attempt", "result"):
+        with pytest.raises(ss.SnapshotCorrupt):
+            ss.validate_snapshot(copy.deepcopy(bad), kind=kind)
+    # ...and therefore can never be written, reused, or served as a pool
+    with pytest.raises(ss.SnapshotCorrupt):
+        ss.write_attempt(tmp_path, bad)
+    ss.write_attempt(tmp_path, good)
+    ss.publish_result(tmp_path, good)
+    for path in (ss.attempt_path(tmp_path, good["attempt_id"]), ss.result_path(tmp_path, good["screen_id"])):
+        path.write_text(ss.snapshot_to_json(bad), newline="\n")            # both copies swapped, still identical
+    with pytest.raises(ss.SnapshotCorrupt):
+        ss.screen(SAT, Fake(names(12)), tmp_path)
+    assert ss.usable_pool(tmp_path, date(2026, 10, 6))["reason"] == "snapshot_invalid"
+
+
+def test_state_cannot_be_forged_with_a_new_content_hash():
+    failed = _failed_snapshot()                                 # the news stage failed
+    forged = copy.deepcopy(failed)
+    _forge_success(forged)
+    with pytest.raises(ss.SnapshotCorrupt, match="recorded evidence"):
+        ss.validate_snapshot(rehash(forged), kind="attempt")
+    for reasons in (["data_unavailable_above_threshold"], ["news_coverage_incomplete", "universe_empty"],
+                    ["universe_fetch_failed"], ["Traceback"]):
+        with pytest.raises(ss.SnapshotCorrupt, match="recorded evidence"):
+            ss.validate_snapshot(rehash({**copy.deepcopy(failed), "failure_reasons": reasons}), kind="attempt")
+    gone = ss.run_screen(SAT, Fake(names(5), fail=("universe",)), clock=ticking())
+    ss.validate_snapshot(gone, kind="attempt")
+    for change in ({"universe": {**gone["universe"], "fetched_at": gone["started_at"]}},   # "fetched" yet failed
+                   {"rows": _ok_snapshot()["rows"]}):                                       # rows from nowhere
+        with pytest.raises(ss.SnapshotCorrupt):
+            ss.validate_snapshot(rehash({**copy.deepcopy(gone), **change}), kind="attempt")
+    cfg_bad = copy.deepcopy(_ok_snapshot())
+    for mutate in (lambda c: c.pop("min_price"), lambda c: c.update(min_price="10"),
+                   lambda c: c.update(excluded_industries="Biotechnology"), lambda c: c.update(extra=1),
+                   lambda c: c.update(refresh_interval_days=0)):
+        snap = copy.deepcopy(cfg_bad)
+        mutate(snap["config"])
+        snap["config_hash"] = ss.config_hash(snap["config"])    # even with a matching config hash and screen id
+        snap["screen_id"] = ss.screen_id(SAT, snap["config"])
+        snap["attempt_id"] = ss.attempt_id(snap["screen_id"], 1)
+        with pytest.raises(ss.SnapshotCorrupt, match="config"):
+            ss.validate_snapshot(rehash(snap), kind="attempt")
 
 
 # 12. determinism -------------------------------------------------------
