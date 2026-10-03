@@ -756,6 +756,45 @@ async def _get_recent_activity(
 _VALID_RUN_KINDS = {"training", "smoke", "archived", "evaluation"}
 
 
+async def _record_workflow_events(events: list[dict]) -> dict[str, Any]:
+    """Insert backtest workflow progress events (dashboard-v2 Workflow page).
+    Every event is validated against workflow_contract (allowlisted stage,
+    status, metric keys and value types -- no free text, no identities);
+    an invalid event is rejected individually and reported, never stored.
+    Idempotent: (invocation_id, seq) is unique, so a re-sent batch is a
+    no-op. Telemetry only -- nothing here reads or affects trading state."""
+    from workflow_contract import EventRejected, validate_event
+    valid, rejected = [], []
+    for e in events:
+        try:
+            valid.append(validate_event(e))
+        except EventRejected as exc:
+            rejected.append(str(exc)[:200])
+    inserted = 0
+    if valid:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                for v in valid:
+                    status = await conn.execute(
+                        """
+                        INSERT INTO workflow_events (run_id, invocation_id, seq, cycle_id, day_index,
+                            day_label, market_date, stage, status, occurred_at, metrics,
+                            decision_id, proposal_key)
+                        VALUES ($1::uuid, $2::uuid, $3, $4::uuid, $5, $6, $7::date, $8, $9,
+                            $10::timestamptz, $11::jsonb, $12::uuid, $13)
+                        ON CONFLICT (invocation_id, seq) DO NOTHING
+                        """,
+                        v["run_id"], v["invocation_id"], v["seq"], v["cycle_id"], v["day_index"],
+                        v["day_label"],
+                        datetime.fromisoformat(v["market_date"]).date() if v["market_date"] else None,
+                        v["stage"], v["status"], datetime.fromisoformat(v["occurred_at"]),
+                        json.dumps(v["metrics"], sort_keys=True), v["decision_id"], v["proposal_key"],
+                    )
+                    inserted += status.endswith(" 1")
+    return {"inserted": inserted, "duplicates": len(valid) - inserted, "rejected": rejected}
+
+
 async def _register_run(run_id: str, run_kind: str) -> dict[str, Any]:
     """Idempotently register a backtest run's durable classification in
     backtest_run_registry -- a run is 'training' (real, evaluation-ready),

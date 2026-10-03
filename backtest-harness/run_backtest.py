@@ -1791,6 +1791,19 @@ def apply_state_dir(state_dir: "str | None") -> None:
     SELECTOR_SNAPSHOT_DIR = d / "selector_snapshots"
 
 
+_ACTIVE_PROGRESS = None  # the run's WorkflowEmitter, flushed by main()'s finally
+
+
+def _close_active_progress() -> None:
+    global _ACTIVE_PROGRESS
+    em, _ACTIVE_PROGRESS = _ACTIVE_PROGRESS, None
+    if em is not None:
+        stats = em.close(timeout=60)
+        print(f"workflow telemetry: {stats.get('written', 0)} written, {stats.get('duplicates', 0)} duplicate, "
+              f"{stats.get('dropped', 0)} dropped, {stats.get('rejected', 0)} rejected, "
+              f"{stats.get('failed_batches', 0)} failed batch(es)")
+
+
 def _close_active_selector() -> None:
     global _ACTIVE_SELECTOR
     ctx, _ACTIVE_SELECTOR = _ACTIVE_SELECTOR, None
@@ -4791,9 +4804,48 @@ def ask_hermes(prompt: str, usage_totals: dict, is_reflection_day: bool = False,
                             prompt_sha256=prompt2_sha256, raw_response=raw2, response_sha256=response2_sha256)
 
 
+def _cycle_id(run_key: str, day_index: int) -> str:
+    """Deterministic per (run, day) -- see record_snapshot_once's docstring."""
+    return str(uuid.uuid5(_DECISION_ID_NAMESPACE, f"{run_key}|cycle|{day_index}"))
+
+
+def _wf_exit_kind(stage: str) -> str:
+    """Workflow-telemetry enum for a mechanical exit's simulate_trading_day stage."""
+    return {"opening_gap": "opening_gap", "time_stop": "time_stop",
+            "intraday_930_945": "intraday", "intraday_walk": "intraday"}.get(stage, "other")
+
+
+def _wf_exit_reason(reason: str) -> str:
+    r = (reason or "").lower()
+    return ("stop" if r.startswith("stop") else "target" if r.startswith("target")
+            else "time_stop" if r.startswith("time stop") else "other")
+
+
+def _wf_laya_metrics(selector: "Any", day: date, outcome: "Any", replayed: bool) -> dict:
+    """Aggregate-only Laya outcome for workflow telemetry: counts plus the
+    min/median/max review_probability over the day's scored cards -- never a
+    per-company score, rank, row ID, or ticker. Telemetry only."""
+    ev = dict(outcome.event)
+    m = {"cards": int(ev.get("eligible", 0)), "scored": int(ev.get("scored", 0) or 0),
+         "unavailable": int(ev.get("data_unavailable", 0) or 0),
+         "status": "selected" if outcome.ok else "failed_closed",
+         "replayed": bool(replayed or ev.get("replayed"))}
+    m["complete"] = m["scored"]
+    m["worker_batches"] = 0 if m["replayed"] or not m["scored"] else 1
+    try:
+        from laya_selector import load_snapshot
+        snap = load_snapshot(selector.snapshot_dir, selector.run_id, day.isoformat())
+        ps = sorted(r.review_probability for r in snap.rows if r.review_probability is not None)
+        if ps:
+            m.update(score_min=ps[0], score_median=ps[len(ps) // 2], score_max=ps[-1])
+    except Exception:
+        pass
+    return m
+
+
 def _execute_exit(working: "Portfolio", ticker: str, quantity: int, entry_price: float,
                   exit_price: float, reason: str, kind: str, run_key: str, day_index: int,
-                  summary: dict, activity: list, run_id: str | None = None) -> None:
+                  summary: dict, activity: list, run_id: str | None = None) -> "str | None":
     """Real bookkeeping + journal write for a FULL-quantity mechanical exit
     (opening gap, time-stop, or an intraday-walk stop/target touch) --
     replays one "exit" event from simulate_trading_day's plan against
@@ -4814,6 +4866,7 @@ def _execute_exit(working: "Portfolio", ticker: str, quantity: int, entry_price:
         run_id=run_id,
     )
     activity.append(("exit", line, exit_id))
+    return exit_id
 
 
 def build_decision_time_context(working: "Portfolio", bars: dict[str, dict],
@@ -4898,7 +4951,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             masking: RunMasking, watchlist: list[dict], limits_ctx: dict,
             run_key: str, fundamentals_enabled: bool = False,
             runtime: "HermesRuntime | None" = None,
-            selector: "Any | None" = None) -> tuple[Portfolio, dict, "Callable[[], None]"]:
+            selector: "Any | None" = None,
+            progress: "Any | None" = None) -> tuple[Portfolio, dict, "Callable[[], None]"]:
     """Run one simulated trading day. Returns (new_portfolio, summary,
     do_observability).
 
@@ -4975,7 +5029,12 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # run_key doubles as this run's run_id (main() now generates it as a
     # real uuid4 and persists it in backtest_state.json -- 2026-08-28, item
     # 5) -- no separate parameter needed.
-    cycle_id = str(uuid.uuid5(_DECISION_ID_NAMESPACE, f"{run_key}|cycle|{day_index}"))
+    cycle_id = _cycle_id(run_key, day_index)
+    # Workflow progress telemetry (dashboard-v2 Workflow page): enqueue-only,
+    # never raises, never read back -- see workflow_events.py.
+    from workflow_events import NULL_EMITTER, rejection_codes
+    _wf = (progress or NULL_EMITTER).for_cycle(cycle_id, day_index, day_label, day)
+    _wf.emit("cycle", "started")
     activity: list[tuple[str, str, str | None]] = [
         ("cycle_start", f"{day_label} ({day}) — reconciling and fetching data", None)
     ]
@@ -5002,6 +5061,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             # Confirmed via the real calendar, not just assumed from
             # missing bars alone -- a genuine holiday/weekend.
             summary["skipped"] = "no market data (confirmed holiday/weekend via trading calendar)"
+            _wf.emit("cycle", "skipped", {"skip_reason": "no_market_data"})
             # nothing happened -- caller's object, unchanged; 3-tuple to
             # match the real return shape below (a no-op observability
             # closure).
@@ -5070,6 +5130,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # BEFORE `needed`/intraday bars are computed below, so a cancelled
     # order's ticker is never even fetched for execution timing it will now
     # never need.
+    _wf_buys = sum(1 for o in working.pending_orders if o.action == "BUY")
+    _wf.emit("prefill_news", "started" if _wf_buys else "skipped", {"queued_buys": _wf_buys})
     working.pending_orders, _pre_fill_gate_events, _pre_fill_gate_call_evidence = apply_pre_fill_news_gate(
         working.pending_orders, day, masking, summary["usage"],
         fetch_news_fn=fetch_news_window, call_hermes_fn=lambda p: _call_hermes(p, runtime),
@@ -5128,6 +5190,18 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         activity.append(("order_rejected", line, order.decision_id or None))
         if order.decision_id:
             resolve_trade_rejection(order.decision_id, event["reason"])
+        _wf.emit("execution", "completed", lambda: {
+            "action": order.action, "outcome": "cancelled", "rule_codes": rejection_codes(event["reason"])},
+            decision_id=order.decision_id or None)
+    if _wf_buys:
+        _wf.emit("prefill_news", "completed", lambda: {
+            "queued_buys": _wf_buys,
+            "confirmed": sum(1 for e in _pre_fill_gate_events if e["outcome"] != "cancel"),
+            "cancelled": sum(1 for e in _pre_fill_gate_events if e["outcome"] == "cancel"),
+            "articles": sum(int(e.get("article_count") or 0) for e in _pre_fill_gate_events),
+            "hermes_calls": 0 if _pre_fill_gate_call_evidence is None else 1,
+            "replayed": _pre_fill_gate_call_evidence is None
+                        and bool((checkpoint or {}).get("pre_fill_gate"))})
 
     # -- chronological intraday execution ----------------------------------
     # Only fetch (and require) real intraday data for tickers that actually
@@ -5152,6 +5226,10 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     else:
         require_intraday_coverage(needed, intraday)  # fails closed -- see its docstring (no-op: needed=[])
 
+    _wf_orders, _wf_held = len(working.pending_orders), len(working.holdings)
+    _wf_n = {"filled": 0, "rejected": 0, "superseded": 0, "exits": 0}
+    _wf.emit("execution", "started" if _wf_orders else "skipped", {"queued_orders": _wf_orders})
+    _wf.emit("positions", "started" if _wf_held else "skipped", {"monitored": _wf_held})
     if needed:
         # working.equity_curve as of end of YESTERDAY -- equity_curve isn't
         # appended to until the very end of run_day (below), so this is the
@@ -5174,11 +5252,15 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             if kind == "exit":
                 if event["reason"].startswith("stop"):
                     working.stopped_out_today.append(ticker)
-                _execute_exit(
+                _wf_exit_id = _execute_exit(
                     working, ticker, event["quantity"], event["entry_price"], event["exit_price"],
                     event["reason"], event["stage"], run_key, day_index, summary, activity,
                     run_id=run_key,
                 )
+                _wf_n["exits"] += 1
+                _wf.emit("positions", "completed", lambda: {
+                    "exit_kind": _wf_exit_kind(event["stage"]), "exit_reason": _wf_exit_reason(event["reason"])},
+                    decision_id=_wf_exit_id)
             elif kind == "superseded":
                 order = event["order"]
                 line = f"{ticker}: queued {order.action} superseded -- {event['reason']}"
@@ -5190,6 +5272,10 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                 # reasoned ("superseded"), never a fabricated fill.
                 if order.decision_id:
                     resolve_trade_rejection(order.decision_id, f"superseded: {event['reason']}")
+                _wf_n["superseded"] += 1
+                _wf.emit("execution", "completed", {"action": order.action, "outcome": "superseded",
+                                                    "rule_codes": ["superseded"]},
+                         decision_id=order.decision_id or None)
             elif kind == "rejected":
                 order = event["order"]
                 line = f"{ticker}: queued {order.action} rejected -- {event['reason']}"
@@ -5197,6 +5283,10 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                 activity.append(("order_rejected", line, order.decision_id or None))
                 if order.decision_id:
                     resolve_trade_rejection(order.decision_id, event["reason"])
+                _wf_n["rejected"] += 1
+                _wf.emit("execution", "completed", lambda: {
+                    "action": order.action, "outcome": "rejected", "rule_codes": rejection_codes(event["reason"])},
+                    decision_id=order.decision_id or None)
             elif kind == "fill":
                 order, bar = event["order"], event["bar"]
                 fill = simulate_fill(order.alias, order.action, order.quantity, bar["open"], bar)
@@ -5206,6 +5296,10 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                     activity.append(("order_rejected", line, order.decision_id or None))
                     if order.decision_id:
                         resolve_trade_rejection(order.decision_id, fill["rejection_reason"])
+                    _wf_n["rejected"] += 1
+                    _wf.emit("execution", "completed", {"action": order.action, "outcome": "rejected",
+                                                        "rule_codes": ["sim_rejected"]},
+                             decision_id=order.decision_id or None)
                     continue
                 # Resolve the SAME decision_id record_queued_decision
                 # already journaled 'pending' at queue time -- never a
@@ -5223,6 +5317,14 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                         strategy_profile=order.strategy_profile,
                         min_reward_risk_used=order.min_reward_risk_used,
                     )
+                _wf_n["filled"] += 1
+                _wf.emit("execution", "completed", {"action": order.action, "outcome": "filled"},
+                         decision_id=decision_id)
+                if order.action == "SELL":
+                    _wf_n["exits"] += 1
+                    _wf.emit("positions", "completed", {"exit_kind": "discretionary",
+                                                        "exit_reason": "discretionary"},
+                             decision_id=decision_id)
                 if order.action == "BUY":
                     cost = fill["fill_price"] * fill["fill_quantity"]
                     working.cash -= cost
@@ -5269,6 +5371,12 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # another (filled, rejected, or superseded) -- never carried forward
     # indefinitely.
     working.pending_orders = []
+    if _wf_orders:
+        _wf.emit("execution", "completed", {"queued_orders": _wf_orders, "filled": _wf_n["filled"],
+                                            "rejected": _wf_n["rejected"], "superseded": _wf_n["superseded"]})
+    if _wf_held:
+        _wf.emit("positions", "completed", lambda: {"monitored": _wf_held, "exits": _wf_n["exits"],
+                                                    "open_after": len(working.holdings)})
 
     # Phase 1 aggressive profile: evaluate the activity-escalation block
     # boundary AFTER today's exits are recorded (so a completion on the
@@ -5352,6 +5460,12 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # One combined fetch (not two) -- fewer real docker-exec round trips.
     held_tickers = list(working.holdings)
     unheld_tickers = [t for t in tickers if t not in working.holdings]
+    _wf.emit("population", "completed", {
+        "universe": len(tickers), "excluded_held_or_pending": len(tickers) - len(unheld_tickers),
+        "eligible": len(unheld_tickers), "selector_mode": "laya" if selector is not None else "off"})
+    if selector is None:
+        _wf.emit("laya", "skipped", {})
+        _wf.emit("shortlist", "skipped", {})
     # -- experimental fixed-30 Laya selector (opt-in; `selector` is None --
     # and every line of this block inert -- unless --selector-mode was
     # passed). New-entry candidates become ONLY today's selected mini-pool;
@@ -5368,11 +5482,21 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             # A retry of an already-decided cycle must report the SAME
             # selection that cycle ran with (never a fresh/different one).
             selector_outcome = SelectorOutcome.from_record(_cp["selector"])
+            _wf_laya_replayed = True
         else:
+            _wf.emit("laya", "started", {"cards": len(unheld_tickers)})
             selector_outcome = selector.select_for_day(
                 day, set(working.holdings) | {o.ticker for o in working.pending_orders})
+            _wf_laya_replayed = False
+        _wf.emit("laya", "completed" if selector_outcome.ok else "failed",
+                 lambda: _wf_laya_metrics(selector, day, selector_outcome, _wf_laya_replayed))
+        _wf.emit("shortlist", "completed", lambda: {
+            "selected": len(selector_outcome.selected), "k": 10,
+            "shortfall": len(selector_outcome.selected) < 10,
+            "status": "selected" if selector_outcome.ok else "failed_closed"})
         candidate_tickers = list(selector_outcome.selected)
         summary["selector"] = dict(selector_outcome.event)
+    _wf.emit("evidence", "started", {"shortlisted": len(candidate_tickers), "held": len(held_tickers)})
     all_technicals = (fetch_technicals(candidate_tickers + held_tickers, day)
                       if candidate_tickers + held_tickers else {})
     news = (fetch_news(candidate_tickers + held_tickers, day, decision_cutoff_at)
@@ -5385,6 +5509,13 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # would journal as an ordinary quiet day. See
     # InsufficientCandidateCoverageError.
     _check_candidate_coverage(candidate_tickers, technicals)
+    _wf.emit("evidence", "completed", lambda: {
+        "names": len(set(candidate_tickers + held_tickers)), "shortlisted": len(candidate_tickers),
+        "held": len(held_tickers),
+        "technicals_ok": sum(1 for v in all_technicals.values() if "error" not in v),
+        "technicals_errors": sum(1 for v in all_technicals.values() if "error" in v),
+        "news_items": sum(len(v or []) for v in news.values()),
+        "fundamentals": "on" if fundamentals_enabled else "off"})
 
     # Fundamentals V1 (opt-in, default off): CANDIDATES only, never held
     # positions -- exits stay technical/news-only, unaffected. Fetched
@@ -5558,6 +5689,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         print(f"  REPLAYING checkpointed response for day_index={day_index} "
               "-- no new Hermes call")
     else:
+        _wf.emit("hermes", "started", {"candidates": len(input_payload["candidates"]),
+                                       "positions": len(input_payload["positions"])})
         try:
             hermes_result = ask_hermes(prompt, summary["usage"], is_reflection_day=is_reflection_day,
                                        fundamentals_enabled=fundamentals_enabled,
@@ -5571,6 +5704,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             # a failure LATER in this function (a journal write, etc.) would
             # have no real usage to tag beyond what's already accumulated here.
             exc.usage = summary["usage"]
+            _wf.emit("hermes", "failed", {})
             raise
         response = hermes_result.response
         attempt_count = hermes_result.attempt_count
@@ -5606,6 +5740,15 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             **({"selector": selector_outcome.to_record()} if selector_outcome is not None else {}),
         })
 
+    _wf_decisions = list((response or {}).get("decisions", []) or [])
+    _wf.emit("hermes", "completed", lambda: {
+        "candidates": len(input_payload["candidates"]), "positions": len(input_payload["positions"]),
+        "decisions": len(_wf_decisions),
+        "buys": sum(1 for d in _wf_decisions if str(d.get("action", "")).upper() == "BUY"),
+        "sells": sum(1 for d in _wf_decisions if str(d.get("action", "")).upper() == "SELL"),
+        "attempts": int(attempt_count or 1), "reflection": bool(is_reflection_day),
+        "total_tokens": int((summary["usage"] or {}).get("total_tokens") or 0),
+        "replayed": checkpoint is not None and checkpoint.get("response") is not None})
     # -- ESSENTIAL: persist this cycle's exact evidence (2026-08-31) ------
     # Structural only -- an eligible candidate is 'proposed' iff its alias
     # appears in the validated response's own decisions list, never an
@@ -5746,6 +5889,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     # _candidate_status/_full_candidate_status already use, never the
     # freshly re-fetched local `candidates`. Evidence-membership only:
     # setup QUALITY stays entirely Hermes' judgment (RULES.md §10).
+    _wf.emit("decision_risk", "started" if _wf_decisions else "skipped", {"proposals": len(_wf_decisions)})
+    _wf_blocked0, _wf_queued = len(summary["blocked"]), {}
     candidate_aliases = {c["alias"] for c in input_payload["candidates"]}
     available_cash = working.cash
     queued_tickers: set[str] = set()
@@ -5851,6 +5996,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                 continue
 
         decision_id = make_decision_id(run_key, day_index, real_ticker, action, f"queued_proposal[{i}]")
+        _wf_queued[i] = decision_id
         # Fundamentals V1: None (unaffected) when the profile is off or
         # this is a SELL -- see _fundamentals_assessment_for_decision.
         fundamentals_block = next(
@@ -5896,6 +6042,28 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             "quantity": quantity, "decision_id": decision_id,
         })
         activity.append(("order_queued", line, decision_id))
+
+    if _wf_decisions:
+        # One deterministic blocked line per rejected proposal, in order.
+        _wf_lines = iter(summary["blocked"][_wf_blocked0:])
+        for i, d in enumerate(_wf_decisions):
+            act = str(d.get("action", "")).upper()
+            base = {"action": act} if act in ("BUY", "SELL") else {}
+            if i in _wf_queued:
+                _wf.emit("decision_risk", "completed", {**base, "outcome": "queued"},
+                         decision_id=_wf_queued[i], proposal_key=f"p{day_index}-{i}")
+            else:
+                _line = next(_wf_lines, "")
+                _wf.emit("decision_risk", "completed",
+                         lambda: {**base, "outcome": "rejected", "rule_codes": rejection_codes(_line)},
+                         proposal_key=f"p{day_index}-{i}")
+        _wf.emit("decision_risk", "completed", {"proposals": len(_wf_decisions), "queued": len(_wf_queued),
+                                                "rejected": len(_wf_decisions) - len(_wf_queued)})
+    summary["workflow_journal"] = {
+        "trade_rows": len(summary["proposals"]) + len(summary["exits"]),
+        "resolutions": _wf_n["filled"] + _wf_n["rejected"] + _wf_n["superseded"]
+                       + sum(1 for e in _pre_fill_gate_events if e["outcome"] == "cancel"),
+        "activity_rows": len(activity)}
 
     # -- best-effort observability, deferred (locked architectural
     # decision, 2026-08-28 third pass) -----------------------------------
@@ -6310,6 +6478,17 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
         print(f"selector mode: {selector_mode} (EXPERIMENTAL -- universe "
               f"{selector_universe.version}, {len(selector_universe.members)} names)")
 
+    # Workflow progress telemetry (dashboard-v2 Workflow page): best effort,
+    # background-written, never read back -- see workflow_events.py.
+    from workflow_events import WorkflowEmitter, journal_writer
+    global _ACTIVE_PROGRESS
+    progress = _ACTIVE_PROGRESS = WorkflowEmitter(run_id, journal_writer(run_in, json_from))
+    progress.emit("run", "started", {
+        "sessions_requested": int(args.days), "resumed": bool(is_resume),
+        "selector_mode": "off" if selector_mode == SELECTOR_MODE_OFF else "laya",
+        "fundamentals": "on" if fundamentals_enabled else "off"})
+    run_halted = False
+
     # Run-status indicator (dashboard-v2 Overview banner): "running", with
     # this invocation's target = wherever the run already stands plus what
     # it was just asked to do (args.days). Best-effort, training-only --
@@ -6344,11 +6523,14 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
         result, halted = _run_cycle_or_halt(
             lambda: run_day(cursor, day_index, portfolio, masking, watchlist, todays_limits_ctx, run_key,
                             fundamentals_enabled=fundamentals_enabled, runtime=runtime,
-                            selector=selector_ctx),
+                            selector=selector_ctx, progress=progress),
             day_label=masking.day_index(cursor),
             run_id=run_id,
         )
         if halted:
+            run_halted = True
+            progress.for_cycle(_cycle_id(run_key, day_index), day_index, masking.day_index(cursor),
+                               cursor).emit("cycle", "failed")
             if run_kind == "training":
                 try:
                     record_run_status(run_id, "failed", portfolio.trading_days_elapsed)
@@ -6418,11 +6600,17 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
         # leave this day's dashboard information missing; that is the
         # explicitly accepted tradeoff -- it can never create a duplicate
         # trade or repeat a Hermes call, since both are already committed.
+        _wf_obs_ok = True
         try:
             do_observability()
         except Exception as exc:
+            _wf_obs_ok = False
             print(f"  OBSERVABILITY FAILED (snapshot/activity) for day_index={day_index}: "
                   f"{type(exc).__name__}: {exc} -- essential work already committed, continuing")
+        _wf_c = progress.for_cycle(_cycle_id(run_key, day_index), day_index, masking.day_index(cursor), cursor)
+        _wf_c.emit("journal", "completed" if _wf_obs_ok else "failed",
+                   {**summary.get("workflow_journal", {}), "snapshot": _wf_obs_ok})
+        _wf_c.emit("cycle", "completed")
 
         # Run-status progress update -- same best-effort contract as
         # do_observability just above. total_days is omitted (None) here
@@ -6453,6 +6641,10 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
         except Exception as exc:
             print(f"  RUN-STATUS UPDATE FAILED (final) for run_id={run_id}: {type(exc).__name__}: {exc}")
 
+    progress.emit("run", "failed" if run_halted else "completed", {
+        "sessions_requested": int(args.days), "sessions_completed": completed, "halted": run_halted,
+        "open_positions": len(portfolio.holdings), "pending_orders": len(portfolio.pending_orders),
+        "telemetry_dropped": progress.stats["dropped"]})
     final = portfolio.equity_curve[-1]
     print(f"\n{'=' * 70}")
     print(f"run_id: {run_id}")
@@ -6485,6 +6677,7 @@ def main() -> None:
         _run_backtest_main(args, isolation_report, runtime)
     finally:
         _close_active_selector()
+        _close_active_progress()
         _cleanup_ephemeral_hermes_runtime(runtime)
 
 

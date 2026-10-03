@@ -1,10 +1,12 @@
-import { listSelectableRuns, loadRunData, REFRESH_MS } from "./data.js";
+import { listSelectableRuns, listWorkflowRuns, loadRunData, REFRESH_MS } from "./data.js";
 import { esc, time, computeHealth, runOptionLabel } from "./calc.js";
 import { render as renderOverview } from "./pages/overview.js";
 import { render as renderTrades } from "./pages/trades.js";
 import { render as renderDecisions } from "./pages/decisions.js";
 import { render as renderRuns } from "./pages/runs.js";
 import { render as renderRoadmap } from "./pages/roadmap.js";
+import { mount as mountWorkflow } from "./pages/workflow.js";
+import { workflowRunLabel } from "./workflow-model.js";
 import { initTheme } from "./theme.js";
 
 const PAGES = {
@@ -12,8 +14,14 @@ const PAGES = {
   trades: { label: "Trades", render: renderTrades },
   decisions: { label: "Decisions", render: renderDecisions },
   runs: { label: "Runs", render: renderRuns },
+  workflow: { label: "Workflow" },
   roadmap: { label: "Roadmap", render: renderRoadmap },
 };
+
+// Workflow manages its own loading/replay/follow polling (pages/workflow.js)
+// and keeps its OWN selected run: it may list labelled smoke runs, which the
+// other pages never show, so choosing one there never changes them.
+const SELF_MANAGED = new Set(["workflow"]);
 
 // Roadmap is a static, mode-independent projection of the project
 // backlog — the shell issues no Neon request while it is the active page.
@@ -30,6 +38,9 @@ const state = {
   runId: null,
   runs: [],
   refreshTimer: null,
+  workflowRunId: null,
+  workflowRuns: [],
+  workflowView: null,
 };
 
 const el = id => document.getElementById(id);
@@ -43,9 +54,13 @@ function renderNav() {
   [...topNav.querySelectorAll("button"), ...bottomNav.querySelectorAll("button")].forEach(b => {
     b.addEventListener("click", () => {
       const wasStatic = STATIC_PAGES.has(state.page);
+      const wasSelf = SELF_MANAGED.has(state.page);
+      if (wasSelf && b.dataset.page !== state.page) leaveWorkflow();
       state.page = b.dataset.page;
       renderNav();
-      if (STATIC_PAGES.has(state.page)) refresh(false);        // static page: swap content, no fetch
+      if (SELF_MANAGED.has(state.page)) { if (!wasSelf) enterWorkflow(); }
+      else if (wasSelf) refresh(true);
+      else if (STATIC_PAGES.has(state.page)) refresh(false);        // static page: swap content, no fetch
       else if (wasStatic || !state.lastData) refresh(true);    // (re)entering a data page: fetch fresh
       else renderPage(state.lastData);                          // data ↔ data: cheap swap
     });
@@ -94,7 +109,49 @@ function renderHealthBar(data) {
   `;
 }
 
+function leaveWorkflow() {
+  state.workflowView?.destroy();
+  state.workflowView = null;
+}
+
+async function enterWorkflow() {
+  const bar = el("health-bar");
+  bar.innerHTML = ""; bar.hidden = true;
+  showSkeleton();
+  setStatus("Loading runs…", "busy");
+  try {
+    state.workflowRuns = await listWorkflowRuns();
+  } catch (e) {
+    setStatus("Fetch failed", "err");
+    el("page-root").innerHTML = `<div class="error-box">Failed to load runs: ${esc(e.message)}.</div>`;
+    return;
+  }
+  if (state.page !== "workflow") return;
+  const ids = new Set(state.workflowRuns.map(r => r.run_id));
+  if (!ids.has(state.workflowRunId)) state.workflowRunId = ids.has(state.runId) ? state.runId : state.workflowRuns[0]?.run_id ?? null;
+  const wrap = el("run-select-wrap");
+  if (!state.workflowRuns.length) {
+    wrap.innerHTML = "";
+    el("page-root").innerHTML = `<div class="empty">No registered runs yet.</div>`;
+    setStatus("No run available");
+    return;
+  }
+  wrap.innerHTML = `<select class="run-select" aria-label="Select run (Workflow)"></select>`;
+  const sel = wrap.querySelector("select");
+  sel.innerHTML = state.workflowRuns.map(r =>
+    `<option value="${esc(r.run_id)}" ${r.run_id === state.workflowRunId ? "selected" : ""}>${esc(workflowRunLabel(r))}</option>`).join("");
+  sel.addEventListener("change", () => { state.workflowRunId = sel.value; mountWorkflowView(); });
+  mountWorkflowView();
+}
+
+function mountWorkflowView() {
+  leaveWorkflow();
+  setStatus("Workflow view · read-only");
+  state.workflowView = mountWorkflow(el("page-root"), { runId: state.workflowRunId, runs: state.workflowRuns });
+}
+
 async function refresh(withSkeleton) {
+  if (SELF_MANAGED.has(state.page)) return;   // the Workflow page polls only while following
   if (STATIC_PAGES.has(state.page)) {
     // No run data needed — and no Neon/Data API request is made. The
     // Roadmap is project-level and static: it never shows a run selector

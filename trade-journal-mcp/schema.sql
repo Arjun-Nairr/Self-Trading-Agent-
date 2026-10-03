@@ -1001,3 +1001,53 @@ FROM insight_log;
 GRANT SELECT ON public_trades TO anonymous;
 GRANT SELECT ON public_agent_activity TO anonymous;
 GRANT SELECT ON public_insight_log TO anonymous;
+
+-- ---------------------------------------------------------------------------
+-- Migration (2026-10-03) -- workflow progress events (dashboard-v2 Workflow
+-- page). ADDITIVE ONLY: one new table, one new view, one new grant; no
+-- existing table, view, policy or grant is changed.
+--
+-- workflow_events holds ONLY structured, allowlisted facts written by the
+-- backtest controller as each major stage of a cycle happens (contract and
+-- validation: trade-journal-mcp/workflow_contract.py, enforced by
+-- server._record_workflow_events): run/cycle identity, an ordered sequence,
+-- stage + status, the real wall-clock time, bounded counts/enums, and
+-- order links (an existing decision_id, or a positional proposal key for a
+-- proposal rejected before journaling). No ticker, alias, prompt, model
+-- reasoning, tool payload or free text can be stored here. Telemetry only:
+-- trading never reads it.
+--
+-- Same boundary pattern as public_trades: the base table is NOT granted to
+-- `anonymous`; the dashboard reads the narrow public_workflow_events view.
+-- (invocation_id, seq) makes a re-sent batch an idempotent no-op; a new
+-- harness invocation (resume/retry) gets a new invocation_id, so attempts
+-- stay distinguishable.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS workflow_events (
+    id            BIGSERIAL PRIMARY KEY,
+    run_id        UUID NOT NULL,
+    invocation_id UUID NOT NULL,
+    seq           INTEGER NOT NULL CHECK (seq >= 0),
+    cycle_id      UUID,
+    day_index     INTEGER,
+    day_label     TEXT,
+    market_date   DATE,
+    stage         TEXT NOT NULL CHECK (stage IN ('run', 'cycle', 'prefill_news', 'execution', 'positions',
+                      'population', 'laya', 'shortlist', 'evidence', 'hermes', 'decision_risk', 'journal')),
+    status        TEXT NOT NULL CHECK (status IN ('started', 'completed', 'failed', 'skipped')),
+    occurred_at   TIMESTAMPTZ NOT NULL,
+    recorded_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    metrics       JSONB NOT NULL DEFAULT '{}'::jsonb,
+    decision_id   UUID,
+    proposal_key  TEXT CHECK (proposal_key IS NULL OR proposal_key ~ '^p[0-9]{1,5}-[0-9]{1,3}$'),
+    UNIQUE (invocation_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_workflow_events_run_id ON workflow_events(run_id, id);
+
+CREATE OR REPLACE VIEW public_workflow_events AS
+SELECT
+    id, run_id, invocation_id, seq, cycle_id, day_index, day_label, market_date,
+    stage, status, occurred_at, metrics, decision_id, proposal_key
+FROM workflow_events;
+
+GRANT SELECT ON public_workflow_events TO anonymous;

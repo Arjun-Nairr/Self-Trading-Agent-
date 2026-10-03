@@ -96,7 +96,7 @@ def _tech(**over):
 
 
 def _cycle(tmp, selector, *, portfolio=None, decisions=None, technicals=None, news=None,
-           masking=None, watchlist=None, cap=None):
+           masking=None, watchlist=None, cap=None, progress=None, hermes_error=None, fill_price=100.0):
     """One real run_day with only I/O mocked. Returns a dict of captures."""
     portfolio = portfolio or Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
     masking = masking or _masking()
@@ -109,6 +109,8 @@ def _cycle(tmp, selector, *, portfolio=None, decisions=None, technicals=None, ne
     def fake_ask(prompt, usage, is_reflection_day=False, fundamentals_enabled=False,
                  run_id=None, day_index=None, runtime=None):
         cap["prompts"].append(prompt)
+        if hermes_error is not None:
+            raise hermes_error
         return HermesResult(response={"decisions": decisions or [], "no_action_reason": "nothing today"},
                             attempt_count=1, retry_diagnostics=[])
 
@@ -127,7 +129,7 @@ def _cycle(tmp, selector, *, portfolio=None, decisions=None, technicals=None, ne
         cap["sim_watchlists"].append(list(kw["watchlist"]))
         return real_sim(**kw)
 
-    needed = sorted(set(portfolio.holdings))
+    needed = sorted(set(portfolio.holdings) | {o.ticker for o in portfolio.pending_orders})
     session = _expected_session_bar_times("09:30", "16:00")
     intraday = {t: [{"time": s, "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0} for s in session]
                 for t in needed}
@@ -146,10 +148,11 @@ def _cycle(tmp, selector, *, portfolio=None, decisions=None, technicals=None, ne
          patch("run_backtest.resolve_trade_rejection", return_value=None), \
          patch("run_backtest.record_snapshot_once", return_value=True), \
          patch("run_backtest.log_activity", return_value=None), \
-         patch("run_backtest.simulate_trading_day", side_effect=spy_sim):
+         patch("run_backtest.simulate_trading_day", side_effect=spy_sim),          patch("run_backtest.fetch_news_window", side_effect=lambda ts, a, b: {t: {"articles": []} for t in ts}),          patch("run_backtest.simulate_fill", side_effect=lambda alias, action, q, ref, bar: {
+             "status": "filled", "fill_price": fill_price, "fill_quantity": q}),          patch("run_backtest.record_exit", side_effect=lambda *a, **k: k.get("decision_id")):
         working, summary, _obs = run_day(
             DAY, 31, portfolio, masking, watchlist, _limits_for_profile(portfolio.profile_level),
-            str(uuid.uuid4()), selector=selector)
+            str(uuid.uuid4()), selector=selector, progress=progress)
     cap.update(working=working, summary=summary, masking=masking,
                checkpoint_path=tmp_dir / "cycle_checkpoint.json")
     return cap

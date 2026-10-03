@@ -1,4 +1,5 @@
 import { assertRunIsolated, selectableRunsFromRows } from "./calc.js";
+import { workflowRunsFromRows } from "./workflow-model.js";
 
 // Decisions page shows only the newest N decision rows — requested at
 // this limit, never fetched whole and sliced.
@@ -177,3 +178,59 @@ export async function loadRunData(mode, run_id) {
 }
 
 export const REFRESH_MS = 15000;
+
+/* ------------------------------------------------------------- workflow */
+// Workflow page (dashboard-v2/js/pages/workflow.js). Reads ONLY public,
+// structured projections: public_workflow_events (allowlisted progress
+// events — see trade-journal-mcp/workflow_contract.py), public_trades,
+// public_agent_activity, portfolio_snapshots and the run registry. Never
+// backtest_cycle_evidence, the private run-configuration table, prompts or snapshots
+// of Laya scores. Explicit column lists keep each response minimal.
+export const WORKFLOW_POLL_MS = 5000;
+export const WORKFLOW_POLL_LIMIT = 200;
+const PUBLIC_WORKFLOW_EVENTS = "public_workflow_events";
+const WF_EVENT_COLS = "id,run_id,invocation_id,seq,cycle_id,day_index,day_label,market_date,stage,status,occurred_at,metrics,decision_id,proposal_key";
+const WF_TRADE_COLS = "decision_id,run_id,ticker,action,status,fill_price,fill_quantity,intended_quantity,rejection_reason,exit_provenance,stop_price,target_price,confidence,primary_signal,expected_reward_risk,created_at,updated_at";
+const WF_ACTIVITY_COLS = "id,run_id,decision_id,event_type,cycle_id,created_at";
+const WF_SNAPSHOT_COLS = "run_id,cycle_id,day_label,created_at,open_positions,open_positions_detail,equity,cash";
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function requireRunId(runId) {
+  if (!UUID_RE.test(String(runId || ""))) throw new Error("invalid run id");
+  return runId;
+}
+
+/** Runs the Workflow page can show: training, evaluation AND smoke runs
+ *  (smoke runs are labelled; archived runs are never listed). Other pages
+ *  keep using listSelectableRuns(), which still excludes smoke runs. */
+export async function listWorkflowRuns() {
+  const [registryRows, snapshotRows] = await Promise.all([
+    qAll("backtest_run_registry", `?select=run_id,run_kind,created_at`),
+    qAll("portfolio_snapshots", `?mode=eq.backtest&select=run_id,created_at,day_label&order=created_at.desc`),
+  ]);
+  return workflowRunsFromRows(registryRows, snapshotRows);
+}
+
+/** Everything one Workflow view needs, for exactly one run. */
+export async function loadWorkflowData(runId) {
+  requireRunId(runId);
+  const f = `run_id=eq.${runId}`;
+  const [events, trades, activity, snapshots] = await Promise.all([
+    qAll(PUBLIC_WORKFLOW_EVENTS, `?${f}&select=${WF_EVENT_COLS}&order=id.asc`),
+    qAll(PUBLIC_TRADES, `?execution_mode=eq.backtest&${f}&select=${WF_TRADE_COLS}&order=created_at.asc`),
+    qAll(PUBLIC_AGENT_ACTIVITY, `?mode=eq.backtest&${f}&select=${WF_ACTIVITY_COLS}&order=created_at.asc`),
+    qAll("portfolio_snapshots", `?mode=eq.backtest&${f}&select=${WF_SNAPSHOT_COLS}&order=created_at.asc`),
+  ]);
+  for (const rows of [events, trades, activity, snapshots]) assertRunIsolated(rows, runId);
+  return { events, trades, activity, snapshots };
+}
+
+/** Incremental follow: only events newer than `afterId`, bounded. */
+export async function pollWorkflowEvents(runId, afterId) {
+  requireRunId(runId);
+  const after = Number.isFinite(afterId) ? afterId : 0;
+  const rows = await q(PUBLIC_WORKFLOW_EVENTS,
+    `?run_id=eq.${runId}&id=gt.${after}&select=${WF_EVENT_COLS}&order=id.asc&limit=${WORKFLOW_POLL_LIMIT}`);
+  assertRunIsolated(rows, runId);
+  return rows;
+}

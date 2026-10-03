@@ -827,3 +827,101 @@ section.rm-sector {
 .rm-mark.next { color: var(--text-faint); }
 .rm-mark.later { color: var(--text-faint); opacity: 0.7; }
 .rm-item + .rm-item { border-top: 1px solid var(--border); padding-top: var(--s3); }
+
+/* ------------------------------------------------------------ workflow */
+/* Two connected paths of major stages per simulated day. Semantic colors
+   only for state; blue marks the replay/follow cursor. Horizontal flow on
+   wide screens, a vertical stack with down arrows where it would cramp. */
+
+.wf-title-row { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: var(--s2) var(--s4); }
+.wf-tags .badge { margin-bottom: 0; }
+.wf-kind { border-color: var(--blue); color: var(--blue); }
+.wf-status {
+  display: flex; flex-wrap: wrap; gap: var(--s1) var(--s3); align-items: baseline;
+  padding: var(--s3) var(--s4); margin-top: var(--s3); border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--surface); font-size: var(--fs-sec); color: var(--text-dim);
+}
+.wf-status strong { color: var(--text); }
+.wf-status-completed { border-color: var(--green); background: var(--green-dim); }
+.wf-status-running { border-color: var(--blue); background: var(--blue-dim); }
+.wf-status-failed { border-color: var(--red); background: var(--red-dim); }
+.wf-status-interrupted { border-color: var(--amber-line); background: var(--amber-dim); }
+.wf-last { color: var(--text-faint); font-size: var(--fs-label); }
+
+.wf-controls {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2);
+  margin-top: var(--s6); padding-top: var(--s4); border-top: 1px solid var(--border);
+}
+.wf-day-label { font-size: var(--fs-label); color: var(--text-faint); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+select.wf-day { min-width: 0; max-width: 100%; }
+.wf-btn {
+  min-height: 40px; padding: var(--s2) var(--s4); border-radius: var(--radius);
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--text-dim);
+  font-size: var(--fs-sec); font-weight: 600; cursor: pointer;
+}
+.wf-btn:hover:not(:disabled) { border-color: var(--blue); color: var(--blue); }
+.wf-btn:disabled { opacity: 0.45; cursor: default; }
+.wf-btn[aria-pressed="true"], .wf-btn.primary[aria-pressed="true"] { background: var(--blue-dim); border-color: var(--blue); color: var(--blue); }
+.wf-btn.primary { border-color: var(--blue); color: var(--blue); }
+.wf-btn:focus-visible, .wf-box:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.wf-conn { font-size: var(--fs-label); color: var(--text-faint); }
+.wf-conn.disconnected { color: var(--red); }
+.wf-conn.live { color: var(--green); }
+.wf-note { margin-top: var(--s2); }
+
+.wf-day-meta { margin-top: var(--s6); font-size: var(--fs-sec); color: var(--text-dim); font-weight: 600; }
+.wf-path-block { margin-top: var(--s4); }
+.wf-path-title { font-size: var(--fs-label); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-faint); margin-bottom: var(--s2); }
+.wf-path { display: flex; align-items: stretch; gap: 0; }
+.wf-arrow { flex: 0 0 28px; display: flex; align-items: center; justify-content: center; color: var(--border-strong); }
+.wf-arrow svg { display: block; }
+
+.wf-box {
+  position: relative; flex: 1 1 0; min-width: 0; text-align: left;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: var(--s3); border-radius: var(--radius); cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--surface); color: var(--text);
+  font-family: var(--font); transition: background 0.2s, border-color 0.2s, box-shadow 0.2s;
+}
+.wf-box-label { font-size: var(--fs-sec); font-weight: 700; }
+.wf-box-owner { font-size: var(--fs-label); color: var(--text-faint); }
+.wf-box-count { font-family: var(--mono); font-size: var(--fs-label); color: var(--text-dim); margin-top: var(--s1); overflow-wrap: anywhere; }
+.wf-box-state { display: inline-flex; align-items: center; gap: 6px; font-size: var(--fs-label); color: var(--text-dim); margin-top: var(--s1); }
+.wf-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border-strong); flex: 0 0 8px; }
+.wf-box.s-completed .wf-dot { background: var(--green); }
+.wf-box.s-failed { border-color: var(--red); }
+.wf-box.s-failed .wf-dot { background: var(--red); }
+.wf-box.s-interrupted { border-color: var(--amber-line); }
+.wf-box.s-interrupted .wf-dot { background: var(--amber-line); }
+.wf-box.s-running { border-color: var(--blue); }
+.wf-box.s-running .wf-dot { background: var(--blue); animation: wf-pulse 1.2s ease-in-out infinite; }
+.wf-box.s-skipped, .wf-box.s-not_recorded { border-style: dashed; background: transparent; }
+.wf-box.s-skipped .wf-box-label, .wf-box.s-not_recorded .wf-box-label { color: var(--text-dim); }
+.wf-box.is-current { background: var(--blue-dim); box-shadow: 0 0 0 2px var(--blue); }
+.wf-box.is-open { border-color: var(--blue); }
+.wf-journal {
+  position: absolute; top: -9px; right: var(--s2);
+  font-size: var(--fs-label); line-height: 1; padding: 3px 6px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--border-strong); color: var(--text-faint);
+}
+.wf-journal.completed { border-color: var(--green); color: var(--green); }
+.wf-journal.failed { border-color: var(--red); color: var(--red); }
+@keyframes wf-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+.wf-owner-inline { font-size: var(--fs-label); color: var(--text-faint); font-weight: 500; margin-left: var(--s2); }
+.wf-table td, .wf-table th { white-space: nowrap; }
+
+@media (max-width: 980px) {
+  .wf-path { flex-direction: column; }
+  .wf-arrow { flex-basis: 22px; }
+  .wf-arrow svg { transform: rotate(90deg); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .wf-box { transition: none; }
+  .wf-box.s-running .wf-dot { animation: none; }
+}
+/* Six bottom-nav items (Workflow added): on the narrowest phones trim the
+   button's side padding so no label clips; the label size stays --fs-label. */
+@media (max-width: 360px) {
+  nav.bottom-nav { padding-left: max(var(--s1), env(safe-area-inset-left)); padding-right: max(var(--s1), env(safe-area-inset-right)); }
+  nav.bottom-nav button { padding-left: 1px; padding-right: 1px; flex: 1 1 auto; }
+}
