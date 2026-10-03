@@ -191,4 +191,11 @@ Deployed via the established mechanism (`npx wrangler pages deploy dashboard-v2
 --project-name trading-agent-dashboard-v2 --branch mobile-test`) from a clean
 checkout of the pushed commit. The project has no Git integration, so a
 push alone does not deploy. The deployed page was confirmed to load and read
-the public data; see the commit that records this file for the deployment ID.
+the public data.
+
+| | |
+|---|---|
+| Deployment | `934e021f` (Preview, branch `mobile-test`, source `647e569`), deployed from a clean worktree |
+| URL | https://mobile-test.trading-agent-dashboard-v2.pages.dev |
+| Live check | The Workflow tab is present. Smoke run `a0f96768…` shows *Smoke test* and *Invocation completed*. Day 1: 51/51 eligible, Laya 51 scored (100.1 s), shortlist 10, Hermes 2 decisions (33.6 s), 2 queued. Day 2: 2 carried in, pre-fill 2 ok (4.5 s), 2 filled, 49/51 eligible, 1 queued. |
+| Tables read | `public_workflow_events` plus the existing public set (`public_trades`, `public_agent_activity`, `public_insight_log`, `portfolio_snapshots`, `backtest_run_registry`, `backtest_run_status`). Never cycle evidence or run configuration. |
