@@ -288,9 +288,12 @@ unapproved pending that decision.
     tickers, survivorship bias, and uncontrolled universe churn.
     Scope (live/current-universe only): `docs/scopes/SCALABLE_SCREENER_V1.md`.
     Stage 1 (screener only, `watchlist/scalable_screener.py`) implemented and
-    tested with injected data; real-data validation is next and has not been
-    run. Laya on screened cards, Hermes integration, live paper, and
-    historical/backtest support are not started.
+    tested. First real-data `--dry-run` completed 2026-10-03, verdict **AMBER**
+    (`docs/evaluations/scalable_screener_first_real_dry_run_2026-10-03.md`):
+    every stage ran cleanly (400 names, 75 eligible), but per-name criteria
+    could not be checked from dry-run output. Next: one approved weekend
+    `--write` run plus a row-level audit. Laya on screened cards, Hermes
+    integration, live paper, and historical/backtest support are not started.
   - RAG-backed filing/document retrieval. Status `deferred`. What it is:
     retrieval of the relevant *passages* from a large, point-in-time-
     gated corpus of raw SEC filings, earnings materials, and later news
@@ -315,10 +318,21 @@ unapproved pending that decision.
     state sensitivity is still weak. User decision: Laya stays as an
     experimental portfolio/CV component. A comparison against random and
     deterministic controls informs its documented limitations and is not a
-    removal gate. **Pending:** Hermes/backtest integration of the demonstrated
-    selector, the controlled comparison, and any dashboard view (none
-    started). The 30-symbol coverage preflight has still not been run, and EQR
-    returned no usable price history in the demo. A dynamic, point-in-time
+    removal gate. **Connected Laya → Hermes smoke test (2026-10-03): integration
+    fixes done, run NOT launched** (`docs/evaluations/laya_connected_smoke_2026-10-03.md`).
+    Done and tested:
+    - `--state-dir` isolates run state from the preserved Round 2 files;
+    - experimental prompts carry the run's frozen 30-name masked universe
+      instead of the baseline §8 table;
+    - the coverage preflight now counts distinct articles in non-overlapping
+      probes that end before the first simulated day.
+
+    Blocker: the unchanged fixed-30 universe fails that preflight in every
+    window checked. EQR has no provider price bars in any recent week, and
+    4–14 other names fall short of news coverage. Lifting it needs a
+    universe decision (e.g. a `fixed30-v2` replacing EQR) or a decision on how
+    missing news coverage is treated. **Pending after that:** the one smoke
+    run, the controlled comparison, and any dashboard view. A dynamic, point-in-time
     market-wide selector stays out of scope. Architecture, the committed
     30-name list, and open decisions live in `docs/scopes/LAYA_SELECTOR_V1.md`.
   - Measurable technical-strategy library. Status `discussing` / `Later`.

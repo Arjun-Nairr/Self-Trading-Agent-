@@ -1698,12 +1698,13 @@ def fetch_card_history(tickers: list[str], day: date) -> dict:
 
 def _build_selector_context(universe, seed: int, run_id: str, args):
     from laya_experiment import LAYA_WORKER_IMAGE, SNAPSHOT_DIR, LayaWorkerScorer, SelectorContext
+    snapshot_dir = SELECTOR_SNAPSHOT_DIR or SNAPSHOT_DIR
     scorer = LayaWorkerScorer(
         args.laya_checkpoint, image=args.laya_image or LAYA_WORKER_IMAGE,
-        log_path=SNAPSHOT_DIR / run_id / "laya_worker.log",
+        log_path=snapshot_dir / run_id / "laya_worker.log",
     )
     return SelectorContext(
-        universe=universe, seed=seed, run_id=run_id, snapshot_dir=SNAPSHOT_DIR,
+        universe=universe, seed=seed, run_id=run_id, snapshot_dir=snapshot_dir,
         scorer=scorer, fetch_history=fetch_card_history,
     )
 
@@ -1724,6 +1725,39 @@ def _validate_selector_args(selector_mode: str, args) -> None:
     if not Path(args.laya_checkpoint).is_dir():
         raise SystemExit(f"--laya-checkpoint {args.laya_checkpoint!r} is not a directory "
                          "(provision it once with laya_adapter.provision_checkpoint())")
+
+
+# --state-dir (2026-10-03): every run-owned local file -- state, cycle
+# checkpoint, Hermes-reply diagnostics, selector snapshots + worker log --
+# moves under one explicit directory. Omitted = the original locations,
+# byte-for-byte (so a plain invocation still resumes the preserved Round 2
+# state exactly as before). None here = laya_experiment.SNAPSHOT_DIR.
+DEFAULT_STATE_DIR = Path(__file__).resolve().parent
+SELECTOR_SNAPSHOT_DIR: "Path | None" = None
+
+
+def apply_state_dir(state_dir: "str | None") -> None:
+    """Route every run-owned file through `state_dir`. Called by main()
+    right after argument parsing -- before Hermes provisioning, any reset,
+    state read, registration, or write. Refuses the default harness
+    directory itself (that is where the preserved Round 2 state lives: an
+    explicit --state-dir must never resume or --reset it) and a path that
+    exists but is not a directory."""
+    global STATE_PATH, CHECKPOINT_PATH, DIAGNOSTICS_DIR, SELECTOR_SNAPSHOT_DIR
+    if state_dir is None:
+        return
+    d = Path(state_dir).expanduser().resolve()
+    if d == DEFAULT_STATE_DIR or (d.exists() and d.samefile(DEFAULT_STATE_DIR)):  # case/alias-proof
+        raise SystemExit(f"--state-dir {d} is the default harness directory, which holds the "
+                         "preserved default-run state; omit --state-dir to use it, or pick a "
+                         "separate directory")
+    if d.exists() and not d.is_dir():
+        raise SystemExit(f"--state-dir {d} exists and is not a directory")
+    d.mkdir(parents=True, exist_ok=True)
+    STATE_PATH = d / "backtest_state.json"
+    CHECKPOINT_PATH = d / "cycle_checkpoint.json"
+    DIAGNOSTICS_DIR = d / ".diagnostics"
+    SELECTOR_SNAPSHOT_DIR = d / "selector_snapshots"
 
 
 def _close_active_selector() -> None:
@@ -3995,12 +4029,60 @@ def validate_hermes_response(response, is_reflection_day: bool, fundamentals_ena
 # prompt + Hermes
 # --------------------------------------------------------------------------
 
+# Experimental fixed-30 selector only (docs/scopes/LAYA_SELECTOR_V1.md,
+# "Caveat for the evaluation phase"): RULES.md §8's table lists the baseline
+# ten names, but an experimental run's watchlist is the frozen 30-name
+# universe and its new-entry candidates are that day's shortlist. The masked
+# §8 opening (table + its baseline-only prose) is swapped for the run's own
+# masked universe; every other line of RULES.md is delivered unchanged. The
+# selector-off prompt and RULES.md itself never change.
+EXPERIMENTAL_RULES_PACKAGING = "fixed30-universe-v1"
+_RULES_S8_START = "\n## 8. Watchlist\n"
+_RULES_S8_END = "\n### Criteria used"
+
+
+def package_rules_for_experiment(masked_rules: str, masking: "RunMasking",
+                                 universe_entries: list[dict]) -> str:
+    """Replace the (already masked) §8 table section with the run's frozen
+    experimental universe as alias/sector rows, sorted by alias so row order
+    reveals nothing. Raises ValueError if RULES.md's §8 headings moved --
+    never silently ships the baseline table."""
+    start = masked_rules.find(_RULES_S8_START)
+    end = masked_rules.find(_RULES_S8_END, start + 1)
+    if start < 0 or end < 0:
+        raise ValueError("RULES.md §8 headings not found; cannot package the experimental "
+                         "universe -- refusing to send the baseline watchlist table")
+    rows = sorted((masking.alias(t["symbol"]), t["sector"]) for t in universe_entries)
+    section = "\n".join([
+        "", "## 8. Watchlist", "",
+        f"> **EXPERIMENTAL RUN -- rules packaging `{EXPERIMENTAL_RULES_PACKAGING}`.** For this run "
+        f"only, the watchlist is the frozen {len(rows)}-name universe below; it replaces the "
+        "baseline table. Every other rule in this file applies unchanged.",
+        ">",
+        "> - **Allowed names** = this table. §1 \"watchlist only\", §9, and every other "
+        "watchlist reference in these rules mean this table.",
+        "> - **New-entry candidates this cycle** = ONLY the names in this cycle's CANDIDATES "
+        "section (today's shortlist, chosen before this prompt). Never propose a new entry in "
+        "any other name, even one listed here.",
+        "> - **Held positions** keep full exit management (stops, targets, §6c time stop, §6d "
+        "invalidation) whether or not they appear in today's shortlist.",
+        "", "| Alias | Sector |", "|---|---|",
+        *(f"| {a} | {sec} |" for a, sec in rows),
+        "",
+        f"{len(rows)} names, fixed for the whole run. The criteria notes below describe how "
+        "the original baseline list was screened; they are background, not a filter you apply "
+        "to this table.",
+    ])
+    return masked_rules[:start] + section + masked_rules[end:]
+
+
 def build_prompt(day_label: str, account: dict, positions: list[dict],
                  candidates: list[dict], recent_insights: list[str],
                  reflection_trades: list[dict] | None = None,
                  limits: "RiskLimits | None" = None,
                  fundamentals_enabled: bool = False,
-                 masking: "RunMasking | None" = None) -> str:
+                 masking: "RunMasking | None" = None,
+                 experimental_universe: "list[dict] | None" = None) -> str:
     # `limits` must be the SAME RiskLimits instance the decision-time
     # checker (required_entry_quantity/check_trade) will actually enforce
     # -- see run_day's `active_limits` -- never a second, independently
@@ -4045,9 +4127,12 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
     # that don't exercise the real masking-critical path) skips this
     # block entirely rather than ever risking an unmasked leak.
     if masking is not None:
+        rules_text = masking.mask_text((REPO / "RULES.md").read_text(encoding="utf-8"))
+        if experimental_universe is not None:  # experimental selector runs only
+            rules_text = package_rules_for_experiment(rules_text, masking, experimental_universe)
         lines += [
             "===== RULES.md (verbatim content, identity-masked -- immutable this cycle) =====",
-            masking.mask_text((REPO / "RULES.md").read_text(encoding="utf-8")),
+            rules_text,
             "===== END RULES.md =====",
             "",
             "You have NO TOOLS available in backtest mode -- every fact you "
@@ -5395,7 +5480,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                           positions_view, candidates, recent_insights,
                           reflection_trades, limits=active_limits,
                           fundamentals_enabled=fundamentals_enabled,
-                          masking=masking)
+                          masking=masking,
+                          experimental_universe=watchlist if selector is not None else None)
 
     # -- checkpoint gate (2026-08-28 correctness pass, item 2) ------------
     # A retry of this EXACT (run_key, day_index) reuses the response
@@ -5855,6 +5941,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "fails closed instead of silently remapping "
                              "ticker<->alias assignments Hermes already "
                              "learned this run")
+    parser.add_argument("--state-dir", default=None,
+                        help="put this run's local state, cycle checkpoint, diagnostics, and "
+                             "selector snapshots in DIR instead of backtest-harness/ (default: "
+                             "unchanged). A fresh run there needs --run-kind; --reset only "
+                             "touches DIR's own state file.")
     parser.add_argument("--reset", action="store_true")
     # Correction pass item F (prior audit M3): --reset unlinking
     # backtest_state.json used to have no confirmation, no backup, no
@@ -6341,6 +6432,7 @@ def main() -> None:
     the same finally (correction pass, requirement 1)."""
     parser = build_arg_parser()
     args = parser.parse_args()
+    apply_state_dir(args.state_dir)  # before provisioning, reset, state read, or any write
     isolation_report = preflight()
     runtime = isolation_report["runtime"]
     try:

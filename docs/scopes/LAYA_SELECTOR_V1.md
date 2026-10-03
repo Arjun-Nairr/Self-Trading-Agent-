@@ -1,6 +1,6 @@
 # Laya candidate-selector — scope v1
 
-**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; standalone current-data demo completed 2026-10-03 (question format corrected to `noul-criteria-v2`); no Hermes/backtest integration, selector evaluation, dashboard view, or activation has happened**
+**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; standalone current-data demo completed 2026-10-03 (question format corrected to `noul-criteria-v2`); connected-smoke integration fixes done 2026-10-03 but the smoke run was NOT launched (coverage preflight refuses every checked window); no Hermes-connected run, selector evaluation, dashboard view, or activation has happened**
 
 > **User decision (2026-10-03):** Laya stays in the project as an experimental
 > portfolio/CV component. A controlled comparison against random and
@@ -362,6 +362,20 @@ containers unreachable (nothing verified). **It has not yet been run against the
 real data: the Docker daemon was not running when Phase 2 was built**, so the 20
 added names remain unverified (see the Phase 1 caveat).
 
+*2026-10-03, news rule v2 (`pre-start-3x14d-distinct-v2`):* the criterion is
+unchanged (at least 6 articles across three 14-day probes). v1 had two
+defects on short windows:
+- it placed probes inside the window, so on a 5-session window two probes
+  were the same window and the third overlapped them, counting articles 2–3
+  times;
+- it used news from inside the episode being qualified.
+
+v2 ends all three probes before the first simulated day, spaces them 45 days
+apart with no overlap, and counts distinct articles (created_at + headline).
+It has now been run on four windows (July 2022 under v1; three September
+2026 weeks under v2), and every window failed — see
+`docs/evaluations/laya_connected_smoke_2026-10-03.md`.
+
 ### Verified, and what is not
 
 Unit and integration tests drive the real `run_day()` with only I/O mocked and a
@@ -382,6 +396,14 @@ baseline 10-name watchlist table (as masked aliases) and talks about a 10-name
 watchlist. That is unchanged rules text (rules were out of scope) but it means
 Hermes sees ten masked rows that are not necessarily today's pool; revisit
 before a controlled evaluation.
+
+*Resolved 2026-10-03 (packaging `fixed30-universe-v1`):* experimental runs now
+deliver the masked RULES.md with its §8 opening replaced by the run's frozen
+30-name masked universe (alias + sector, alias order). That section states
+three things: allowed names = that table; new-entry candidates = only this
+cycle's CANDIDATES (today's shortlist); held positions keep full exit
+management. Every other rules line is unchanged. RULES.md itself and the
+selector-off prompt are unchanged.
 
 ---
 
@@ -446,6 +468,36 @@ or reflects market judgment; on real cards every score was below 0.5 in a
 narrow band. It also does not show anything about Hermes, trading, or historical
 validity. Pending (not started): wiring the demonstrated selector into the
 Hermes/backtest path for a controlled comparison, and any dashboard view.
+
+---
+
+## Connected Laya → Hermes smoke test — integration fixes (2026-10-03; run not launched)
+
+Implemented and tested:
+- **`--state-dir DIR`** on `run_backtest.py`. State, cycle checkpoint,
+  Hermes-reply diagnostics, and selector snapshots plus the worker log all go
+  under DIR. It is resolved before Hermes provisioning or any reset, read,
+  registration, or write. The default harness directory is refused under any
+  path alias, so an isolated run can never resume or reset the preserved
+  Round 2 state. Omitting the flag keeps every original location.
+- **Experimental rules packaging** `fixed30-universe-v1` (see the resolved
+  caveat above).
+- **Preflight news rule v2** (see "Coverage preflight").
+
+**Blocker:** the frozen `fixed30-v1` universe fails the documented preflight
+in all three recent windows checked (2026-09-28..10-02, 09-21..25, 09-14..18):
+
+| Window | EQR price | Names short on news |
+|---|---|---|
+| 2026-09-28..10-02 | fails (no bars; 1 warm-up bar) | 7 |
+| 2026-09-21..25 | fails | 4 |
+| 2026-09-14..18 | fails | 14 |
+
+No covered window can exist for this universe while EQR has no provider
+history. The universe was not changed, the requirement was not relaxed, and
+no run was launched. Next step needs a decision: a new universe version (for
+example replacing EQR) and/or how a news-coverage shortfall is treated, then
+the single smoke run.
 
 ---
 

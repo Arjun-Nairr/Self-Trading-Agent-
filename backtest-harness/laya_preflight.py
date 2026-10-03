@@ -8,8 +8,9 @@ fixed-30 Laya selector universe. Reports PASS/FAIL per symbol for:
     usable bars up to the first simulated day (card warm-up), and no
     malformed bars (non-positive price, negative volume);
   * news coverage: the project's existing criterion
-    (watchlist/check_news_coverage.py) -- at least 6 articles across three
-    14-day probes spread over the window, with complete pagination.
+    (watchlist/check_news_coverage.py) -- at least 6 DISTINCT articles across
+    three non-overlapping 14-day probes, all ending before the first
+    simulated day (rule NEWS_RULE_VERSION), with complete pagination.
 
 It NEVER alters a run: no state file, checkpoint, Neon write, Hermes call,
 order, or snapshot is touched. It reads market data through the same two
@@ -36,13 +37,32 @@ NEWS_LOOKBACK_DAYS = 14
 MIN_NEWS_ARTICLES = 6
 EXPECTED_DAY_FRACTION = 0.5
 PRICE_HISTORY_DAYS_BEFORE_START = 120
+# v2 (2026-10-03). The criterion is unchanged -- the established RULES.md §8 /
+# watchlist/check_news_coverage.py rule: at least 6 articles across three
+# 14-day lookback probes spread over time. v1 placed the probes at
+# (start+14d capped at end, midpoint, end): on a window shorter than 14 days
+# two probes were the SAME window and the third overlapped them, so one
+# article was counted two or three times, and every probe used news from
+# inside the episode being qualified. v2 ends all three probes BEFORE the
+# first simulated day, spaces them NEWS_PROBE_SPACING_DAYS apart (never
+# overlapping), and counts DISTINCT articles (created_at + headline; the
+# provider passes no article id through).
+NEWS_RULE_VERSION = "pre-start-3x14d-distinct-v2"
+NEWS_PROBE_SPACING_DAYS = 45
 
 
-def news_probe_days(start: date, end: date) -> tuple[date, date, date]:
-    """Three deterministic probe dates spread over the window: the first
-    lookback-full day, the midpoint, and the last day."""
-    first = min(end, start + timedelta(days=NEWS_LOOKBACK_DAYS))
-    return first, start + (end - start) // 2, end
+def news_probe_windows(start: date) -> tuple[tuple[datetime, datetime], ...]:
+    """Three (start_at, end_at] UTC windows of NEWS_LOOKBACK_DAYS each, the
+    newest ending at 23:59:59 UTC on the day BEFORE `start` and the others
+    NEWS_PROBE_SPACING_DAYS earlier each -- oldest first, non-overlapping,
+    and entirely before the first simulated decision."""
+    newest_end = datetime.combine(start - timedelta(days=1), time(23, 59, 59), tzinfo=timezone.utc)
+    ends = [newest_end - timedelta(days=NEWS_PROBE_SPACING_DAYS * k) for k in (2, 1, 0)]
+    return tuple((e - timedelta(days=NEWS_LOOKBACK_DAYS), e) for e in ends)
+
+
+def _article_key(a: Any) -> tuple[str, str]:
+    return (str(a.get("created_at", "")), str(a.get("headline", ""))) if isinstance(a, Mapping) else ("", repr(a))
 
 
 def evaluate_price_coverage(
@@ -97,21 +117,27 @@ def evaluate_news_coverage(
     probes: Sequence[Mapping[str, Any]], symbols: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
     """`probes`: one {symbol: {"articles": [...]} | {"error": ...}} mapping per
-    probe date (the fetch_news_window result shape). -> {symbol: {"pass",
-    "counts", "total", "reasons"}}. A fetch error / incomplete pagination in
-    any probe fails the symbol (coverage is unproven, not zero). Pure."""
+    probe window (the fetch_news_window result shape). -> {symbol: {"pass",
+    "counts", "total", "reasons"}}. `counts` are per-probe DISTINCT
+    articles; `total` is distinct across all probes (created_at + headline),
+    so an article seen by two probes counts once. A fetch error / incomplete
+    pagination in any probe fails the symbol (coverage is unproven, not
+    zero). Pure."""
     out: dict[str, dict[str, Any]] = {}
     for sym in symbols:
         counts: list[int | None] = []
         reasons: list[str] = []
+        seen: set[tuple[str, str]] = set()
         for i, probe in enumerate(probes):
             entry = probe.get(sym)
             if not isinstance(entry, Mapping) or "articles" not in entry:
                 counts.append(None)
                 reasons.append(f"probe_{i + 1}_unavailable")
             else:
-                counts.append(len(entry["articles"]))
-        total = sum(c for c in counts if c is not None)
+                keys = {_article_key(a) for a in entry["articles"]}
+                counts.append(len(keys))
+                seen |= keys
+        total = len(seen)
         if total < MIN_NEWS_ARTICLES:
             reasons.append(f"only_{total}_articles_need_{MIN_NEWS_ARTICLES}")
         out[sym] = {"pass": not reasons, "counts": counts, "total": total, "reasons": reasons}
@@ -125,6 +151,9 @@ def build_report(
     lines = [
         f"Laya fixed-30 coverage preflight -- universe {universe.version} "
         f"({universe.hash[:12]}), window {start} .. {end}",
+        f"news rule {NEWS_RULE_VERSION}: >= {MIN_NEWS_ARTICLES} distinct articles across "
+        + ", ".join(f"({a:%Y-%m-%d %H:%M}, {b:%Y-%m-%d %H:%M}]" for a, b in news_probe_windows(start))
+        + " UTC -- all before the first simulated day",
         f"{'SYMBOL':<7}{'PRICE':<6}{'bars':>6}{'miss':>6}{'warm':>6}   "
         f"{'NEWS':<6}{'total':>6}   notes",
         "-" * 78,
@@ -164,11 +193,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             "maverick-mcp",
             history_script(symbols, end, start - timedelta(days=PRICE_HISTORY_DAYS_BEFORE_START)),
         ))["history"]
-        probes = []
-        for probe_day in news_probe_days(start, end):
-            end_at = datetime.combine(probe_day, time(23, 59, 59), tzinfo=timezone.utc)
-            probes.append(rb.fetch_news_window(
-                symbols, end_at - timedelta(days=NEWS_LOOKBACK_DAYS), end_at))
+        probes = [rb.fetch_news_window(symbols, start_at, end_at)
+                  for start_at, end_at in news_probe_windows(start)]
     except Exception as exc:
         print(f"PREFLIGHT COULD NOT RUN -- nothing was verified: {type(exc).__name__}: "
               f"{str(exc)[:300]}", file=sys.stderr)

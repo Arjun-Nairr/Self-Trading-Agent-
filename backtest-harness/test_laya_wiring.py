@@ -410,12 +410,17 @@ def test_only_selected_names_trigger_full_evidence_fetches_and_hermes_sees_no_la
     assert len(set(cap["tech_calls"][0])) == 10 < 30, "the other 20 names must trigger no technical/news fetch"
 
     # What Hermes was shown: only the selected, fully masked packet. (The masked RULES.md block
-    # carries the baseline watchlist TABLE -- 10 masked rows -- which is unchanged rules text, not
-    # selector data; the packet check below looks at everything outside that block.)
+    # carries the run's frozen 30-name universe table -- packaging fixed30-universe-v1 -- which is
+    # rules text, not selector data; the packet check below looks at everything outside that block.)
     full_prompt = cap["prompts"][0]
     head, _, rest = full_prompt.partition("===== RULES.md (verbatim")
-    prompt = head + rest.partition("===== END RULES.md =====")[2]
+    rules_block, _, after = rest.partition("===== END RULES.md =====")
+    prompt = head + after
     m = cap["masking"]
+    import run_backtest as rb
+    assert rb.EXPERIMENTAL_RULES_PACKAGING in rules_block
+    assert all(f"| {m.alias(t)} |" in rules_block for t in SYMBOLS), "all 30 allowed names, not the baseline 10"
+    assert "| Symbol | Sector | Company |" not in rules_block
     for t in selected:
         assert m.alias(t) in prompt
     for t in set(SYMBOLS) - set(selected):
@@ -733,29 +738,45 @@ def test_price_coverage_preflight_is_deterministic_and_per_symbol():
     assert lp.evaluate_price_coverage(hist, ["AAA", "BBB"], start, end)["AAA"]["missing_days"] == 0
 
 
+def _arts(probe: int, n: int) -> dict:
+    return {"articles": [{"headline": f"h{probe}-{i}", "created_at": f"2026-0{probe + 1}-0{i + 1}T12:00:00Z"}
+                         for i in range(n)]}
+
+
 def test_news_coverage_preflight_applies_the_existing_criterion():
-    arts = lambda n: {"articles": [{"headline": "h"}] * n}
-    probes = [{"A": arts(3), "B": arts(1), "C": {"error": "incomplete pagination"}},
-              {"A": arts(3), "B": arts(1), "C": arts(9)},
-              {"A": arts(0), "B": arts(1), "C": arts(9)}]
+    probes = [{"A": _arts(1, 3), "B": _arts(1, 1), "C": {"error": "incomplete pagination"}},
+              {"A": _arts(2, 3), "B": _arts(2, 1), "C": _arts(2, 9)},
+              {"A": _arts(3, 0), "B": _arts(3, 1), "C": _arts(3, 9)}]
     r = lp.evaluate_news_coverage(probes, ["A", "B", "C"])
     assert r["A"] == {"pass": True, "counts": [3, 3, 0], "total": 6, "reasons": []}
     assert not r["B"]["pass"] and r["B"]["reasons"] == ["only_3_articles_need_6"]
     assert not r["C"]["pass"] and r["C"]["reasons"] == ["probe_1_unavailable"]  # unproven coverage fails
 
 
-def test_news_probe_days_are_deterministic_and_inside_the_window():
-    a = lp.news_probe_days(date(2026, 2, 17), date(2026, 8, 14))
-    assert a == lp.news_probe_days(date(2026, 2, 17), date(2026, 8, 14))
-    assert a[0] == date(2026, 3, 3) and a[2] == date(2026, 8, 14) and a[0] < a[1] < a[2]
+def test_news_coverage_counts_each_distinct_article_once():
+    # v1 regression: on a short window two probes were the same window, so one article
+    # counted twice. The same 3 articles returned by every probe are 3, not 9.
+    same = _arts(1, 3)
+    r = lp.evaluate_news_coverage([{"A": same}, {"A": same}, {"A": same}], ["A"])
+    assert r["A"]["counts"] == [3, 3, 3] and r["A"]["total"] == 3 and not r["A"]["pass"]
+    dup_within = {"articles": same["articles"] * 2}
+    assert lp.evaluate_news_coverage([{"A": dup_within}] * 3, ["A"])["A"]["counts"] == [3, 3, 3]
+
+
+def test_news_probe_windows_end_before_the_first_simulated_day_and_never_overlap():
+    for start in (date(2022, 7, 1), date(2026, 9, 28), date(2026, 2, 17)):
+        w = lp.news_probe_windows(start)
+        assert w == lp.news_probe_windows(start) and len(w) == 3
+        assert all(b - a == timedelta(days=lp.NEWS_LOOKBACK_DAYS) for a, b in w)
+        assert w[-1][1].date() == start - timedelta(days=1), "no news from inside the episode"
+        assert all(w[i][1] <= w[i + 1][0] for i in range(2)), "probes must not overlap"
 
 
 def test_preflight_report_and_exit_codes(capsys):
     start, end = date(2026, 2, 17), date(2026, 3, 31)
     hist = _price_history(start, end, SYMBOLS)
     hist[SYMBOLS[1]] = {"error": "down"}
-    arts = {"articles": [{"headline": "h"}] * 2}
-    probes = [{s: arts for s in SYMBOLS}] * 3
+    probes = [{s: _arts(k, 2) for s in SYMBOLS} for k in (1, 2, 3)]  # 6 distinct per symbol
     price = lp.evaluate_price_coverage(hist, SYMBOLS, start, end)
     news = lp.evaluate_news_coverage(probes, SYMBOLS)
     report, ok = lp.build_report(UNIVERSE, price, news, start, end)
@@ -770,8 +791,12 @@ def test_preflight_report_and_exit_codes(capsys):
 
     # Healthy mocks -> exit 0 and a PASS line.
     full_hist = _price_history(start, end, SYMBOLS)
-    ok_news = {s: {"articles": [{"headline": "h"}] * 3} for s in SYMBOLS}
+    calls = iter(range(1, 4))
+    def ok_news(symbols, start_at, end_at):
+        k = next(calls)
+        assert end_at.date() < start, "probes must end before the first simulated day"
+        return {s: _arts(k, 2) for s in symbols}  # 2 distinct per probe -> 6 distinct
     with patch("run_backtest.run_in", return_value=json.dumps({"history": full_hist})), \
-         patch("run_backtest.fetch_news_window", return_value=ok_news):
+         patch("run_backtest.fetch_news_window", side_effect=ok_news):
         assert lp.main(["--start", "2026-02-17", "--end", "2026-03-31"]) == 0
     assert "PASS: all 30 symbols" in capsys.readouterr().out
