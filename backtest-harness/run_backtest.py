@@ -5923,7 +5923,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "private worker container (only with --selector-mode "
                              "laya_fixed30_experimental)")
     parser.add_argument("--laya-image", default=None,
-                        help="worker image tag (default hermes-laya-worker:1; build it with "
+                        help="worker image tag (default hermes-laya-worker:2; build it with "
                              "backtest-harness/laya_worker_image/Dockerfile). Docker is "
                              "required -- there is no host-worker fallback.")
     return parser

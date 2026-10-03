@@ -4,10 +4,11 @@ selector (docs/scopes/LAYA_SELECTOR_V1.md). UNWIRED: nothing in the default
 backtest, live path, risk checker, or Hermes prompt imports this module.
 
 What it does: asks Laya ONE typed question of every identity-free numeric card
-in one batched call (`laya.decide_batch(..., return_details=True)`), and turns
+in one batched call (`laya.decide_batch(..., questions=REVIEW_QUESTIONS,
+return_details=True)`), and turns
 each answer into a ScoreRecord(row_id, review_probability, answer_confidence).
 
-The question (a boolean schema field -> a Laya `noul` question):
+The question (a Laya `noul` with explicit criteria -- QUESTION_FORMAT v2):
 
     "Is this identity-free numeric card worth spending the existing full
      technical/news review on today?"
@@ -56,9 +57,26 @@ REVIEW_QUESTION = (
     "technical/news review on today?"
 )
 ANSWER_FIELD = "worth_review"
-REVIEW_SCHEMA = {
-    "type": "object",
-    "properties": {ANSWER_FIELD: {"type": "boolean", "description": REVIEW_QUESTION}},
+
+# Question format v2 (docs/evaluations/laya_selector_demo_2026-10-03.md). v1 sent
+# a JSON-schema boolean, which laya turns into a `noul` with NO criteria. The
+# pinned package's own README says that on the English `laya` checkpoint such a
+# question renders one generic option pair ("no, the statement does not hold" /
+# "yes, the statement holds") that "carries the whole decision, so it answers
+# 'no' whatever the state". Our synthetic diagnostic confirmed it (every card
+# below 0.5, active cards ranked BELOW quiet ones). v2 asks the same question
+# as an explicit `noul` whose two options describe the card, same package,
+# checkpoint, and P(true) meaning. It discriminates only weakly (see the report).
+QUESTION_FORMAT = "noul-criteria-v2"
+REVIEW_CRITERIA = {
+    "true": ("yes: the numbers show a notable technical situation today -- a large recent move, "
+             "price stretched well away from its 20-day average or range, an extreme RSI, a strong "
+             "MACD swing, or unusual volume -- worth a full technical and news review"),
+    "false": ("no: the numbers look ordinary today -- a small recent move, price near its 20-day "
+              "average and mid-range, RSI near 50, a flat MACD, normal volume -- not worth a full review"),
+}
+REVIEW_QUESTIONS = {
+    ANSWER_FIELD: {"type": "noul", "instructions": REVIEW_QUESTION, "criteria": REVIEW_CRITERIA},
 }
 
 BATCH_SIZE = 32       # fixed: batch shape can nudge float results; >= universe size
@@ -78,7 +96,8 @@ def card_to_state(card: CandidateCard) -> dict[str, float]:
 def _settings_json() -> str:
     return json.dumps(
         {"batch_size": BATCH_SIZE, "device": DEVICE, "min_confidence": None,
-         "state_decimals": STATE_DECIMALS, "answer_field": ANSWER_FIELD},
+         "state_decimals": STATE_DECIMALS, "answer_field": ANSWER_FIELD,
+         "question_format": QUESTION_FORMAT, "criteria": REVIEW_CRITERIA},
         sort_keys=True, separators=(",", ":"),
     )
 
@@ -141,7 +160,7 @@ class LayaScorer:
             return []
         states = [card_to_state(c) for c in cards]
         results = self._decide_batch(
-            self._agent, states, schema=REVIEW_SCHEMA, return_details=True,
+            self._agent, states, questions=REVIEW_QUESTIONS, return_details=True,
             batch_size=BATCH_SIZE,
         )
         if len(results) != len(cards):

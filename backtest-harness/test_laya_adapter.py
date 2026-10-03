@@ -6,6 +6,8 @@ Run: python -m pytest -q test_laya_adapter.py
 import socket
 from types import SimpleNamespace
 
+import json
+
 import pytest
 
 import laya_adapter as la
@@ -44,6 +46,7 @@ class RecordingDecide:
 
     def __call__(self, runner, states, schema=None, **kw):
         self.calls.append((runner, states, schema, kw))
+        assert schema is None, "v2 asks explicit questions, never a criteria-less schema"
         return self._fn(states)
 
 
@@ -56,8 +59,8 @@ def test_scores_a_batch_in_one_call_with_the_exact_schema_and_options():
     assert len(decide.calls) == 1, "one batched call, not N sequential ones"
     runner, states, schema, kw = decide.calls[0]
     assert runner == "AGENT"
-    assert schema == la.REVIEW_SCHEMA
-    assert schema["properties"][la.ANSWER_FIELD]["description"] == (
+    assert kw["questions"] == la.REVIEW_QUESTIONS
+    assert kw["questions"][la.ANSWER_FIELD]["instructions"] == (
         "Is this identity-free numeric card worth spending the existing full technical/news review on today?")
     assert kw["return_details"] is True
     assert kw["batch_size"] == la.BATCH_SIZE
@@ -160,7 +163,16 @@ def test_pins_are_exact_and_load_refuses_a_missing_directory(tmp_path):
         la.LayaScorer.load(str(tmp_path / "does-not-exist"))
 
 
-def test_review_question_and_schema_are_the_one_approved_boolean_question():
-    assert list(la.REVIEW_SCHEMA["properties"]) == [la.ANSWER_FIELD]
-    assert la.REVIEW_SCHEMA["properties"][la.ANSWER_FIELD]["type"] == "boolean"  # laya maps this to `noul`
-    assert "buy" not in la.REVIEW_QUESTION.lower() and "profit" not in la.REVIEW_QUESTION.lower()
+def test_review_question_is_the_one_approved_noul_with_explicit_criteria():
+    # v2: a criteria-less noul answers "no" whatever the state on the English
+    # checkpoint (laya README, Honest limits), so both options must be described.
+    assert list(la.REVIEW_QUESTIONS) == [la.ANSWER_FIELD]
+    q = la.REVIEW_QUESTIONS[la.ANSWER_FIELD]
+    assert q["type"] == "noul" and set(q["criteria"]) == {"true", "false"}
+    assert all(q["criteria"][k].strip() for k in ("true", "false"))
+    assert "labels" not in q, "v2 keeps laya's default option labels (measured; see the demo report)"
+    settings = json.loads(la.expected_metadata().settings)
+    assert settings["question_format"] == la.QUESTION_FORMAT == "noul-criteria-v2"
+    assert settings["criteria"] == la.REVIEW_CRITERIA, "the exact option text is part of the scorer identity"
+    for text in (la.REVIEW_QUESTION, *la.REVIEW_CRITERIA.values()):
+        assert "buy" not in text.lower() and "profit" not in text.lower()

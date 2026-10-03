@@ -5,7 +5,7 @@
 #
 # Build (context = backtest-harness/, so only the files named below can enter):
 #   docker build -f backtest-harness/laya_worker_image/Dockerfile \
-#       -t hermes-laya-worker:1 backtest-harness
+#       -t hermes-laya-worker:2 backtest-harness
 #
 # Contents: CPU-only torch + the pinned Laya packages + exactly three project
 # modules (the worker, the adapter, the pure card/selector types). No trading,

@@ -22,6 +22,9 @@ backtest-harness/.diagnostics/
 # Experimental Laya selector (Phase 2): private per-run selection snapshots and
 # the local Laya worker log -- runtime artifacts, never committed.
 backtest-harness/.selector_snapshots/
+# Standalone Laya demo (laya_demo.py): write-once artifacts, the PRIVATE
+# row-ID -> ticker mappings, and worker logs -- runtime output, never committed.
+backtest-harness/.laya_demo/
 
 # Scalable screener (Stage 1): local write-once screen snapshots -- runtime
 # data, never committed.

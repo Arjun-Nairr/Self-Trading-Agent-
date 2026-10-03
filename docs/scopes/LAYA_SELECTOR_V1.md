@@ -1,6 +1,11 @@
 # Laya candidate-selector — scope v1
 
-**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; no selector evaluation or activation has happened**
+**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; standalone current-data demo completed 2026-10-03 (question format corrected to `noul-criteria-v2`); no Hermes/backtest integration, selector evaluation, dashboard view, or activation has happened**
+
+> **User decision (2026-10-03):** Laya stays in the project as an experimental
+> portfolio/CV component. A controlled comparison against random and
+> deterministic controls informs its documented limitations; it is **not** a
+> removal gate. Nothing here makes Laya part of live trading.
 
 This is the single current scope record for the Laya candidate-selector
 prototype. It records the fixed-universe experiment approved for phased
@@ -198,7 +203,9 @@ result must be labelled a fixed-universe prototype result.
   a no-op). `answer_confidence` is recorded and never used to rank or filter.
 - `backtest-harness/laya_adapter.py` — local adapter over
   `laya.decide_batch(..., return_details=True)` asking the single boolean
-  question above (a Laya `noul`), pinned to `laya==0.3.23`, checkpoint
+  question above (a Laya `noul`; *superseded 2026-10-03: v1 sent it as a
+  criteria-less schema boolean, now an explicit `noul` with criteria — see
+  "Standalone current-data demo" below*), pinned to `laya==0.3.23`, checkpoint
   `convaiinnovations/laya` at commit `55cf4c4e…`, weights verified against a
   pinned SHA-256, CPU, fixed batch size, no `min_confidence`, loaded from a
   local directory (scoring cannot reach the network). The only network step is
@@ -283,7 +290,9 @@ experimental runs); a changed universe file fails a resume.
    At least 40 usable bars are required.
 4. **Scoring — one private worker container.** The controller process never
    loads Laya. It starts, once and lazily, a dedicated Docker container
-   (`hermes-laya-worker:1`, built from `backtest-harness/laya_worker_image/`)
+   (`hermes-laya-worker:1`, built from `backtest-harness/laya_worker_image/`;
+   *`:2` since 2026-10-03, carrying question format v2 — a `:1` image now fails
+   the handshake*)
    and talks to it over the `docker run -i` stdin/stdout pipes — no port, no
    HTTP, no public endpoint. The container runs with `--network none` (no
    interface or route at all), a read-only root filesystem with only a small
@@ -376,6 +385,70 @@ before a controlled evaluation.
 
 ---
 
+## Standalone current-data demo — implemented (2026-10-03)
+
+One command, no Hermes, trades, backtest state, Neon, or dashboard:
+
+```
+python backtest-harness/laya_demo.py run                       # fetch, score, save, print
+python backtest-harness/laya_demo.py replay <artifact.json>    # re-verify + print; no fetch, no scoring
+```
+
+Prerequisites: the compose `maverick-mcp` service running, the worker image
+`hermes-laya-worker:2` built (Dockerfile in `backtest-harness/laya_worker_image/`),
+and the pinned checkpoint provisioned once with
+`laya_adapter.provision_checkpoint()` (default lookup:
+`~/.cache/huggingface/hub/.../snapshots/<pinned commit>`; override `--checkpoint`).
+
+What it reuses rather than duplicates: the frozen universe loader, the
+existing price path (`run_backtest.fetch_card_history` → `laya_cards.history_script`
+in maverick-mcp), `build_day_cards`, `LayaWorkerScorer` (the same isolated
+`--network none` container, `docker inspect`-verified, loaded once, one
+batch), `score_complete_cards`, `select_pool` / `build_snapshot`.
+
+Demo-specific rules:
+- **Cutoff** = the latest completed US session: the newest date with bars for
+  at least half the names, no later than today (US/Eastern) once 17:00 ET has
+  passed, else yesterday. Later bars are dropped; a name without the cutoff
+  bar is `stale_no_cutoff_bar` and is never sent to the model. A cutoff before
+  the last completed weekday is printed as "holiday or provider lag".
+- **Identity:** row IDs are salted with a per-run random value, so they cannot
+  be re-derived from the public universe file. The write-once
+  `artifact.json` carries no ticker, name, or free text; the row-ID → ticker
+  map and raw fetch errors live in a separate `private_mapping.json`. Both are
+  under the git-ignored `backtest-harness/.laya_demo/<cutoff>_<run time>/`.
+- **Artifact:** model/config identity (package, checkpoint commit, weight hash,
+  question + criteria, image tag + id), git head/dirty, cutoff evidence,
+  universe hash, every card (seven numbers, completeness, latest bar date),
+  the exact model inputs, scores, ranks, selected/not-selected/unavailable
+  status with reasons, timings, and a content SHA-256. `replay` recomputes the
+  hash, the inputs digest, the model inputs, and the full pure selection from
+  the stored cards and scores, and refuses any mismatch.
+- `answer_confidence` is recorded and never used to select.
+
+**Question format v2 (`noul-criteria-v2`).** v1 asked the review question as a
+JSON-schema boolean, which laya 0.3.23 turns into a `noul` with no criteria.
+The pinned package's own README (and upstream `main`, 0.3.24) states that on
+the English `laya` checkpoint such a question renders one generic option pair
+that "carries the whole decision", so it answers "no" whatever the state. A
+synthetic diagnostic confirmed this for our cards: every card scored below 0.5,
+and active cards ranked *below* quiet ones (AUROC 0.36–0.40). v2 asks the same
+question, with the same package, checkpoint, and P(true) meaning, as an
+explicit `noul` whose two options describe a notable versus an ordinary card. It
+separates synthetic active from quiet cards only weakly (AUROC 0.66–0.70). The
+criteria text is part of the scorer identity (`settings`), so the handshake,
+snapshots, and artifacts all pin it. No model upgrade and no fine-tuning were
+involved. Evidence and the real run are in
+`docs/evaluations/laya_selector_demo_2026-10-03.md`.
+
+**What the demo does not establish:** that Laya's ranking is useful, calibrated,
+or reflects market judgment; on real cards every score was below 0.5 in a
+narrow band. It also does not show anything about Hermes, trading, or historical
+validity. Pending (not started): wiring the demonstrated selector into the
+Hermes/backtest path for a controlled comparison, and any dashboard view.
+
+---
+
 ## Build and test phases
 
 1. **Foundation — no trading-path change. ✅ Phase 1 implemented.** Build the fixed-30 configuration,
@@ -439,3 +512,7 @@ smoke/live-paper run using the selector, running the coverage preflight on
 real data, calibration/benchmarking of Laya on real cards, Neon selector
 evidence, a rules or risk-limit change, any change to
 `watchlist/watchlist.json`, activation, and dashboard work.
+
+*(2026-10-03: the standalone demo above scored real current cards once.
+That is a demonstration, not calibration or benchmarking; everything listed
+here is still not started.)*

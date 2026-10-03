@@ -305,12 +305,22 @@ unapproved pending that decision.
     experimental wiring behind `--selector-mode laya_fixed30_experimental`)
     implemented; no selector evaluation or activation completed.** The
     default (`off`) fixed-10 path, rules, risk limits, Neon schema, and
-    dashboard are unchanged. Still open: the 30-symbol coverage preflight has
-    not yet been run on real data (Docker was down), and the next and only
-    next block is a controlled Laya-vs-random-vs-deterministic selector
-    evaluation. A dynamic, point-in-time market-wide selector stays out of
-    scope. Architecture, the committed 30-name list, and open decisions live
-    in `docs/scopes/LAYA_SELECTOR_V1.md`.
+    dashboard are unchanged. **Standalone current-data demo completed
+    (2026-10-03):** `python backtest-harness/laya_demo.py run` scores the real
+    fixed-30 cards in the pinned isolated worker and saves a replayable
+    top-10 artifact (`docs/evaluations/laya_selector_demo_2026-10-03.md`).
+    The Laya question was corrected to a versioned explicit-criteria format
+    (`noul-criteria-v2`, worker image `hermes-laya-worker:2`) after the v1
+    criteria-less question was shown to answer "no" whatever the card; v2's
+    state sensitivity is still weak. User decision: Laya stays as an
+    experimental portfolio/CV component. A comparison against random and
+    deterministic controls informs its documented limitations and is not a
+    removal gate. **Pending:** Hermes/backtest integration of the demonstrated
+    selector, the controlled comparison, and any dashboard view (none
+    started). The 30-symbol coverage preflight has still not been run, and EQR
+    returned no usable price history in the demo. A dynamic, point-in-time
+    market-wide selector stays out of scope. Architecture, the committed
+    30-name list, and open decisions live in `docs/scopes/LAYA_SELECTOR_V1.md`.
   - Measurable technical-strategy library. Status `discussing` / `Later`.
     Evaluate a small number of objective swing-trading concepts (for
     example momentum, mean reversion, breakout, relative strength, or

@@ -225,7 +225,8 @@ class SelectorContext:
 # no secrets, only the three Laya modules copied in). The Python-level socket
 # deny inside laya_worker.py is a SECOND line of defence, not the boundary.
 
-LAYA_WORKER_IMAGE = "hermes-laya-worker:1"
+# :2 carries question format v2 (laya_adapter.QUESTION_FORMAT); a :1 image fails the handshake.
+LAYA_WORKER_IMAGE = "hermes-laya-worker:2"
 WORKER_CONTAINER_USER = "10001:10001"
 # The checkpoint is mounted at the path huggingface_hub would give it, so the
 # adapter can recover (and verify) the pinned commit from the directory name.
