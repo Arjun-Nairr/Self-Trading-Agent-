@@ -337,9 +337,14 @@ unapproved pending that decision.
       (`docs/evaluations/laya_connected_smoke_60pool_2026-10-03.md`), with
       fills, fill-time risk rejections, and one target exit exercised.
 
-    **Pending:** the dashboard demonstration (aggregate funnel only), the
-    controlled Laya-vs-random-vs-deterministic comparison, and the paths not
-    yet exercised (stop/time-stop exits, the gate's Hermes classification).
+    **Dashboard demonstration done (2026-10-03):** the Dashboard V2
+    **Workflow** page shows each simulated day's order/position and candidate
+    paths from public, allowlisted workflow progress events (aggregate Laya
+    counts only), with replay and live follow
+    (`docs/evaluations/workflow_dashboard_2026-10-03.md`).
+    **Pending:** the controlled Laya-vs-random-vs-deterministic comparison,
+    and the paths not yet exercised (stop/time-stop exits, the gate's Hermes
+    classification).
     A dynamic, point-in-time
     market-wide selector stays out of scope. Architecture, the committed
     30-name list, and open decisions live in `docs/scopes/LAYA_SELECTOR_V1.md`.
@@ -872,7 +877,14 @@ projection of this file (the six sectors, each grouped into completed/
 active/next/deferred), read-only, never an editable task manager.
 **Decisions page** requests only the newest 10 decision rows for the
 selected run (a bounded list query plus bounded count-only queries for
-the run-wide totals — never a whole-list fetch). Dashboard V1
+the run-wide totals — never a whole-list fetch). **Workflow page**
+(2026-10-03): per-day order/position and candidate paths as connected
+stages. It is built from `public_workflow_events`, a new allowlisted
+progress-event projection written by the backtest controller as each stage
+happens, plus existing journal records for older runs ("not recorded"
+where nothing exists). It offers local replay and bounded live follow, and
+lists labelled smoke runs on that page only
+(`docs/evaluations/workflow_dashboard_2026-10-03.md`). Dashboard V1
 (`dashboard/index.html`) — original monitoring dashboard, stays active
 until an explicit cutover decision.
 Obsidian vault (`docs/obsidian/`) — engineering-ground-truth canvases.
