@@ -176,3 +176,17 @@ def test_review_question_is_the_one_approved_noul_with_explicit_criteria():
     assert settings["criteria"] == la.REVIEW_CRITERIA, "the exact option text is part of the scorer identity"
     for text in (la.REVIEW_QUESTION, *la.REVIEW_CRITERIA.values()):
         assert "buy" not in text.lower() and "profit" not in text.lower()
+
+
+def test_a_pool_larger_than_one_internal_batch_is_one_call_mapped_in_order():
+    # 60 cards > BATCH_SIZE: still ONE decide_batch call (laya splits it into
+    # passes of 32 internally); every record maps back to its own row, in order.
+    import laya_selector as ls
+    cards = [ls.build_card("r_%012x" % i, {
+        "five_day_return": 0.001 * i, "sma20_distance": 0.0, "rsi14": 50.0, "macd_direction": 0.0,
+        "relative_volume": 1.0, "realized_volatility": 0.2, "range_position_20d": 0.5}) for i in range(60)]
+    decide = RecordingDecide(lambda states: [_result(round(s["five_day_return"] * 10, 4), 0.9) for s in states])
+    recs = la.LayaScorer("AGENT", decide, META).score(cards)
+    assert len(decide.calls) == 1 and decide.calls[0][3]["batch_size"] == la.BATCH_SIZE < 60
+    assert [r.row_id for r in recs] == [c.row_id for c in cards]
+    assert [r.review_probability for r in recs] == pytest.approx([round(0.01 * i, 4) for i in range(60)])

@@ -780,7 +780,7 @@ def test_preflight_report_and_exit_codes(capsys):
     price = lp.evaluate_price_coverage(hist, SYMBOLS, start, end)
     news = lp.evaluate_news_coverage(probes, SYMBOLS)
     report, ok = lp.build_report(UNIVERSE, price, news, start, end)
-    assert not ok and f"FAIL: {SYMBOLS[1]}" in report and report.count("\n") >= 32
+    assert not ok and f"FAIL (1): {SYMBOLS[1]}" in report and report.count("\n") >= 32
     assert all(s in report for s in SYMBOLS)
     assert report == lp.build_report(UNIVERSE, price, news, start, end)[0]
 

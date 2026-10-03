@@ -79,7 +79,10 @@ REVIEW_QUESTIONS = {
     ANSWER_FIELD: {"type": "noul", "instructions": REVIEW_QUESTION, "criteria": REVIEW_CRITERIA},
 }
 
-BATCH_SIZE = 32       # fixed: batch shape can nudge float results; >= universe size
+BATCH_SIZE = 32       # fixed: batch shape can nudge float results. A day with more cards
+                      # (e.g. a 58-name pool) is ONE decide_batch call that laya runs as
+                      # internal passes of 32; results come back in input order
+                      # (verified on the real worker: batch == per-card scores).
 STATE_DECIMALS = 4    # model input is rounded to a fixed width: short, deterministic text
 DEVICE = "cpu"
 

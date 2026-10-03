@@ -1666,15 +1666,46 @@ def _experimental_watchlist_entries(universe) -> list[dict]:
     ]
 
 
-def _load_current_watchlist(selector_mode: str):
+def _load_current_watchlist(selector_mode: str, universe_path: "str | None" = None):
     """-> (watchlist entries, FixedUniverse | None). `off` reads exactly the
-    baseline watchlist/watchlist.json (unchanged); the experimental mode reads
-    ONLY watchlist/experimental_fixed30.json and never the baseline file."""
+    baseline watchlist/watchlist.json (unchanged). The experimental mode reads
+    ONLY an experimental universe, never the baseline file: a frozen
+    coverage-qualified pool (`universe_path`, re-verified by
+    laya_preflight.load_frozen_pool -- never re-screened), or, when no pool is
+    given, the original watchlist/experimental_fixed30.json."""
     if selector_mode == SELECTOR_MODE_OFF:
         return json.loads((REPO / "watchlist" / "watchlist.json").read_text())["tickers"], None
+    if universe_path is not None:
+        from laya_preflight import PoolInvalid, load_frozen_pool
+        try:
+            universe, _pool = load_frozen_pool(_repo_path(universe_path))
+        except PoolInvalid as exc:
+            raise SystemExit(f"--selector-universe refused: {exc}")
+        return _experimental_watchlist_entries(universe), universe
     from laya_selector import load_universe
     universe = load_universe()
     return _experimental_watchlist_entries(universe), universe
+
+
+def _repo_path(path: str) -> Path:
+    """A stored/selected universe path: absolute as given, else repo-relative."""
+    p = Path(path)
+    return p if p.is_absolute() else REPO / p
+
+
+def _resolve_selector_universe(is_resume: bool, stored: "dict | None", requested: "str | None") -> "str | None":
+    """Durable per-run pool invariant (same discipline as seed/window/mode):
+    a fresh run uses --selector-universe as given (None = the legacy fixed-30
+    file); a resumed run reuses the STORED pool path, and an explicit
+    different path fails closed. Pure."""
+    if not is_resume:
+        return requested
+    stored_path = (stored or {}).get("selector_universe_path")
+    if requested is not None and (stored_path is None or
+                                  _repo_path(requested).resolve() != _repo_path(stored_path).resolve()):
+        raise SystemExit(f"--selector-universe {requested!r} conflicts with this run's stored pool "
+                         f"{stored_path!r} -- a resumed run must keep its frozen pool")
+    return stored_path
 
 
 def _names_for_masking(watchlist: list[dict]) -> dict[str, list[str]]:
@@ -1716,8 +1747,8 @@ def _validate_selector_args(selector_mode: str, args) -> None:
     the laya flags (a silent no-op is a trap). Pure flag checks; the Docker
     availability check is verify_docker_worker_available (see main)."""
     if selector_mode == SELECTOR_MODE_OFF:
-        if args.laya_image or args.laya_checkpoint:
-            raise SystemExit("--laya-image/--laya-checkpoint were given but --selector-mode "
+        if args.laya_image or args.laya_checkpoint or getattr(args, "selector_universe", None):
+            raise SystemExit("--laya-image/--laya-checkpoint/--selector-universe were given but --selector-mode "
                              f"is off; pass --selector-mode {SELECTOR_MODE_LAYA_FIXED30} to use them")
         return
     if not args.laya_checkpoint:
@@ -4036,7 +4067,9 @@ def validate_hermes_response(response, is_reflection_day: bool, fundamentals_ena
 # §8 opening (table + its baseline-only prose) is swapped for the run's own
 # masked universe; every other line of RULES.md is delivered unchanged. The
 # selector-off prompt and RULES.md itself never change.
-EXPERIMENTAL_RULES_PACKAGING = "fixed30-universe-v1"
+# Label renamed from "fixed30-universe-v1" (same text) once pools of any size
+# could drive a run.
+EXPERIMENTAL_RULES_PACKAGING = "frozen-universe-v2"
 _RULES_S8_START = "\n## 8. Watchlist\n"
 _RULES_S8_END = "\n### Criteria used"
 
@@ -6003,11 +6036,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--selector-mode", choices=[SELECTOR_MODE_OFF, SELECTOR_MODE_LAYA_FIXED30],
                         default=None,
                         help="EXPERIMENTAL candidate selector. 'off' (the default) is the "
-                             "unchanged fixed-10 behavior. 'laya_fixed30_experimental' "
-                             "narrows watchlist/experimental_fixed30.json's 30 names to a "
-                             "daily top-10 mini-pool with a private local Laya worker. "
-                             "Requires --laya-checkpoint (and Docker). A RESUMED run "
-                             "must keep its stored mode.")
+                             "unchanged fixed-10 behavior. 'laya_fixed30_experimental' (name "
+                             "kept for compatibility) narrows an experimental universe -- a "
+                             "frozen pool from --selector-universe, else "
+                             "watchlist/experimental_fixed30.json -- to a daily top-10 "
+                             "mini-pool with a private local Laya worker. Requires "
+                             "--laya-checkpoint (and Docker). A RESUMED run must keep its "
+                             "stored mode.")
+    parser.add_argument("--selector-universe", default=None,
+                        help="frozen coverage-qualified pool JSON written by "
+                             "laya_preflight.py --freeze (re-verified, never re-screened); "
+                             "only with --selector-mode laya_fixed30_experimental. A RESUMED run "
+                             "reuses its stored pool; a different one fails closed.")
     parser.add_argument("--laya-checkpoint", default=None,
                         help="local pinned Laya checkpoint directory from "
                              "laya_adapter.provision_checkpoint(), mounted READ-ONLY into the "
@@ -6099,18 +6139,21 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
         _existing_state is not None, (_existing_state or {}).get("selector_mode"),
         args.selector_mode)
     _validate_selector_args(selector_mode, args)
+    selector_universe_path = _resolve_selector_universe(
+        _existing_state is not None, _existing_state, args.selector_universe)
     if selector_mode != SELECTOR_MODE_OFF:
         # Fail closed BEFORE anything else happens: the experimental worker
         # runs only in its Docker container; no Docker/image/checkpoint means
         # no run (never a fallback to a host-process worker).
         from laya_experiment import LAYA_WORKER_IMAGE, verify_docker_worker_available
         verify_docker_worker_available(args.laya_checkpoint, args.laya_image or LAYA_WORKER_IMAGE)
-    current_watchlist, selector_universe = _load_current_watchlist(selector_mode)
+    current_watchlist, selector_universe = _load_current_watchlist(selector_mode, selector_universe_path)
     if selector_universe is not None:
         if _existing_state is not None and (
                 _existing_state.get("selector_universe_hash") != selector_universe.hash):
             raise SystemExit(
-                "watchlist/experimental_fixed30.json changed since this run started (stored "
+                f"the experimental universe ({selector_universe_path or 'watchlist/experimental_fixed30.json'}) "
+                "changed since this run started (stored "
                 f"universe hash {str(_existing_state.get('selector_universe_hash'))[:12]}, "
                 f"current {selector_universe.hash[:12]}) -- a resumed experimental run must "
                 "keep its frozen universe. Restore the file or use --reset.")
@@ -6353,6 +6396,9 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
             _state_out.update({
                 "selector_mode": selector_mode,
                 "selector_universe_hash": selector_universe.hash,
+                **({"selector_universe_path": selector_universe_path,
+                    "selector_universe_version": selector_universe.version}
+                   if selector_universe_path is not None else {}),
                 "selector_word_like_tickers": list(masking.word_like_tickers or ()),
             })
         _atomic_write_json(STATE_PATH, _state_out)

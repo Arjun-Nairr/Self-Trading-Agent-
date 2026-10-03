@@ -1,0 +1,541 @@
+{
+  "_comment": "EXPERIMENTAL 60-company CANDIDATE population for the Laya selector prototype (docs/scopes/LAYA_SELECTOR_V1.md). It is NOT used directly by any run: laya_preflight.py --freeze qualifies it for one window and writes a frozen coverage-qualified pool (watchlist/experimental_pools/), and only that pool can drive an experimental run. Separate from watchlist/watchlist.json (baseline fixed-10) and watchlist/experimental_fixed30.json (unchanged). A fixed-universe prototype: chosen with present-day knowledge, so it is survivorship-biased and says nothing about historical market-wide representativeness. Changing any entry changes universe_hash and needs a new version.",
+  "_selection_method": "Recorded 2026-10-03 before any coverage check, scoring, or run. Keep all 30 fixed30-v1 names unchanged (10 baseline + 20 added), then add exactly 3 per sector bucket (6 per sector). Additions were picked by hand for liquidity, sector spread and plausible news/price provider coverage from long-listed US common stocks. Excluded a priori: biotech, recent IPOs, tickers that are ordinary English words (e.g. DOW, MOS, KEYS, HAL), and names with a known pending take-private, breakup or merger as of the selector's knowledge (e.g. EA, KHC, KDP, IPG). A read-only factual check (yfinance via maverick-mcp, 2026-10-03) confirmed each addition is a listed EQUITY on NYSE/Nasdaq with the stated sector, >= 5 years of daily bars and >= 2.2M average daily volume. No returns, momentum, backtest outcome, Laya score or future information was used. Several additions exceed the baseline RULES.md section 8 mid-cap/volume bands; the 60 are not section-8 screened.",
+  "version": "candidates60-v1",
+  "experimental": true,
+  "baseline_watchlist": "watchlist/watchlist.json",
+  "parent_fixed30": "watchlist/experimental_fixed30.json",
+  "expected_count": 60,
+  "word_like_tickers": [
+    "CF",
+    "DINO",
+    "RYAN"
+  ],
+  "_word_like_note": "Tickers whose lowercase/mixed-case form is an ordinary word or name (cf., dino, ryan): RunMasking matches these case-sensitively so prose is not corrupted. Every other ticker is matched case-insensitively so a lowercase ticker leak is detected. `brands` are best-effort extra masking terms, not a complete list.",
+  "tickers": [
+    {
+      "symbol": "OLN",
+      "sector": "Basic Materials",
+      "name": "Olin Corporation",
+      "group": "baseline",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "NUE",
+      "sector": "Basic Materials",
+      "name": "Nucor Corporation",
+      "group": "added",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "CF",
+      "sector": "Basic Materials",
+      "name": "CF Industries Holdings, Inc.",
+      "group": "added",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "FCX",
+      "sector": "Basic Materials",
+      "name": "Freeport-McMoRan Inc.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Freeport"
+      ]
+    },
+    {
+      "symbol": "ALB",
+      "sector": "Basic Materials",
+      "name": "Albemarle Corporation",
+      "group": "added",
+      "origin": "candidates60-v1"
+    },
+    {
+      "symbol": "LYB",
+      "sector": "Basic Materials",
+      "name": "LyondellBasell Industries N.V.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "LyondellBasell"
+      ]
+    },
+    {
+      "symbol": "WMG",
+      "sector": "Communication Services",
+      "name": "Warner Music Group Corp.",
+      "group": "baseline",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "OMC",
+      "sector": "Communication Services",
+      "name": "Omnicom Group Inc.",
+      "group": "added",
+      "brands": [
+        "BBDO",
+        "TBWA"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "LYV",
+      "sector": "Communication Services",
+      "name": "Live Nation Entertainment, Inc.",
+      "group": "added",
+      "brands": [
+        "Live Nation",
+        "Ticketmaster"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "TTWO",
+      "sector": "Communication Services",
+      "name": "Take-Two Interactive Software, Inc.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Take-Two",
+        "Rockstar Games"
+      ]
+    },
+    {
+      "symbol": "FOXA",
+      "sector": "Communication Services",
+      "name": "Fox Corporation",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Fox News"
+      ]
+    },
+    {
+      "symbol": "NYT",
+      "sector": "Communication Services",
+      "name": "The New York Times Company",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "New York Times"
+      ]
+    },
+    {
+      "symbol": "PLNT",
+      "sector": "Consumer Cyclical",
+      "name": "Planet Fitness, Inc.",
+      "group": "baseline",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "TOL",
+      "sector": "Consumer Cyclical",
+      "name": "Toll Brothers, Inc.",
+      "group": "added",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "LKQ",
+      "sector": "Consumer Cyclical",
+      "name": "LKQ Corporation",
+      "group": "added",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "DHI",
+      "sector": "Consumer Cyclical",
+      "name": "D.R. Horton, Inc.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "D.R. Horton",
+        "DR Horton"
+      ]
+    },
+    {
+      "symbol": "EBAY",
+      "sector": "Consumer Cyclical",
+      "name": "eBay Inc.",
+      "group": "added",
+      "origin": "candidates60-v1"
+    },
+    {
+      "symbol": "BBY",
+      "sector": "Consumer Cyclical",
+      "name": "Best Buy Co., Inc.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Best Buy"
+      ]
+    },
+    {
+      "symbol": "SFM",
+      "sector": "Consumer Defensive",
+      "name": "Sprouts Farmers Market, Inc.",
+      "group": "baseline",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "CASY",
+      "sector": "Consumer Defensive",
+      "name": "Casey's General Stores, Inc.",
+      "group": "added",
+      "brands": [
+        "Casey's"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "CHD",
+      "sector": "Consumer Defensive",
+      "name": "Church & Dwight Co., Inc.",
+      "group": "added",
+      "brands": [
+        "Arm & Hammer",
+        "OxiClean"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "GIS",
+      "sector": "Consumer Defensive",
+      "name": "General Mills, Inc.",
+      "group": "added",
+      "origin": "candidates60-v1"
+    },
+    {
+      "symbol": "CAG",
+      "sector": "Consumer Defensive",
+      "name": "Conagra Brands, Inc.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Conagra"
+      ]
+    },
+    {
+      "symbol": "CLX",
+      "sector": "Consumer Defensive",
+      "name": "The Clorox Company",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Clorox"
+      ]
+    },
+    {
+      "symbol": "DINO",
+      "sector": "Energy",
+      "name": "HF Sinclair Corporation",
+      "group": "baseline",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "DVN",
+      "sector": "Energy",
+      "name": "Devon Energy Corporation",
+      "group": "added",
+      "brands": [
+        "Devon"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "TRGP",
+      "sector": "Energy",
+      "name": "Targa Resources Corp.",
+      "group": "added",
+      "brands": [
+        "Targa"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "SLB",
+      "sector": "Energy",
+      "name": "SLB N.V.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Schlumberger"
+      ]
+    },
+    {
+      "symbol": "OXY",
+      "sector": "Energy",
+      "name": "Occidental Petroleum Corporation",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Occidental"
+      ]
+    },
+    {
+      "symbol": "MPC",
+      "sector": "Energy",
+      "name": "Marathon Petroleum Corporation",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Marathon Petroleum"
+      ]
+    },
+    {
+      "symbol": "RYAN",
+      "sector": "Financial Services",
+      "name": "Ryan Specialty Holdings, Inc.",
+      "group": "baseline",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "RJF",
+      "sector": "Financial Services",
+      "name": "Raymond James Financial, Inc.",
+      "group": "added",
+      "brands": [
+        "Raymond James"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "CINF",
+      "sector": "Financial Services",
+      "name": "Cincinnati Financial Corporation",
+      "group": "added",
+      "brands": [
+        "Cincinnati Insurance"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "SCHW",
+      "sector": "Financial Services",
+      "name": "The Charles Schwab Corporation",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Schwab"
+      ]
+    },
+    {
+      "symbol": "AIG",
+      "sector": "Financial Services",
+      "name": "American International Group, Inc.",
+      "group": "added",
+      "origin": "candidates60-v1"
+    },
+    {
+      "symbol": "HBAN",
+      "sector": "Financial Services",
+      "name": "Huntington Bancshares Incorporated",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Huntington"
+      ]
+    },
+    {
+      "symbol": "BRKR",
+      "sector": "Healthcare",
+      "name": "Bruker Corporation",
+      "group": "baseline",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "STE",
+      "sector": "Healthcare",
+      "name": "STERIS plc",
+      "group": "added",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "IDXX",
+      "sector": "Healthcare",
+      "name": "IDEXX Laboratories, Inc.",
+      "group": "added",
+      "brands": [
+        "IDEXX"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "BSX",
+      "sector": "Healthcare",
+      "name": "Boston Scientific Corporation",
+      "group": "added",
+      "origin": "candidates60-v1"
+    },
+    {
+      "symbol": "BAX",
+      "sector": "Healthcare",
+      "name": "Baxter International Inc.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Baxter"
+      ]
+    },
+    {
+      "symbol": "ZBH",
+      "sector": "Healthcare",
+      "name": "Zimmer Biomet Holdings, Inc.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Zimmer Biomet"
+      ]
+    },
+    {
+      "symbol": "ATI",
+      "sector": "Industrials",
+      "name": "ATI Inc.",
+      "group": "baseline",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "PWR",
+      "sector": "Industrials",
+      "name": "Quanta Services, Inc.",
+      "group": "added",
+      "brands": [
+        "Quanta"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "ROL",
+      "sector": "Industrials",
+      "name": "Rollins, Inc.",
+      "group": "added",
+      "brands": [
+        "Orkin"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "CSX",
+      "sector": "Industrials",
+      "name": "CSX Corporation",
+      "group": "added",
+      "origin": "candidates60-v1"
+    },
+    {
+      "symbol": "EMR",
+      "sector": "Industrials",
+      "name": "Emerson Electric Co.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Emerson"
+      ]
+    },
+    {
+      "symbol": "JCI",
+      "sector": "Industrials",
+      "name": "Johnson Controls International plc",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Johnson Controls"
+      ]
+    },
+    {
+      "symbol": "BRX",
+      "sector": "Real Estate",
+      "name": "Brixmor Property Group Inc.",
+      "group": "baseline",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "EQR",
+      "sector": "Real Estate",
+      "name": "Equity Residential",
+      "group": "added",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "WPC",
+      "sector": "Real Estate",
+      "name": "W. P. Carey Inc.",
+      "group": "added",
+      "brands": [
+        "W.P. Carey"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "PLD",
+      "sector": "Real Estate",
+      "name": "Prologis, Inc.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "Prologis"
+      ]
+    },
+    {
+      "symbol": "VICI",
+      "sector": "Real Estate",
+      "name": "VICI Properties Inc.",
+      "group": "added",
+      "origin": "candidates60-v1"
+    },
+    {
+      "symbol": "INVH",
+      "sector": "Real Estate",
+      "name": "Invitation Homes Inc.",
+      "group": "added",
+      "origin": "candidates60-v1"
+    },
+    {
+      "symbol": "ALGM",
+      "sector": "Technology",
+      "name": "Allegro MicroSystems, Inc.",
+      "group": "baseline",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "TER",
+      "sector": "Technology",
+      "name": "Teradyne, Inc.",
+      "group": "added",
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "ZBRA",
+      "sector": "Technology",
+      "name": "Zebra Technologies Corporation",
+      "group": "added",
+      "brands": [
+        "Zebra"
+      ],
+      "origin": "fixed30-v1"
+    },
+    {
+      "symbol": "GLW",
+      "sector": "Technology",
+      "name": "Corning Incorporated",
+      "group": "added",
+      "origin": "candidates60-v1"
+    },
+    {
+      "symbol": "HPQ",
+      "sector": "Technology",
+      "name": "HP Inc.",
+      "group": "added",
+      "origin": "candidates60-v1"
+    },
+    {
+      "symbol": "NTAP",
+      "sector": "Technology",
+      "name": "NetApp, Inc.",
+      "group": "added",
+      "origin": "candidates60-v1",
+      "brands": [
+        "NetApp"
+      ]
+    }
+  ]
+}
