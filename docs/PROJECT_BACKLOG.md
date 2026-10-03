@@ -327,12 +327,20 @@ unapproved pending that decision.
     - the coverage preflight now counts distinct articles in non-overlapping
       probes that end before the first simulated day.
 
-    Blocker: the unchanged fixed-30 universe fails that preflight in every
-    window checked. EQR has no provider price bars in any recent week, and
-    4–14 other names fall short of news coverage. Lifting it needs a
-    universe decision (e.g. a `fixed30-v2` replacing EQR) or a decision on how
-    missing news coverage is treated. **Pending after that:** the one smoke
-    run, the controlled comparison, and any dashboard view. A dynamic, point-in-time
+    Blocker then: the unchanged fixed-30 universe failed that preflight in
+    every window checked. **Resolved by the user-approved 60-candidate
+    architecture (2026-10-03):**
+    - `candidates60-v1`, qualified for 2026-09-28..10-02 into a frozen
+      51-name pool;
+    - the first connected Laya → Hermes → risk → simulation smoke run
+      completed **GREEN**
+      (`docs/evaluations/laya_connected_smoke_60pool_2026-10-03.md`), with
+      fills, fill-time risk rejections, and one target exit exercised.
+
+    **Pending:** the dashboard demonstration (aggregate funnel only), the
+    controlled Laya-vs-random-vs-deterministic comparison, and the paths not
+    yet exercised (stop/time-stop exits, the gate's Hermes classification).
+    A dynamic, point-in-time
     market-wide selector stays out of scope. Architecture, the committed
     30-name list, and open decisions live in `docs/scopes/LAYA_SELECTOR_V1.md`.
   - Measurable technical-strategy library. Status `discussing` / `Later`.

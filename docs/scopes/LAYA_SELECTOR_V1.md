@@ -1,6 +1,6 @@
 # Laya candidate-selector — scope v1
 
-**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; standalone current-data demo completed 2026-10-03 (question format corrected to `noul-criteria-v2`); connected-smoke integration fixes done 2026-10-03 but the smoke run was NOT launched (coverage preflight refuses every checked window); no Hermes-connected run, selector evaluation, dashboard view, or activation has happened**
+**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; standalone current-data demo completed 2026-10-03 (question format corrected to `noul-criteria-v2`); connected-smoke integration fixes done 2026-10-03; the fixed-30 attempt was not launched (coverage), then the 60-candidate frozen-pool smoke run COMPLETED GREEN on 2026-10-03 (`docs/evaluations/laya_connected_smoke_60pool_2026-10-03.md`); no selector evaluation, dashboard view, or activation has happened**
 
 > **User decision (2026-10-03):** Laya stays in the project as an experimental
 > portfolio/CV component. A controlled comparison against random and
@@ -498,6 +498,50 @@ history. The universe was not changed, the requirement was not relaxed, and
 no run was launched. Next step needs a decision: a new universe version (for
 example replacing EQR) and/or how a news-coverage shortfall is treated, then
 the single smoke run.
+
+---
+
+## 60-candidate population and frozen coverage-qualified pools — implemented and run (2026-10-03)
+
+User-approved architecture (supersedes "the fixed 30 names are the run universe"
+for new runs; fixed-30 stays available as the legacy default):
+
+1. **Candidates:** `watchlist/experimental_candidates60.json` (`candidates60-v1`).
+   It holds all 30 `fixed30-v1` names plus 3 a-priori additions per sector,
+   chosen for liquidity, sector spread and plausible coverage. The selection
+   method is recorded in the file, and no returns or scores were used. It is
+   a fixed-universe prototype that no run uses directly.
+2. **Qualify and freeze:** `laya_preflight.py --universe <candidates> --start --end --freeze`
+   writes a write-once pool (`watchlist/experimental_pools/`):
+   - membership is exactly the candidates that pass coverage (news rule v2,
+     pre-start only; point-in-time warm-up; retrospective in-window
+     availability, labelled as such);
+   - it holds an evidence record for every candidate, the policy, window,
+     parent hash, and evidence and content hashes;
+   - failing names are excluded and do not block the others;
+   - it is refused below 20 members or when more than 10% of candidates have
+     fetch failures.
+3. **Run:** `run_backtest.py --selector-universe <pool>`:
+   - re-verifies the pool (`load_frozen_pool`), then uses exactly its
+     membership for masking, the `frozen-universe-v2` rules packaging, risk
+     membership and Laya selection (up to 10 a day);
+   - a resume reuses the stored pool and rejects a different or tampered
+     one; it never re-screens.
+4. **Size-agnostic scoring:** each day's eligible cards are one
+   `decide_batch` call (internal passes of 32). Batch scores equal per-card
+   scores on the real worker.
+
+First pool: `candidates60-v1-pool-2026-09-28-eec1e3f2203f` (51 of 60; EQR,
+OMC, TOL, LKQ, SFM, RJF, CINF, JCI and BRX excluded).
+
+First connected smoke run: `5573597c-…`, 2026-09-28..10-02, **GREEN**. Laya
+selection, packets, masked Hermes, risk and simulated execution all ran:
+- 3 BUY fills and 1 target exit;
+- 3 fill-time risk rejections;
+- 1 pending BUY left at the boundary, per resume semantics.
+
+Not exercised: stop/time-stop exits, the pre-fill gate's Hermes
+classification (no overnight news), and a whole-day selector failure.
 
 ---
 
