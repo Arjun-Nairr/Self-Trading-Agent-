@@ -343,9 +343,24 @@ unapproved pending that decision.
     counts only), with replay and live follow
     (`docs/evaluations/workflow_dashboard_2026-10-03.md`; redesigned as an
     agent-centred diagram 2026-10-04).
-    **Pending:** the controlled Laya-vs-random-vs-deterministic comparison,
-    and the paths not yet exercised (stop/time-stop exits, the gate's Hermes
-    classification).
+    **Laya vs. controls comparison done (2026-10-04)**
+    (`docs/evaluations/laya_vs_controls_2026-10-04.md`; plan frozen first in
+    `laya_vs_controls_plan_2026-10-04.md`). Three retrospective sessions on
+    the same 51-name pool:
+    - **Functional and reproducible:** inputs and scores identical to smoke
+      run `5573597c`.
+    - **Responsive:** every input moves the score, but mostly against its
+      own stated criteria.
+    - **Distinct from the deterministic biggest-mover control:** yes.
+    - **Distinct from random selection:** not shown, on overlap, turnover
+      or criteria-match.
+    - **Useful:** inconclusive. No trading benefit is claimed.
+    - **Cost:** about 35 s of CPU per 51-card day, plus a 32 s cold start;
+      the controls are free.
+
+    No further selector run is scheduled from this result.
+    **Pending:** the paths not yet exercised (stop/time-stop exits, the
+    gate's Hermes classification).
     A dynamic, point-in-time
     market-wide selector stays out of scope. Architecture, the committed
     30-name list, and open decisions live in `docs/scopes/LAYA_SELECTOR_V1.md`.
