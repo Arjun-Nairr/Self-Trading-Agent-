@@ -28,6 +28,8 @@ backtest-harness/.laya_demo/
 # Laya vs. controls comparison (laya_controls.py): PRIVATE cards, scores,
 # shortlists and row-ID -> ticker mappings -- never committed.
 backtest-harness/.laya_controls/
+# Laya framing x label experiment (laya_framing.py): PRIVATE per-card scores and top-10 row IDs.
+backtest-harness/.laya_framing/
 
 # Scalable screener (Stage 1): local write-once screen snapshots -- runtime
 # data, never committed.
