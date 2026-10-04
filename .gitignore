@@ -25,6 +25,9 @@ backtest-harness/.selector_snapshots/
 # Standalone Laya demo (laya_demo.py): write-once artifacts, the PRIVATE
 # row-ID -> ticker mappings, and worker logs -- runtime output, never committed.
 backtest-harness/.laya_demo/
+# Laya vs. controls comparison (laya_controls.py): PRIVATE cards, scores,
+# shortlists and row-ID -> ticker mappings -- never committed.
+backtest-harness/.laya_controls/
 
 # Scalable screener (Stage 1): local write-once screen snapshots -- runtime
 # data, never committed.
