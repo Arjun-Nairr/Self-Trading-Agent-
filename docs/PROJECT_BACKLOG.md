@@ -359,6 +359,21 @@ unapproved pending that decision.
       the controls are free.
 
     No further selector run is scheduled from this result.
+    **Input-framing × answer-label experiment done (2026-10-04)**
+    (`docs/evaluations/laya_framing_2026-10-04.md`; plan frozen first in
+    `laya_framing_plan_2026-10-04.md`). A 2×2 of explained vs. production
+    JSON state and neutral vs. `false`/`true` labels, on the same saved cards
+    and question.
+    - **Result:** no variant met the pre-registered rule and nothing
+      survived confirmation. Explained context shifts and reshuffles the
+      scores without following the criteria. Neutral-label identity changes
+      the task metric (label bias).
+    - **Pre-existing finding:** the production "true" criterion is cut at
+      laya's 48-token option cap. Recorded, not changed.
+    - **Next:** the production selector is unchanged, and no further
+      prompt or label work is justified. Fine-tuning would first need an
+      independently human-labelled, date-split card set (see the report,
+      §7); not started.
     **Pending:** the paths not yet exercised (stop/time-stop exits, the
     gate's Hermes classification).
     A dynamic, point-in-time

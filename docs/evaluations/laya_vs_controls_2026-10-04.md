@@ -184,10 +184,17 @@ not have been proof of usefulness either.
 Every field moves the score, and the moves are similar in size to a real
 day's whole score range (0.054–0.087). So Laya is responsive.
 
-Only two of the eleven predicted rises occur: a +10% five-day move (the
-largest effect) and high relative volume (barely). Most "notable" changes
-*lower* the score, and the card that is notable on every field scores
-below the ordinary one.
+Only three of the eleven predicted rises occur:
+- a +10% five-day move (the largest effect);
+- RSI 25;
+- high relative volume (barely).
+
+*(Corrected 2026-10-04: the first version said "two", missing RSI 25 →
++0.0075. The deltas are unchanged and were reproduced exactly in
+`laya_framing_2026-10-04.md`.)*
+
+Most "notable" changes *lower* the score, and the card that is notable on
+every field scores below the ordinary one.
 
 Synthetic responsiveness is not evidence of real-world utility.
 
