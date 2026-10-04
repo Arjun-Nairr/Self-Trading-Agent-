@@ -6,7 +6,7 @@ import { render as renderDecisions } from "./pages/decisions.js";
 import { render as renderRuns } from "./pages/runs.js";
 import { render as renderRoadmap } from "./pages/roadmap.js";
 import { mount as mountWorkflow } from "./pages/workflow.js";
-import { workflowRunLabel } from "./workflow-model.js";
+import { EXEMPLAR } from "./workflow-model.js";
 import { initTheme } from "./theme.js";
 
 const PAGES = {
@@ -127,27 +127,31 @@ async function enterWorkflow() {
     return;
   }
   if (state.page !== "workflow") return;
+  // Default: the exemplar run (pages/workflow.js opens its exemplar day);
+  // a run picked under "Explore other days" is kept for this session.
   const ids = new Set(state.workflowRuns.map(r => r.run_id));
-  if (!ids.has(state.workflowRunId)) state.workflowRunId = ids.has(state.runId) ? state.runId : state.workflowRuns[0]?.run_id ?? null;
-  const wrap = el("run-select-wrap");
+  if (!ids.has(state.workflowRunId)) {
+    state.workflowRunId = ids.has(EXEMPLAR.runId) ? EXEMPLAR.runId
+      : ids.has(state.runId) ? state.runId : state.workflowRuns[0]?.run_id ?? null;
+  }
+  // The run choice lives inside the page's "Explore other days" control,
+  // not in the top bar, so the diagram stays the main presentation.
+  el("run-select-wrap").innerHTML = "";
   if (!state.workflowRuns.length) {
-    wrap.innerHTML = "";
     el("page-root").innerHTML = `<div class="empty">No registered runs yet.</div>`;
     setStatus("No run available");
     return;
   }
-  wrap.innerHTML = `<select class="run-select" aria-label="Select run (Workflow)"></select>`;
-  const sel = wrap.querySelector("select");
-  sel.innerHTML = state.workflowRuns.map(r =>
-    `<option value="${esc(r.run_id)}" ${r.run_id === state.workflowRunId ? "selected" : ""}>${esc(workflowRunLabel(r))}</option>`).join("");
-  sel.addEventListener("change", () => { state.workflowRunId = sel.value; mountWorkflowView(); });
   mountWorkflowView();
 }
 
 function mountWorkflowView() {
   leaveWorkflow();
   setStatus("Workflow view · read-only");
-  state.workflowView = mountWorkflow(el("page-root"), { runId: state.workflowRunId, runs: state.workflowRuns });
+  state.workflowView = mountWorkflow(el("page-root"), {
+    runId: state.workflowRunId, runs: state.workflowRuns,
+    onSelectRun: id => { state.workflowRunId = id; mountWorkflowView(); },
+  });
 }
 
 async function refresh(withSkeleton) {

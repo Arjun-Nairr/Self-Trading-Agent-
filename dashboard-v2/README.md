@@ -36,21 +36,27 @@ source of truth. It reads that static local module only and makes **zero
 Neon / Data API calls**; the shell issues no request while it is the active
 page (verified 2026-09-14 across two refresh ticks).
 
-The **Workflow** page (2026-10-03) shows how one backtest run's data moved
-through the system, one simulated day at a time, as two connected paths:
+The **Workflow** page (2026-10-03; redesigned 2026-10-04) is an
+agent-centred architecture diagram of one simulated day. Hermes sits in the
+middle, inside a **Backtest controller** boundary. Above it are the company
+pool, eligibility and Laya. Beside it are the tools the controller calls:
+technicals, news, optional fundamentals, and the trading journal. Below it
+are the risk checker, execution and open positions.
 
-- **Order/position path:** runs at the simulated open, before anything new
-  is proposed. A queued order goes through the pre-fill news check and the
-  execution-time risk check, then is filled or cancelled; position
-  monitoring and exits follow.
-- **Candidate path:** runs after the close. The eligible pool goes to Laya
-  scoring, then the shortlist, technicals and news, Hermes (masked, no
-  tools), the decision-time risk check, and finally a queued or rejected
-  outcome.
+Recorded activity flows through the diagram in the controller's real order.
+At the open, orders queued on an earlier day go through the pre-fill news
+check, the execution-time risk re-check and the fill. After the close, new
+candidates go through Laya, technicals and news, Hermes and the
+decision-time risk check. Feedback edges show held positions and reflection
+reads returning to the controller. A rejected order stops before execution.
 
-A small "journal" chip marks where outcomes were journaled. Each box opens
-structured details, including Laya's seven input fields and its versioned
-question and criteria.
+Each node shows one name and a status glyph. Counts, timings, inputs,
+criteria and reasons open in a detail panel. Risk, for example, separates
+decision-time from execution-time validation.
+
+The page opens on an exemplar day: smoke run `a0f96768…`, Day 2, the most
+complete instrumented day recorded so far. Run and day browsing, and Follow
+current, sit under **Explore other days**.
 
 Its data comes from `public_workflow_events`, a narrow anonymous view over
 the new `workflow_events` table. The backtest controller writes those
@@ -70,7 +76,8 @@ Behaviour:
   at a time, pauses while the tab is hidden, and backs off on errors. It
   stops when the run reports completion or a halt; silence is reported as
   "interrupted or stalled", never as completed.
-- The page keeps its own run selection, which includes labelled smoke runs.
+- The page keeps its own run selection (under Explore other days), which
+  includes labelled smoke runs.
   Other pages still exclude smoke runs, and the 15 s shell refresh is
   skipped while it is open.
 
@@ -138,10 +145,10 @@ shape / public-safety guard, and null/empty inputs.
 | `fonts/` | Self-hosted Archivo + IBM Plex Mono woff2 subsets (98 KB). See `fonts/README.md` for licensing and how to refresh them. |
 | `js/calc.js` | Pure calculation + formatting functions. No fetch, no DOM. Shared by the app and the tests. |
 | `js/data.js` | The **only** module that talks to Neon. Reuses V1's exact auth flow, query helpers, and endpoints. |
-| `js/workflow-model.js` | Pure Workflow model: merges progress events with journal records into per-day stage states; replay order; run status (completed / halted / running / interrupted). |
+| `js/workflow-model.js` | Pure Workflow model: merges progress events with journal records into per-day stage states; diagram node states and replay steps from recorded activity only; the exemplar day; run status (completed / halted / running / interrupted). |
 | `js/workflow-text.js` | Static Laya input/criteria text (checked against `laya_adapter.py` by the tests) and stage help. |
-| `js/pages/workflow.js` | Self-managed Workflow page: load once, local replay, bounded follow polling. |
-| `test/workflow.test.mjs` | Fixture checks for the Workflow model, Laya text drift, and the public-data boundary. |
+| `js/pages/workflow.js` | Self-managed Workflow page: the diagram (CSS grid nodes plus an SVG edge overlay routed from their boxes), detail panel, local replay, Explore other days, bounded follow polling. |
+| `test/workflow.test.mjs` | Checks for the Workflow model and diagram steps (synthetic fixtures plus the real exemplar rows in `test/fixtures/a0f96768-public.json`), Laya text drift, and the public-data boundary. |
 | `js/roadmap-data.js` | Static, public-safe roadmap content for the Roadmap page. No fetch, no DOM, no secrets/URLs/IDs. |
 | `js/pages/*.js` | One render module per page — `render(container, data, ctx)`, pure DOM building. `pages/roadmap.js` ignores `data` and reads `roadmap-data.js` only. |
 | `js/app.js` | Shell bootstrap: mode/run/page state, refresh loop, loading/error states. |

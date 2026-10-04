@@ -14,6 +14,10 @@ this record).
 Code: commit `e18f7d3`. Trading logic, risk rules, execution order and
 existing public views are unchanged.
 
+**Update 2026-10-04:** the presentation was replaced with an approved
+agent-centred diagram that opens on an exemplar day (§6). Sections 1–5
+record the first version as built and verified on 2026-10-03.
+
 ## 1. What shipped
 
 **Progress events (telemetry only)**
@@ -199,3 +203,108 @@ the public data.
 | URL | https://mobile-test.trading-agent-dashboard-v2.pages.dev |
 | Live check | The Workflow tab is present. Smoke run `a0f96768…` shows *Smoke test* and *Invocation completed*. Day 1: 51/51 eligible, Laya 51 scored (100.1 s), shortlist 10, Hermes 2 decisions (33.6 s), 2 queued. Day 2: 2 carried in, pre-fill 2 ok (4.5 s), 2 filled, 49/51 eligible, 1 queued. |
 | Tables read | `public_workflow_events` plus the existing public set (`public_trades`, `public_agent_activity`, `public_insight_log`, `portfolio_snapshots`, `backtest_run_registry`, `backtest_run_status`). Never cycle evidence or run configuration. |
+
+## 6. Redesign: agent-centred diagram (2026-10-04, approved)
+
+**What changed (presentation only).** The two horizontal paths were
+replaced by an architecture diagram:
+- Hermes agent sits in the centre, inside a **Backtest controller**
+  boundary.
+- Company pool, eligibility and Laya are above it.
+- Technicals, news, optional fundamentals and the trading journal sit
+  beside it, connected to the controller and never to Hermes.
+- Risk checker, queued order, execution and open positions are below.
+
+Edges:
+- Inside the controller, masked context goes to Hermes and proposals come
+  back.
+- A passing proposal is queued. At the next open it goes back to the risk
+  checker for the execution-time re-check, then to execution.
+- A rejection branches to Rejected and stops before execution.
+- Two feedback edges: held positions return to the controller, and the
+  controller reads reflection notes from the journal.
+
+Each node shows one name and a status glyph:
+- recorded activity;
+- ran, nothing to do;
+- off;
+- not recorded;
+- failed / interrupted / running.
+
+Counts, timings, inputs, criteria and reasons open in a click/keyboard
+detail panel. Risk separates decision-time from execution-time validation.
+Laya shows `noul-criteria-v2`, its seven inputs, and that its score
+prioritises review only. Journal reads are labelled as not recorded and
+not evidence of learning.
+
+Run/day browsing, Follow current, run status and end state moved into a
+collapsed **Explore other days** control. The page's run picker left the
+top bar.
+
+The telemetry, data access (`data.js`), polling lifecycle and public data
+boundary are unchanged. No backend, database or container change.
+
+**Exemplar (default view): smoke run `a0f96768…`, Day 2, simulated session
+2026-09-29.** It is the only run with progress events, and this is its most
+complete day. Its 14 recorded steps, in recorded order:
+- **At the open:**
+  1. 2 BUY orders carried in from Day 1 (EMR, NTAP).
+  2. Pre-fill news check: 2 confirmed, 0 overnight articles, no Hermes
+     check.
+  3. Execution-time risk re-check.
+  4. 2 filled: EMR 125 @ 159.55, NTAP 97 @ 202.91.
+  5. 2 positions open.
+- **After the close:**
+  1. 49 of 51 companies eligible (2 held excluded).
+  2. Laya scores 49 cards.
+  3. Shortlist of 10.
+  4. Technicals and news for 12 names (10 shortlisted + 2 held).
+  5. Hermes, 10 candidates and 2 positions → 1 decision.
+  6. Decision-time check.
+  7. 1 queued: BRKR ×310, still pending at the latest record.
+  8. Journal write.
+
+No risk rejection, exit or pre-fill cancellation was recorded on any
+instrumented day, so those branches stay inactive. Run `5573597c…` (Days
+4–5) has real execution-time rejections and a target exit, but it predates
+progress events and is shown from journal records only.
+
+**Verification.**
+
+`node test/workflow.test.mjs`: 17 checks (10 original, unchanged; 7 new).
+The new checks:
+- Exemplar replay order equals the recorded event timestamps, using real
+  public rows saved in `test/fixtures/a0f96768-public.json`.
+- Day 1's queued decision IDs are exactly Day 2's fills, and the new order
+  stays pending.
+- An after-close proposal never shows as filled the same day.
+- Rejected, failed, off and not-recorded states stay distinct.
+- Journal-only days show only journal-recorded steps.
+- The page reads only metric keys from the contract and makes no requests
+  of its own.
+- The Laya criteria are kept.
+
+In headless Chrome against live public data:
+- Replay made 0 requests and steps in recorded order; idle for 17 s, 0
+  requests.
+- Enter, Escape, arrow keys and Close work, and focus returns to the node.
+- A touch tap opens details.
+- Reduced motion disables transitions and slows the steps.
+- Follow current on the finished run stops by itself.
+- After leaving the page nothing polls, and Overview is unchanged
+  (`e68525f9…`, equity $103,696.08).
+- No horizontal scroll at 375/320 px, and no script errors.
+- Desktop, 375 px, 320 px and dark-mode screenshots were inspected and
+  approved.
+
+**Limitations.**
+- Screenshots came from headless Chrome; the in-app preview pane could not
+  capture.
+- Following a running run still needed a test-only override of the
+  hidden-tab flag.
+- `eval_suite` episodes still emit no progress events, so evaluation runs
+  show journal records only.
+- Pre-telemetry runs cannot show eligibility, Laya, evidence or
+  pre-journal rejections.
+- The pre-fill gate's Hermes classification, stop/time-stop exits and a
+  whole-day selector failure have not been seen in recorded events.

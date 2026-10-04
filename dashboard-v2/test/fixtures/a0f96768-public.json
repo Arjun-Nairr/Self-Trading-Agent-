@@ -1,0 +1,975 @@
+{
+ "source": "Public Data API rows for smoke run a0f96768 (public_workflow_events, public_trades, public_agent_activity, portfolio_snapshots), fetched 2026-10-04 with the dashboard's own column lists (subset).",
+ "events": [
+  {
+   "id": 1,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 0,
+   "cycle_id": null,
+   "day_index": null,
+   "day_label": null,
+   "market_date": null,
+   "stage": "run",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:40:36.838+00:00",
+   "metrics": {
+    "resumed": false,
+    "fundamentals": "off",
+    "selector_mode": "laya",
+    "sessions_requested": 2
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 2,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 1,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "cycle",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:40:36.839+00:00",
+   "metrics": {},
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 3,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 2,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "prefill_news",
+   "status": "skipped",
+   "occurred_at": "2026-10-03T18:40:58.551+00:00",
+   "metrics": {
+    "queued_buys": 0
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 4,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 3,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "execution",
+   "status": "skipped",
+   "occurred_at": "2026-10-03T18:40:58.551+00:00",
+   "metrics": {
+    "queued_orders": 0
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 5,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 4,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "positions",
+   "status": "skipped",
+   "occurred_at": "2026-10-03T18:40:58.551+00:00",
+   "metrics": {
+    "monitored": 0
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 6,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 5,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "population",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:40:58.551+00:00",
+   "metrics": {
+    "eligible": 51,
+    "universe": 51,
+    "selector_mode": "laya",
+    "excluded_held_or_pending": 0
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 7,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 6,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "laya",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:40:58.551+00:00",
+   "metrics": {
+    "cards": 51
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 8,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 7,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "laya",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:42:38.687+00:00",
+   "metrics": {
+    "cards": 51,
+    "scored": 51,
+    "status": "selected",
+    "complete": 51,
+    "replayed": false,
+    "score_max": 0.2318,
+    "score_min": 0.1701,
+    "unavailable": 0,
+    "score_median": 0.1906,
+    "worker_batches": 1
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 9,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 8,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "shortlist",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:42:38.687+00:00",
+   "metrics": {
+    "k": 10,
+    "status": "selected",
+    "selected": 10,
+    "shortfall": false
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 10,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 9,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "evidence",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:42:38.687+00:00",
+   "metrics": {
+    "held": 0,
+    "shortlisted": 10
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 11,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 10,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "evidence",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:43:04.004+00:00",
+   "metrics": {
+    "held": 0,
+    "names": 10,
+    "news_items": 15,
+    "shortlisted": 10,
+    "fundamentals": "off",
+    "technicals_ok": 10,
+    "technicals_errors": 0
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 12,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 11,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "hermes",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:43:08.653+00:00",
+   "metrics": {
+    "positions": 0,
+    "candidates": 10
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 13,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 12,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "hermes",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:43:42.291+00:00",
+   "metrics": {
+    "buys": 2,
+    "sells": 0,
+    "attempts": 1,
+    "replayed": false,
+    "decisions": 2,
+    "positions": 0,
+    "candidates": 10,
+    "reflection": false,
+    "total_tokens": 9488
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 14,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 13,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "decision_risk",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:43:47.171+00:00",
+   "metrics": {
+    "proposals": 2
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 15,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 14,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "decision_risk",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:43:55.519+00:00",
+   "metrics": {
+    "action": "BUY",
+    "outcome": "queued"
+   },
+   "decision_id": "d9fd3999-eed3-59be-8c03-afa2f189f890",
+   "proposal_key": "p0-0"
+  },
+  {
+   "id": 16,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 15,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "decision_risk",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:43:55.519+00:00",
+   "metrics": {
+    "action": "BUY",
+    "outcome": "queued"
+   },
+   "decision_id": "ceb1b1e9-e089-5821-8441-6f360dd97ec6",
+   "proposal_key": "p0-1"
+  },
+  {
+   "id": 17,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 16,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "decision_risk",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:43:55.519+00:00",
+   "metrics": {
+    "queued": 2,
+    "rejected": 0,
+    "proposals": 2
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 18,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 17,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "journal",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:44:05.509+00:00",
+   "metrics": {
+    "snapshot": true,
+    "trade_rows": 2,
+    "resolutions": 0,
+    "activity_rows": 5
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 19,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 18,
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_index": 0,
+   "day_label": "Day 1",
+   "market_date": "2026-09-28",
+   "stage": "cycle",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:44:05.509+00:00",
+   "metrics": {},
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 20,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 19,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "cycle",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:44:05.51+00:00",
+   "metrics": {},
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 21,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 20,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "prefill_news",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:44:24.547+00:00",
+   "metrics": {
+    "queued_buys": 2
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 22,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 21,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "prefill_news",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:44:29.004+00:00",
+   "metrics": {
+    "articles": 0,
+    "replayed": false,
+    "cancelled": 0,
+    "confirmed": 2,
+    "queued_buys": 2,
+    "hermes_calls": 0
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 23,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 22,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "execution",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:44:33.473+00:00",
+   "metrics": {
+    "queued_orders": 2
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 24,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 23,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "positions",
+   "status": "skipped",
+   "occurred_at": "2026-10-03T18:44:33.473+00:00",
+   "metrics": {
+    "monitored": 0
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 25,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 24,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "execution",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:44:41.74+00:00",
+   "metrics": {
+    "action": "BUY",
+    "outcome": "filled"
+   },
+   "decision_id": "d9fd3999-eed3-59be-8c03-afa2f189f890",
+   "proposal_key": null
+  },
+  {
+   "id": 26,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 25,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "execution",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:44:48.32+00:00",
+   "metrics": {
+    "action": "BUY",
+    "outcome": "filled"
+   },
+   "decision_id": "ceb1b1e9-e089-5821-8441-6f360dd97ec6",
+   "proposal_key": null
+  },
+  {
+   "id": 27,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 26,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "execution",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:44:48.32+00:00",
+   "metrics": {
+    "filled": 2,
+    "rejected": 0,
+    "superseded": 0,
+    "queued_orders": 2
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 28,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 27,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "population",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:44:48.32+00:00",
+   "metrics": {
+    "eligible": 49,
+    "universe": 51,
+    "selector_mode": "laya",
+    "excluded_held_or_pending": 2
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 29,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 28,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "laya",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:44:48.32+00:00",
+   "metrics": {
+    "cards": 49
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 30,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 29,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "laya",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:45:45.249+00:00",
+   "metrics": {
+    "cards": 49,
+    "scored": 49,
+    "status": "selected",
+    "complete": 49,
+    "replayed": false,
+    "score_max": 0.2152,
+    "score_min": 0.1612,
+    "unavailable": 0,
+    "score_median": 0.1908,
+    "worker_batches": 1
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 31,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 30,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "shortlist",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:45:45.249+00:00",
+   "metrics": {
+    "k": 10,
+    "status": "selected",
+    "selected": 10,
+    "shortfall": false
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 32,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 31,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "evidence",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:45:45.249+00:00",
+   "metrics": {
+    "held": 2,
+    "shortlisted": 10
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 33,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 32,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "evidence",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:46:10.28+00:00",
+   "metrics": {
+    "held": 2,
+    "names": 12,
+    "news_items": 10,
+    "shortlisted": 10,
+    "fundamentals": "off",
+    "technicals_ok": 12,
+    "technicals_errors": 0
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 34,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 33,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "hermes",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:46:15.045+00:00",
+   "metrics": {
+    "positions": 2,
+    "candidates": 10
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 35,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 34,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "hermes",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:46:43.231+00:00",
+   "metrics": {
+    "buys": 1,
+    "sells": 0,
+    "attempts": 1,
+    "replayed": false,
+    "decisions": 1,
+    "positions": 2,
+    "candidates": 10,
+    "reflection": false,
+    "total_tokens": 9219
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 36,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 35,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "decision_risk",
+   "status": "started",
+   "occurred_at": "2026-10-03T18:46:47.931+00:00",
+   "metrics": {
+    "proposals": 1
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 37,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 36,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "decision_risk",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:46:52.112+00:00",
+   "metrics": {
+    "action": "BUY",
+    "outcome": "queued"
+   },
+   "decision_id": "69a4ab06-c4f2-59cd-8c21-28e4db142382",
+   "proposal_key": "p1-0"
+  },
+  {
+   "id": 38,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 37,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "decision_risk",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:46:52.112+00:00",
+   "metrics": {
+    "queued": 1,
+    "rejected": 0,
+    "proposals": 1
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 39,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 38,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "journal",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:47:02.404+00:00",
+   "metrics": {
+    "snapshot": true,
+    "trade_rows": 1,
+    "resolutions": 2,
+    "activity_rows": 6
+   },
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 40,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 39,
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_index": 1,
+   "day_label": "Day 2",
+   "market_date": "2026-09-29",
+   "stage": "cycle",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:47:02.404+00:00",
+   "metrics": {},
+   "decision_id": null,
+   "proposal_key": null
+  },
+  {
+   "id": 41,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "invocation_id": "ac5e2fb3-4f91-4887-b726-3e4cf68eaf5b",
+   "seq": 40,
+   "cycle_id": null,
+   "day_index": null,
+   "day_label": null,
+   "market_date": null,
+   "stage": "run",
+   "status": "completed",
+   "occurred_at": "2026-10-03T18:47:02.404+00:00",
+   "metrics": {
+    "halted": false,
+    "open_positions": 2,
+    "pending_orders": 1,
+    "telemetry_dropped": 0,
+    "sessions_completed": 2,
+    "sessions_requested": 2
+   },
+   "decision_id": null,
+   "proposal_key": null
+  }
+ ],
+ "trades": [
+  {
+   "decision_id": "d9fd3999-eed3-59be-8c03-afa2f189f890",
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "ticker": "EMR",
+   "action": "BUY",
+   "status": "filled",
+   "fill_price": 159.55,
+   "fill_quantity": 125,
+   "intended_quantity": 125,
+   "rejection_reason": null,
+   "exit_provenance": null,
+   "created_at": "2026-10-03T18:43:51.424089+00:00"
+  },
+  {
+   "decision_id": "ceb1b1e9-e089-5821-8441-6f360dd97ec6",
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "ticker": "NTAP",
+   "action": "BUY",
+   "status": "filled",
+   "fill_price": 202.91,
+   "fill_quantity": 97,
+   "intended_quantity": 97,
+   "rejection_reason": null,
+   "exit_provenance": null,
+   "created_at": "2026-10-03T18:43:55.584028+00:00"
+  },
+  {
+   "decision_id": "69a4ab06-c4f2-59cd-8c21-28e4db142382",
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "ticker": "BRKR",
+   "action": "BUY",
+   "status": "pending",
+   "fill_price": null,
+   "fill_quantity": null,
+   "intended_quantity": 310,
+   "rejection_reason": null,
+   "exit_provenance": null,
+   "created_at": "2026-10-03T18:46:52.241665+00:00"
+  }
+ ],
+ "activity": [
+  {
+   "id": 2260,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": null,
+   "event_type": "cycle_start",
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "created_at": "2026-10-03T18:44:04.097609+00:00"
+  },
+  {
+   "id": 2261,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": null,
+   "event_type": "reasoning",
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "created_at": "2026-10-03T18:44:04.475189+00:00"
+  },
+  {
+   "id": 2262,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": null,
+   "event_type": "reasoning",
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "created_at": "2026-10-03T18:44:04.847476+00:00"
+  },
+  {
+   "id": 2263,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": "d9fd3999-eed3-59be-8c03-afa2f189f890",
+   "event_type": "order_queued",
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "created_at": "2026-10-03T18:44:05.219946+00:00"
+  },
+  {
+   "id": 2264,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": "ceb1b1e9-e089-5821-8441-6f360dd97ec6",
+   "event_type": "order_queued",
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "created_at": "2026-10-03T18:44:05.591977+00:00"
+  },
+  {
+   "id": 2265,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": null,
+   "event_type": "cycle_start",
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "created_at": "2026-10-03T18:47:00.663723+00:00"
+  },
+  {
+   "id": 2266,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": "d9fd3999-eed3-59be-8c03-afa2f189f890",
+   "event_type": "order_placed",
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "created_at": "2026-10-03T18:47:01.033087+00:00"
+  },
+  {
+   "id": 2267,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": "ceb1b1e9-e089-5821-8441-6f360dd97ec6",
+   "event_type": "order_placed",
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "created_at": "2026-10-03T18:47:01.412632+00:00"
+  },
+  {
+   "id": 2268,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": null,
+   "event_type": "reasoning",
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "created_at": "2026-10-03T18:47:01.782329+00:00"
+  },
+  {
+   "id": 2269,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": null,
+   "event_type": "reasoning",
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "created_at": "2026-10-03T18:47:02.149309+00:00"
+  },
+  {
+   "id": 2270,
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "decision_id": "69a4ab06-c4f2-59cd-8c21-28e4db142382",
+   "event_type": "order_queued",
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "created_at": "2026-10-03T18:47:02.515102+00:00"
+  }
+ ],
+ "snapshots": [
+  {
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "cycle_id": "431d0a29-3894-54f4-9ca2-916ee8413368",
+   "day_label": "Day 1",
+   "created_at": "2026-10-03T18:43:59.87551+00:00",
+   "open_positions": 0
+  },
+  {
+   "run_id": "a0f96768-2e36-4674-9303-e9a3c120f64b",
+   "cycle_id": "6fb8dbea-02f2-5aed-a736-1102198838db",
+   "day_label": "Day 2",
+   "created_at": "2026-10-03T18:46:56.436971+00:00",
+   "open_positions": 2
+  }
+ ]
+}

@@ -341,7 +341,8 @@ unapproved pending that decision.
     **Workflow** page shows each simulated day's order/position and candidate
     paths from public, allowlisted workflow progress events (aggregate Laya
     counts only), with replay and live follow
-    (`docs/evaluations/workflow_dashboard_2026-10-03.md`).
+    (`docs/evaluations/workflow_dashboard_2026-10-03.md`; redesigned as an
+    agent-centred diagram 2026-10-04).
     **Pending:** the controlled Laya-vs-random-vs-deterministic comparison,
     and the paths not yet exercised (stop/time-stop exits, the gate's Hermes
     classification).
@@ -459,10 +460,15 @@ vs. cash/SPY/watchlist/SMA(10) baseline, plus rule-parameter
 sensitivity) — **this was previously misfiled as "deferred" in this
 document; it is implemented.**
 
-- **Now:** `baseline_v1` (regime-diverse technical-news evaluation
-  suite) is **complete** — see the dated entry below. Next gated step:
-  build `baseline_v2` (slippage-adjusted sizing) and rerun the same 4
-  months — not yet started.
+- **Now:** `baseline_v1` and `baseline_v2` (slippage-adjusted sizing) are
+  both **complete** over the same 4 frozen comparison months, and the
+  read-only V1/V2 comparison is written
+  (`docs/evaluations/baseline_v1_vs_v2_evaluation.md`). Results are mixed:
+  V2's return was higher in 2 regimes and lower in 2, and the report does
+  not attribute the differences to the sizing fix. It is not a performance
+  verdict. The report recommends freezing V1 + V2 as the comparison
+  baseline and starting no optimization. That decision is the user's and
+  is still open.
 - **Also unresolved:** the separate Round 2 evaluation-track decision
   (`HANDOFF.md` §10): (a) existing evidence suffices for Bayesian
   optimization, (b) run another unchanged tranche first, or (c) improve
@@ -820,6 +826,12 @@ document; it is implemented.**
     separate config — not a mutation of `baseline_v1` — and is not yet
     started. No other speculative next step is approved here.
 
+    **Update (status as of 2026-10-04):** that step is done. All 4
+    `baseline_v2` comparison episodes completed with no halts, and the
+    read-only comparison is in `docs/evaluations/baseline_v1_vs_v2_evaluation.md`
+    (generated 2026-09-27). The comparison is mixed and is not a causal or
+    profitability claim. No V3, holdout or optimization run has started.
+
 **Locked principle:** human-approval boundary for evaluator
 suggestions — see Global rules. Status `implemented`.
 
@@ -884,7 +896,12 @@ progress-event projection written by the backtest controller as each stage
 happens, plus existing journal records for older runs ("not recorded"
 where nothing exists). It offers local replay and bounded live follow, and
 lists labelled smoke runs on that page only
-(`docs/evaluations/workflow_dashboard_2026-10-03.md`). Dashboard V1
+(`docs/evaluations/workflow_dashboard_2026-10-03.md`). **Redesigned
+2026-10-04 (approved):** the page is now an agent-centred architecture
+diagram. Hermes sits inside a Backtest controller boundary, with tools
+beside it and risk/execution below; details open on click. It opens on an
+exemplar day (smoke run `a0f96768…`, Day 2), and run/day browsing and
+follow sit under "Explore other days". Dashboard V1
 (`dashboard/index.html`) — original monitoring dashboard, stays active
 until an explicit cutover decision.
 Obsidian vault (`docs/obsidian/`) — engineering-ground-truth canvases.

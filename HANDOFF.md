@@ -293,6 +293,15 @@ active until an explicit cutover decision, but V2 is already a genuinely
 individual-trade view, then the experiment/optimization framework.
 NEXT/LATER canvas items stay discussion-only until explicitly approved.
 
+**Current status (2026-10-04):** V2's **Workflow** page is now an approved
+agent-centred diagram, with Hermes inside the backtest controller. It reads
+`public_workflow_events` and opens on exemplar smoke run `a0f96768…`, Day
+2. See `docs/evaluations/workflow_dashboard_2026-10-03.md` §6.
+`baseline_v1` and `baseline_v2` are both complete, and their read-only
+comparison (`docs/evaluations/baseline_v1_vs_v2_evaluation.md`) is mixed
+and makes no causal claim. Whether to freeze the pair is still the user's
+decision.
+
 ---
 
 ## 11. Minimal source-file map

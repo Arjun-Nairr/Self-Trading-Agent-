@@ -1,6 +1,7 @@
 // Fixture-based checks for the Workflow page model (js/workflow-model.js),
 // its public-safe text (js/workflow-text.js) and data boundary (js/data.js).
-// All rows below are SYNTHETIC fixtures, not real run data.
+// Rows built in this file are SYNTHETIC fixtures; the exemplar checks read
+// real public rows from test/fixtures/a0f96768-public.json.
 // Run: node dashboard-v2/test/workflow.test.mjs
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -9,6 +10,7 @@ import { dirname, join } from "node:path";
 import {
   buildWorkflowModel, replaySteps, currentStage, boxSummary, workflowRunsFromRows, workflowRunLabel,
   STEP_ORDER, ORDER_PATH, CANDIDATE_PATH, STALE_MS,
+  EXEMPLAR, DIAGRAM_NODES, DIAGRAM_EDGES, nodeStates, diagramSteps, dayIndexByLabel,
 } from "../js/workflow-model.js";
 import { LAYA, LAYA_FIELDS } from "../js/workflow-text.js";
 import { selectableRunsFromRows } from "../js/calc.js";
@@ -205,6 +207,146 @@ test("paths contain only major stages, with ownership labels", () => {
   assert.equal(CANDIDATE_PATH.length, 7);
   assert.equal(CANDIDATE_PATH.find(s => s.key === "hermes").owner, "Hermes · masked");
   assert.equal(CANDIDATE_PATH.find(s => s.key === "laya").owner, "Laya worker");
+});
+
+// ---------------------------------------------------------------- diagram
+// The exemplar checks below use REAL public rows (test/fixtures/
+// a0f96768-public.json, fetched from the anonymous Data API), not synthetic ones.
+const REAL = JSON.parse(readFileSync(join(here, "fixtures", "a0f96768-public.json"), "utf8"));
+const realModel = () => buildWorkflowModel({ runId: EXEMPLAR.runId, runKind: "smoke", ...REAL }, Date.parse("2026-10-04T00:00:00Z"));
+
+test("exemplar: Day 2 of the real smoke run replays its recorded events in their recorded order", () => {
+  const m = realModel();
+  assert.equal(m.status.state, "completed");
+  const i = dayIndexByLabel(m, EXEMPLAR.dayLabel);
+  assert.equal(i, 1);
+  const d = m.days[i];
+  assert.equal(d.source, "event");
+  const steps = diagramSteps(d, m);
+  assert.deepEqual(steps.map(s => s.key), ["carried_in", "prefill", "exec_risk", "fills", "positions_open",
+    "population", "laya", "shortlist", "evidence", "hermes", "proposals", "decision_risk", "queued", "journal"]);
+  const at = steps.map(s => Date.parse(s.at));
+  assert.ok(at.every(Number.isFinite), "every exemplar step carries a recorded time");
+  for (let k = 1; k < at.length; k++) assert.ok(at[k] >= at[k - 1], `${steps[k].key} is not before ${steps[k - 1].key}`);
+  const cap = Object.fromEntries(steps.map(s => [s.key, s.caption]));
+  assert.equal(cap.carried_in, "2 orders carried in from Day 1");
+  assert.equal(cap.prefill, "Pre-fill news check — 2 confirmed, 0 cancelled");
+  assert.equal(cap.fills, "Execution — 2 filled");
+  assert.equal(cap.population, "After the close — 49 of 51 companies eligible");
+  assert.match(cap.evidence, /12 names \(10 shortlisted \+ 2 held\)/);
+  assert.equal(cap.proposals, "Hermes returns 1 decision");
+  assert.equal(cap.queued, "1 queued for the next session's open");
+  for (const s of steps) {
+    for (const e of s.edges) assert.ok(DIAGRAM_EDGES[e], e);
+    for (const nd of s.nodes) assert.ok(DIAGRAM_NODES.some(x => x.key === nd), nd);
+  }
+});
+
+test("exemplar reconciles with the recorded orders: carried-in fills, a new pending order, no rejection or exit", () => {
+  const m = realModel();
+  const [d1, d2] = m.days;
+  const queuedDay1 = d1.proposals.filter(p => p.outcome === "queued").map(p => p.decisionId).sort();
+  const filledDay2 = d2.orders.filter(o => o.outcome === "filled").map(o => o.decisionId).sort();
+  assert.deepEqual(filledDay2, queuedDay1, "Day 2 fills are exactly Day 1's queued decisions");
+  for (const id of filledDay2) {
+    const l = m.links.get(id);
+    assert.equal(l.queuedDay, "Day 1"); assert.equal(l.resolvedDay, "Day 2"); assert.equal(l.trade.status, "filled");
+  }
+  const newOrder = d2.proposals.find(p => p.outcome === "queued");
+  assert.equal(m.links.get(newOrder.decisionId).trade.status, "pending");
+  assert.equal(m.links.get(newOrder.decisionId).resolvedDay, null, "never shown as filled");
+  const states = nodeStates(d2, m);
+  assert.equal(states.rejected, "idle");
+  assert.equal(states.fundamentals, "off");
+  assert.equal(states.execution, "done");
+  const edges = new Set(diagramSteps(d2, m).flatMap(s => s.edges));
+  for (const quiet of ["risk_rej", "ctrl_fund", "journal_ctrl"]) assert.ok(!edges.has(quiet), `${quiet} must stay inactive`);
+  assert.equal(d2.exits.length, 0);
+});
+
+test("an after-close proposal never appears to fill the same day", () => {
+  const m = realModel();
+  const d1 = m.days[0];
+  const steps = diagramSteps(d1, m);
+  assert.ok(steps.every(s => s.phase === "close"), "Day 1 has no order-path steps");
+  assert.ok(!steps.some(s => s.edges.includes("risk_exec") || s.edges.includes("exec_pos")));
+  assert.equal(nodeStates(d1, m).execution, "idle");
+  const keys = steps.map(s => s.key);
+  assert.ok(keys.indexOf("queued") > keys.indexOf("decision_risk"));
+});
+
+test("rejected, failed, skipped/off and not-recorded states stay distinguishable", () => {
+  id = 0;
+  const D2 = "44444444-4444-4444-8444-444444444442";
+  const events = [runStart(),
+    ...fullDay(C1, 0, { proposals: [{ outcome: "queued", id: D1 }, { outcome: "queued", id: D2 }, { outcome: "rejected", codes: ["§6b"] }] }),
+    ...fullDay(C2, 1, { orders: [{ id: D1, outcome: "filled" }, { id: D2, outcome: "rejected" }] }), runEnd()];
+  const m = buildWorkflowModel({ runId: RUN, events, trades: [trade(D1), trade(D2, { status: "rejected" })] }, T0 + 3600_000);
+  const s1 = diagramSteps(m.days[0], m), s2 = diagramSteps(m.days[1], m);
+  assert.ok(s1.some(s => s.key === "rejected" && s.edges.includes("risk_rej")), "decision-time rejection branch");
+  assert.ok(s2.some(s => s.key === "exec_rejected" && s.edges.includes("risk_rej")), "execution-time rejection branch");
+  assert.ok(!s2.find(s => s.key === "exec_rejected").edges.includes("risk_exec"), "a rejection never reaches execution");
+  assert.equal(nodeStates(m.days[0], m).rejected, "done");
+
+  id = 0;
+  const failed = buildWorkflowModel({ runId: RUN, events: [runStart(), ev(C1, 0, "cycle", "started"),
+    ev(C1, 0, "hermes", "started"), ev(C1, 0, "hermes", "failed"), ev(C1, 0, "cycle", "failed"), runEnd("failed")] }, T0 + 3600_000);
+  assert.equal(nodeStates(failed.days[0], failed).hermes, "failed");
+  assert.ok(!diagramSteps(failed.days[0], failed).some(s => s.key === "proposals"), "a failed Hermes call returns nothing");
+
+  id = 0;
+  const off = buildWorkflowModel({ runId: RUN, events: [ev(null, null, "run", "started", { selector_mode: "off", fundamentals: "off" }, { cycle_id: null }),
+    ev(C1, 0, "cycle", "started"), ev(C1, 0, "population", "completed", { universe: 10, eligible: 10, selector_mode: "off" }),
+    ev(C1, 0, "laya", "skipped"), ev(C1, 0, "shortlist", "skipped")] }, T0);
+  const offStates = nodeStates(off.days[0], off);
+  assert.equal(offStates.laya, "off");
+  assert.equal(offStates.fundamentals, "off");
+  assert.equal(offStates.hermes, "unrecorded");
+  assert.ok(new Set(["done", "idle", "off", "unrecorded", "failed"]).size === 5);
+});
+
+test("journal-only days show only what the journal recorded", () => {
+  const activity = [
+    { id: 1, run_id: RUN, cycle_id: C1, event_type: "reasoning", decision_id: null, created_at: "2026-10-03T17:01:00Z" },
+    { id: 2, run_id: RUN, cycle_id: C1, event_type: "order_queued", decision_id: D1, created_at: "2026-10-03T17:01:10Z" },
+    { id: 3, run_id: RUN, cycle_id: C2, event_type: "order_placed", decision_id: D1, created_at: "2026-10-03T17:03:05Z" },
+  ];
+  const snapshots = [
+    { run_id: RUN, cycle_id: C1, day_label: "Day 1", created_at: "2026-10-03T17:02:00Z", open_positions: 0 },
+    { run_id: RUN, cycle_id: C2, day_label: "Day 2", created_at: "2026-10-03T17:04:00Z", open_positions: 1 },
+  ];
+  const m = buildWorkflowModel({ runId: RUN, activity, snapshots, trades: [trade(D1)] }, T0);
+  const [d1, d2] = m.days;
+  const k1 = diagramSteps(d1, m).map(s => s.key), k2 = diagramSteps(d2, m).map(s => s.key);
+  for (const k of ["population", "laya", "shortlist", "evidence"]) assert.ok(!k1.includes(k), `${k} was not recorded`);
+  assert.equal(nodeStates(d1, m).laya, "unrecorded");
+  assert.equal(nodeStates(d1, m).rejected, "unrecorded", "pre-journal rejections are unknown, not zero");
+  assert.ok(diagramSteps(d1, m).every(s => s.at == null || !Number.isNaN(Date.parse(s.at))));
+  assert.deepEqual(k2.slice(0, 3), ["carried_in", "exec_risk", "fills"]);
+  assert.equal(diagramSteps(d2, m)[0].caption, "1 order carried in from Day 1");
+});
+
+test("public-detail boundary: the page reads only contract metrics and fetches nothing itself", () => {
+  const page = readFileSync(join(here, "..", "js", "pages", "workflow.js"), "utf8");
+  const contract = readFileSync(join(here, "..", "..", "trade-journal-mcp", "workflow_contract.py"), "utf8");
+  const detail = page.slice(page.indexOf("const DETAIL = {"), page.indexOf("// ------------------------------------------------------------ explore"));
+  const used = new Set([...detail.matchAll(/\b(?:m|lm|sm|h|pf|e|dr|ex|j|pm)\.([a-z_]+)\b/g)].map(x => x[1]));
+  const modelDerived = new Set(["rejected_recorded", "fundamentals"]);
+  for (const k of used) assert.ok(contract.includes(`"${k}"`) || modelDerived.has(k), `metric ${k} is not in the public contract`);
+  assert.ok(!/\bfetch\(|XMLHttpRequest|WebSocket/.test(page), "the page never makes its own requests");
+  const imports = [...page.matchAll(/import \{([^}]*)\} from "\.\.\/data\.js"/g)].flatMap(x => x[1].split(",").map(s => s.trim()));
+  assert.deepEqual(imports.sort(), ["WORKFLOW_POLL_MS", "loadWorkflowData", "pollWorkflowEvents"]);
+  for (const forbidden of ["rejection_reason", "strategy_notes", "reasoning_text", "insight_text", "prompt", "alias"]) {
+    assert.ok(!page.includes(forbidden), forbidden);
+  }
+});
+
+test("Laya details keep the versioned criteria and say what the score is not", () => {
+  const page = readFileSync(join(here, "..", "js", "pages", "workflow.js"), "utf8");
+  for (const ref of ["LAYA.question", "LAYA.criteriaTrue", "LAYA.criteriaFalse", "LAYA.questionFormat", "LAYA_FIELDS", "LAYA.meaning"]) {
+    assert.ok(page.includes(ref), ref);
+  }
+  assert.match(page, /does not authorise a trade, and it does not predict profit/);
 });
 
 console.log(`\n${n} workflow checks passed`);

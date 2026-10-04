@@ -17,6 +17,10 @@
 export const STATUS_MARKS = { done: "✓", active: "•", next: "○", later: "—" };
 export const STATUS_LABELS = { done: "Completed", active: "Active now", next: "Next", later: "Later / gated" };
 
+// "done" means built and tested; whether something is proven USEFUL is a
+// separate item (e.g. "Laya trading benefit"), never implied by "done".
+// Refreshed 2026-10-04 against docs/PROJECT_BACKLOG.md and the dated
+// records in docs/evaluations/.
 export const ROADMAP_SECTORS = [
   {
     name: "Context & Memory",
@@ -31,14 +35,20 @@ export const ROADMAP_SECTORS = [
     items: [
       { status: "done", text: "Risk gates" },
       { status: "done", text: "News veto" },
-      { status: "next", text: "Live-paper readiness" },
+      { status: "next", text: "Dashboard access review" },
+      { status: "later", text: "Live-paper readiness" },
     ],
   },
   {
     name: "Market Intelligence",
     items: [
       { status: "done", text: "News analysis" },
-      { status: "done", text: "Fundamental analysis (bank statements)" },
+      { status: "done", text: "Fundamentals data (SEC filings)" },
+      { status: "done", text: "Laya selector (smoke-tested)" },
+      { status: "active", text: "Scalable screener (live dry run)" },
+      { status: "next", text: "Laya vs. control comparison" },
+      { status: "later", text: "Laya trading benefit" },
+      { status: "later", text: "Historical scalable screening" },
       { status: "later", text: "Reddit sentiment" },
     ],
   },
@@ -46,7 +56,7 @@ export const ROADMAP_SECTORS = [
     name: "Trading Strategy",
     items: [
       { status: "done", text: "Technical analysis (price/chart signals)" },
-      { status: "next", text: "Advanced trading setups" },
+      { status: "later", text: "Advanced trading setups" },
       { status: "later", text: "Technical ML model" },
     ],
   },
@@ -54,8 +64,10 @@ export const ROADMAP_SECTORS = [
     name: "Testing & Optimization",
     items: [
       { status: "done", text: "Smoke-test separation" },
-      { status: "active", text: "Regime-diverse evaluations" },
-      { status: "next", text: "Variable + synergy optimization" },
+      { status: "done", text: "Regime-diverse evaluation (baseline v1)" },
+      { status: "done", text: "Baseline v2 run + v1/v2 comparison" },
+      { status: "later", text: "Fundamentals impact measurement" },
+      { status: "later", text: "Variable + synergy optimization" },
       { status: "later", text: "Bayesian optimization" },
     ],
   },
@@ -65,7 +77,9 @@ export const ROADMAP_SECTORS = [
       { status: "done", text: "Trade viewer" },
       { status: "done", text: "Per-trade journeys" },
       { status: "done", text: "Mobile dashboard" },
-      { status: "next", text: "Dashboard polish" },
+      { status: "done", text: "Workflow page + live progress" },
+      { status: "done", text: "Workflow agent diagram" },
+      { status: "next", text: "V2 cutover decision" },
     ],
   },
 ];

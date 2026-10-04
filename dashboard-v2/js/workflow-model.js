@@ -402,3 +402,228 @@ export function workflowRunsFromRows(registryRows, snapshotRows) {
 export function workflowRunLabel(run) {
   return `${runKindLabel(run.run_kind)} · ${String(run.run_id).slice(0, 8)}…${run.latest_day_label ? ` · ${run.latest_day_label}` : ""}`;
 }
+
+// ------------------------------------------------------------- diagram
+// The agent-centred Workflow diagram (pages/workflow.js). Hermes sits inside
+// the backtest controller; the controller -- never Hermes -- calls the data
+// tools, the risk checker and execution. One diagram node can group several
+// recorded stages (e.g. Risk = decision-time AND next-open execution-time
+// validation). Replay steps come only from recorded activity: a branch with
+// no record stays inactive, and nothing is inferred or timed that was not
+// recorded.
+
+/** The default exemplar: the most complete instrumented day recorded so far
+ *  (chosen 2026-10-04 after inspecting every run with progress events). Smoke
+ *  run a0f96768, Day 2: two orders carried in from Day 1 are news-checked,
+ *  risk-re-checked and filled at the open; after the close the full
+ *  candidate path queues one new order. No instrumented day has recorded a
+ *  risk rejection or an exit yet. */
+export const EXEMPLAR = {
+  runId: "a0f96768-2e36-4674-9303-e9a3c120f64b",
+  dayLabel: "Day 2",
+  why: "Chosen for completeness: orders carried in from Day 1 are checked and filled at the open, then the full candidate path queues a new order. No instrumented day has recorded a risk rejection or an exit yet.",
+};
+
+export const DIAGRAM_NODES = [
+  { key: "pool", label: "Company pool" },
+  { key: "eligibility", label: "Eligibility" },
+  { key: "laya", label: "Laya" },
+  { key: "controller", label: "Backtest controller" },
+  { key: "hermes", label: "Hermes agent" },
+  { key: "technicals", label: "Technicals" },
+  { key: "news", label: "News" },
+  { key: "fundamentals", label: "Fundamentals" },
+  { key: "journal", label: "Trading journal" },
+  { key: "risk", label: "Risk checker" },
+  { key: "rejected", label: "Rejected" },
+  { key: "queued", label: "Queued order" },
+  { key: "execution", label: "Execution" },
+  { key: "positions", label: "Open positions" },
+];
+
+// kind: flow | tool (fetched by the controller) | optional | feedback | branch
+export const DIAGRAM_EDGES = {
+  pool_elig: { from: "pool", to: "eligibility", kind: "flow" },
+  elig_laya: { from: "eligibility", to: "laya", kind: "flow" },
+  laya_ctrl: { from: "laya", to: "controller", kind: "flow", label: "shortlist" },
+  ctrl_tech: { from: "controller", to: "technicals", kind: "tool" },
+  ctrl_news: { from: "controller", to: "news", kind: "tool" },
+  ctrl_fund: { from: "controller", to: "fundamentals", kind: "optional" },
+  ctrl_journal: { from: "controller", to: "journal", kind: "flow", label: "writes" },
+  journal_ctrl: { from: "journal", to: "controller", kind: "feedback", label: "reflections" },
+  ctx: { from: "controller", to: "hermes", kind: "flow", label: "masked context" },
+  prop: { from: "hermes", to: "controller", kind: "flow", label: "proposals" },
+  ctrl_risk: { from: "controller", to: "risk", kind: "flow" },
+  risk_queued: { from: "risk", to: "queued", kind: "flow", label: "passes" },
+  queued_risk: { from: "queued", to: "risk", kind: "flow", label: "next open: re-check" },
+  risk_rej: { from: "risk", to: "rejected", kind: "branch", label: "fails" },
+  risk_exec: { from: "risk", to: "execution", kind: "flow", label: "passes at fill price" },
+  exec_pos: { from: "execution", to: "positions", kind: "flow", label: "fills" },
+  pos_ctrl: { from: "positions", to: "controller", kind: "feedback", label: "held positions" },
+};
+
+export const NODE_STATE_TEXT = {
+  done: "Recorded activity", idle: "Ran — nothing to do", off: "Off for this run",
+  unrecorded: "Not recorded", running: "In progress", failed: "Failed", interrupted: "Interrupted",
+};
+
+const fromStage = st => ({ completed: "done", skipped: "idle", not_recorded: "unrecorded",
+  running: "running", failed: "failed", interrupted: "interrupted" }[st?.state] || "unrecorded");
+const PRIORITY = ["failed", "interrupted", "running", "done", "idle", "off", "unrecorded"];
+const combine = (...states) => PRIORITY.find(p => states.includes(p)) || "unrecorded";
+
+/** Status indicator per diagram node for one day. Pure. */
+export function nodeStates(day, model = {}) {
+  const s = day.stages, info = model.runInfo || {};
+  const ev = s.evidence.metrics || {};
+  const filled = day.orders.filter(o => o.outcome === "filled").length;
+  const rejectedN = day.proposals.filter(p => p.outcome === "rejected").length
+    + day.orders.filter(o => ["rejected", "cancelled", "superseded"].includes(o.outcome)).length;
+  const selectorOff = s.laya.state === "skipped" && (s.population.metrics.selector_mode === "off" || info.selectorMode === "off");
+  const fund = ev.fundamentals ?? info.fundamentals ?? null;
+  const out = {
+    pool: fromStage(s.population),
+    eligibility: fromStage(s.population),
+    laya: selectorOff ? "off" : combine(fromStage(s.laya), fromStage(s.shortlist)),
+    controller: fromStage({ state: day.state }),
+    hermes: fromStage(s.hermes),
+    technicals: fromStage(s.evidence),
+    news: combine(fromStage(s.prefill_news), fromStage(s.evidence)),
+    fundamentals: fund === "on" ? fromStage(s.evidence) : fund === "off" ? "off" : "unrecorded",
+    journal: day.journal ? fromStage({ state: day.journal.state }) : "unrecorded",
+    risk: combine(fromStage(s.decision_risk), fromStage(s.execution)),
+    rejected: rejectedN > 0 ? "done"
+      : (s.queue_outcome.metrics.rejected === 0 || s.decision_risk.state === "skipped") ? "idle" : "unrecorded",
+    queued: (s.queued_in.metrics.orders > 0 || s.queue_outcome.metrics.queued > 0) ? "done"
+      : combine(fromStage(s.queued_in), fromStage(s.queue_outcome)),
+    execution: filled > 0 ? "done" : s.fill_outcome.state === "completed" ? "idle" : fromStage(s.fill_outcome),
+    positions: (filled > 0 || day.exits.length || (s.positions.metrics.monitored ?? 0) > 0 || (ev.held ?? 0) > 0
+      || (day.snapshot?.open_positions ?? 0) > 0) ? "done" : fromStage(s.positions),
+  };
+  // A failed / interrupted / running stage inside a grouped node is never hidden.
+  for (const [k, st] of Object.entries({ execution: s.fill_outcome, positions: s.positions, laya: s.laya })) {
+    if (["failed", "interrupted", "running"].includes(st.state)) out[k] = fromStage(st);
+  }
+  return out;
+}
+
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
+const has = st => st && !["not_recorded", "skipped"].includes(st.state);
+
+/**
+ * The recorded activity of one day as ordered diagram steps:
+ * [{key, phase: "open"|"close", nodes, edges, caption, at}]. The order is the
+ * controller's real order (order path at the open, candidate path after the
+ * close); `at` is the recorded event time where one exists, so tests can check
+ * the order against real timestamps. Steps exist only for recorded activity.
+ */
+export function diagramSteps(day, model = {}) {
+  const s = day.stages, out = [];
+  const m = k => s[k].metrics || {};
+  const add = (key, phase, nodes, edges, caption, at = null) => out.push({ key, phase, nodes, edges, caption, at });
+  const links = model.links || new Map();
+  const status = (st, text) => (st.state === "running" ? `${text} — in progress` : st.state === "failed" ? `${text} — failed` : null);
+
+  // ---- at the simulated open: orders queued on an earlier day
+  const carried = m("queued_in").orders;
+  if (carried > 0) {
+    const from = [...new Set(day.orders.map(o => o.decisionId && links.get(o.decisionId)?.queuedDay).filter(Boolean))];
+    add("carried_in", "open", ["queued"], [],
+      `${plural(carried, "order")} carried in from ${from.length ? from.join(", ") : "an earlier day"}`,
+      s.prefill_news.startedAt || s.execution.startedAt || null);
+  }
+  if (has(s.prefill_news)) {
+    const pf = m("prefill_news");
+    const asked = (pf.hermes_calls ?? 0) > 0;
+    add("prefill", "open", asked ? ["controller", "news", "hermes"] : ["controller", "news"],
+      asked ? ["ctrl_news", "ctx"] : ["ctrl_news"],
+      status(s.prefill_news, "Pre-fill news check") || (pf.queued_buys != null
+        ? `Pre-fill news check — ${pf.confirmed ?? 0} confirmed, ${pf.cancelled ?? 0} cancelled`
+        : "Pre-fill news check cancelled an order"),
+      s.prefill_news.endedAt || s.prefill_news.startedAt);
+  }
+  const cancelled = day.orders.filter(o => o.outcome === "cancelled");
+  if (cancelled.length) {
+    add("cancelled", "open", ["rejected"], [], `${plural(cancelled.length, "order")} cancelled before the fill — stops here`, cancelled[0].at ?? null);
+  }
+  const reached = day.orders.filter(o => o.outcome !== "cancelled");
+  if (reached.length || s.execution.state === "running" || s.execution.state === "failed") {
+    add("exec_risk", "open", ["risk"], ["queued_risk"],
+      status(s.execution, "Execution-time risk re-check") || "Execution-time risk re-check at the fill price", s.execution.startedAt);
+  }
+  const filled = reached.filter(o => o.outcome === "filled");
+  const notFilled = reached.filter(o => o.outcome !== "filled");
+  const fillStep = () => filled.length && add("fills", "open", ["execution"], ["risk_exec"], `Execution — ${filled.length} filled`, filled[0].at ?? null);
+  const rejStep = () => notFilled.length && add("exec_rejected", "open", ["rejected"], ["risk_rej"],
+    `${plural(notFilled.length, "order")} not filled at the execution-time check — stops here`, notFilled[0].at ?? null);
+  if (notFilled.length && filled.length && Date.parse(notFilled[0].at) < Date.parse(filled[0].at)) { rejStep(); fillStep(); }
+  else { fillStep(); rejStep(); }
+  const monitored = m("positions").monitored ?? 0;
+  if (filled.length || day.exits.length || monitored > 0) {
+    const parts = [filled.length && `${plural(filled.length, "position")} opened`, monitored > 0 && `${monitored} monitored`,
+      day.exits.length && plural(day.exits.length, "exit")].filter(Boolean);
+    add("positions_open", "open", ["positions"], filled.length ? ["exec_pos"] : [], `Open positions — ${parts.join(", ")}`,
+      filled.length ? filled[filled.length - 1].at ?? null : s.positions.endedAt);
+  }
+
+  // ---- after the close: new candidates
+  if (has(s.population)) {
+    const p = m("population");
+    add("population", "close", ["pool", "eligibility"], ["pool_elig"],
+      p.eligible != null ? `After the close — ${p.eligible} of ${p.universe} companies eligible` : "After the close — eligibility",
+      s.population.endedAt);
+  }
+  if (has(s.laya)) {
+    add("laya", "close", ["laya"], ["elig_laya"],
+      status(s.laya, "Laya scoring") || `Laya scores ${m("laya").scored ?? "the"} cards for review priority`,
+      s.laya.endedAt || s.laya.startedAt);
+  }
+  if (has(s.shortlist)) {
+    add("shortlist", "close", ["controller"], ["laya_ctrl"],
+      `Shortlist of ${m("shortlist").selected ?? "—"} handed to the controller`, s.shortlist.endedAt);
+  }
+  if (has(s.evidence)) {
+    const e = m("evidence");
+    const held = e.held ?? 0;
+    const nodes = ["technicals", "news"], edges = ["ctrl_tech", "ctrl_news"];
+    if (e.fundamentals === "on") { nodes.push("fundamentals"); edges.push("ctrl_fund"); }
+    if (held > 0) { nodes.push("positions"); edges.push("pos_ctrl"); }
+    add("evidence", "close", nodes, edges,
+      status(s.evidence, "Controller fetching technicals and news") || (e.names != null
+        ? `Controller fetches technicals and news for ${e.names} names${held ? ` (${e.shortlisted} shortlisted + ${held} held)` : ""}`
+        : "Controller fetches technicals and news"),
+      s.evidence.endedAt || s.evidence.startedAt);
+  }
+  if (has(s.hermes)) {
+    const h = m("hermes");
+    add("hermes", "close", ["hermes"], ["ctx"],
+      status(s.hermes, "Hermes reasoning") || (h.candidates != null
+        ? `Hermes receives masked context — ${plural(h.candidates, "candidate")}, ${plural(h.positions ?? 0, "position")}`
+        : "Hermes receives masked context"),
+      s.hermes.startedAt || s.hermes.endedAt);
+    if (s.hermes.state === "completed") {
+      add("proposals", "close", ["controller"], ["prop"],
+        h.decisions != null ? `Hermes returns ${plural(h.decisions, "decision")}` : "Hermes returns its decisions", s.hermes.endedAt);
+    }
+  }
+  if (has(s.decision_risk)) {
+    const d = m("decision_risk");
+    add("decision_risk", "close", ["risk"], ["ctrl_risk"],
+      status(s.decision_risk, "Decision-time risk check") || (d.proposals != null
+        ? `Decision-time risk check — ${plural(d.proposals, "proposal")}` : "Decision-time risk check"),
+      s.decision_risk.startedAt || s.decision_risk.endedAt);
+  }
+  const q = day.proposals.filter(p => p.outcome === "queued");
+  const r = day.proposals.filter(p => p.outcome === "rejected");
+  const qStep = () => q.length && add("queued", "close", ["queued"], ["risk_queued"], `${q.length} queued for the next session's open`, q[0].at ?? null);
+  const rStep = () => r.length && add("rejected", "close", ["rejected"], ["risk_rej"], `${r.length} rejected at decision time — stops here`, r[0].at ?? null);
+  if (r.length && q.length && Date.parse(r[0].at) < Date.parse(q[0].at)) { rStep(); qStep(); } else { qStep(); rStep(); }
+  if (day.journal) {
+    add("journal", "close", ["journal"], ["ctrl_journal"],
+      day.journal.state === "failed" ? "Journal write failed" : "Controller writes outcomes to the trading journal", day.journal.at ?? null);
+  }
+  return out;
+}
+
+/** Index of a day within a model by its label (-1 when absent). */
+export const dayIndexByLabel = (model, label) => model.days.findIndex(d => d.dayLabel === label);
