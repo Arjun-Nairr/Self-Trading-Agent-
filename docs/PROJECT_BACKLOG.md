@@ -373,7 +373,27 @@ unapproved pending that decision.
     - **Next:** the production selector is unchanged, and no further
       prompt or label work is justified. Fine-tuning would first need an
       independently human-labelled, date-split card set (see the report,
-      §7); not started.
+      §7).
+
+    **Fine-tuning preparation (2026-10-05); human label review required. Not
+    approved for training** (`docs/scopes/LAYA_FINETUNE_PILOT_V0.md`).
+    - **Built:**
+      - proposed rubric `review-rubric-v0.1-proposed`;
+      - a private 24-example pilot (12 reproducibly sampled real cards, 12
+        synthetic) with AI-proposed labels and a blind review sheet;
+      - offline converters to the upstream training and evaluation
+        formats, checked against the pinned `laya` 0.3.23 and tag
+        `d8a2e597`;
+      - `backtest-harness/laya_ft_pilot.py` with 6 tests.
+    - **Not done:** training, downloads, inference, new market data.
+    - **Blocked on:**
+      - two independent human reviewers for the pilot (κ ≥ 0.6 before
+        scaling to about 1,500 cards);
+      - the direction decision (keep down-only activity review-worthy or
+        not).
+    - **Caveat:** the rubric is mostly a formula. A candidate that only
+      matches it would distil the formula, which is then the cheaper
+      selector.
     **Pending:** the paths not yet exercised (stop/time-stop exits, the
     gate's Hermes classification).
     A dynamic, point-in-time

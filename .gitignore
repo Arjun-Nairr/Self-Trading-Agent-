@@ -30,6 +30,8 @@ backtest-harness/.laya_demo/
 backtest-harness/.laya_controls/
 # Laya framing x label experiment (laya_framing.py): PRIVATE per-card scores and top-10 row IDs.
 backtest-harness/.laya_framing/
+# Laya fine-tuning pilot (laya_ft_pilot.py): PRIVATE real-card values, proposed labels, review sheet.
+backtest-harness/.laya_ft_pilot/
 
 # Scalable screener (Stage 1): local write-once screen snapshots -- runtime
 # data, never committed.
