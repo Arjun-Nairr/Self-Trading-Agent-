@@ -375,6 +375,23 @@ unapproved pending that decision.
       independently human-labelled, date-split card set (see the report,
       §7).
 
+    **Laya vs. random downstream pilot done (2026-10-06)**
+    (`docs/evaluations/laya_vs_random_2022-07_2026-10-06.md`; plan frozen first in
+    `laya_vs_random_plan_2026-10-06.md`). One fresh July 2022 Hermes episode per arm
+    (`af2dfdde…` Laya, `66ef4cdb…` seeded random), same frozen 48-name pool, run_kind
+    evaluation.
+    - **Operational:** correct, 20/20 sessions each. All 1,007 fetches both
+      arms made returned identical data, and no selector data reached a
+      prompt.
+    - **Selection:** Laya not distinguishable from random. It hit the review
+      heuristic at the base rate, and overlap was at chance.
+    - **Trading:** Laya arm +8.26% vs random +4.02%, from one path each. The
+      gap is not attributed to Laya: the random arm sat idle for the first
+      7 sessions of a rally.
+    - **Code change:** shortlisted candidates are now shown to Hermes in
+      neutral alias order.
+    - **Next:** no automatic second month.
+
     **Fine-tuning preparation (2026-10-05); human label review required. Not
     approved for training** (`docs/scopes/LAYA_FINETUNE_PILOT_V0.md`).
     - **Built:**

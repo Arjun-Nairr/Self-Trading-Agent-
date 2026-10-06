@@ -1,6 +1,6 @@
 # Laya candidate-selector — scope v1
 
-**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; standalone current-data demo completed 2026-10-03 (question format corrected to `noul-criteria-v2`); connected-smoke integration fixes done 2026-10-03; the fixed-30 attempt was not launched (coverage), then the 60-candidate frozen-pool smoke run COMPLETED GREEN on 2026-10-03 (`docs/evaluations/laya_connected_smoke_60pool_2026-10-03.md`); no selector evaluation, dashboard view, or activation has happened**
+**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; standalone current-data demo completed 2026-10-03 (question format corrected to `noul-criteria-v2`); connected-smoke integration fixes done 2026-10-03; the fixed-30 attempt was not launched (coverage), then the 60-candidate frozen-pool smoke run COMPLETED GREEN on 2026-10-03 (`docs/evaluations/laya_connected_smoke_60pool_2026-10-03.md`); one bounded downstream Laya-vs-random July 2022 pair ran on 2026-10-06 (`docs/evaluations/laya_vs_random_2022-07_2026-10-06.md`: operationally correct, selection not distinguishable from random, outcome gap not attributable to Laya); no activation or dashboard view has happened**
 
 > **User decision (2026-10-03):** Laya stays in the project as an experimental
 > portfolio/CV component. A controlled comparison against random and
