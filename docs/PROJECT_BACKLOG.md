@@ -384,16 +384,27 @@ unapproved pending that decision.
       - offline converters to the upstream training and evaluation
         formats, checked against the pinned `laya` 0.3.23 and tag
         `d8a2e597`;
-      - `backtest-harness/laya_ft_pilot.py` with 6 tests.
+      - `backtest-harness/laya_ft_pilot.py`.
+    - **Rubric/pilot revised (2026-10-06); human review and dataset
+      expansion pending.**
+      - **Task settled:** unusual technical activity, with downward and
+        conflicting activity allowed to warrant review.
+      - **Rubric v0.2:** "ambiguous" now means insufficient evidence only;
+        borderline values are flagged but follow the anchors; overrides
+        are removed.
+      - **History kept:** a versioned revision; the v0.1 pilot is
+        untouched.
+      - **Label changes:** 5 of 24 (real 4/4/4 → 5/6/1 and synthetic
+        5/3/4 → 6/4/2, as review-worthy/ordinary/ambiguous).
+      - **Review sheets:** blind sheet and proposals sheet are separate;
+        25 offline tests.
     - **Not done:** training, downloads, inference, new market data.
-    - **Blocked on:**
-      - two independent human reviewers for the pilot (κ ≥ 0.6 before
-        scaling to about 1,500 cards);
-      - the direction decision (keep down-only activity review-worthy or
-        not).
-    - **Caveat:** the rubric is mostly a formula. A candidate that only
+    - **Blocked on:** two independent human reviewers for the pilot
+      (κ ≥ 0.6 before scaling to about 1,500 cards).
+    - **Caveat:** the rubric is a fixed formula. A candidate that only
       matches it would distil the formula, which is then the cheaper
-      selector.
+      selector. 55% of the explored real cards sit near a cut point, so
+      labels are sensitive to those policy choices.
     **Pending:** the paths not yet exercised (stop/time-stop exits, the
     gate's Hermes classification).
     A dynamic, point-in-time

@@ -1,11 +1,14 @@
-# Laya review-priority fine-tuning: pilot scope and readiness (v0, 2026-10-05)
+# Laya review-priority fine-tuning: pilot scope and readiness (v0, 2026-10-05; rubric v0.2, 2026-10-06)
 
-**Status: preparation only. Human label review is required. Training is
-not approved.**
+**Status: preparation only. The rubric and pilot have been revised; human
+review and dataset expansion are pending. Training is not approved.**
+
+The pilot is internally consistent, but that does not make fine-tuning
+ready.
 
 Nothing was trained, downloaded, provisioned, scored or deployed for this
-document. The production selector, question, worker, rules and watchlists
-are unchanged.
+document. The production selector, question, worker, card features, rules
+and watchlists are unchanged.
 
 **Scope:**
 - **Task:** a narrow review-priority classifier for the existing Laya
@@ -13,11 +16,13 @@ are unchanged.
 - **Not in scope:** returns, trade quality or buy signals.
 
 **Built offline:**
-- the proposed rubric (§2);
-- a 24-example private pilot with a review sheet (§3);
+- the proposed rubric, now v0.2 (§2);
+- a 24-example private pilot with its versioned v0.2 revision and blind
+  review sheets (§3);
 - a dataset and evaluation design (§4–5);
 - a training-readiness map against the pinned package (§6);
-- one helper module, `backtest-harness/laya_ft_pilot.py`, with 6 tests.
+- one helper module, `backtest-harness/laya_ft_pilot.py`, with 25 offline
+  tests.
 
 **Evidence base:**
 - `laya_vs_controls_2026-10-04.md`: Laya is not shown to differ from
@@ -27,204 +32,236 @@ are unchanged.
 - The pinned package README calls the base checkpoints "a fast base to
   specialise, not a zero-shot decision engine".
 
-## 1. Task definition
+## 1. Task definition (settled 2026-10-06)
 
-**Question:** given only this company-day's seven numeric card fields, does
-it warrant a further technical/news review by Hermes?
+**Question:** does this company-day show unusual technical activity that
+warrants further review? The answer is judged from the seven numeric card
+fields only.
 
-**What it is:** the production question
-(`laya_adapter.REVIEW_QUESTION`, `noul-criteria-v2`), unchanged.
+**What it is:** the meaning of the production question
+(`laya_adapter.REVIEW_QUESTION`, `noul-criteria-v2`), which is unchanged.
 
-**Two different things, kept apart:**
-- **Unusual technical activity.** The card shows a notable move,
-  stretch, oscillator extreme or volume burst. This is the task, and it is
-  labelled direction-neutral, as the production criteria are.
-- **A promising long-only setup.** This needs support and resistance
-  levels, a stop inside RULES.md §6a, a target and reward:risk. None of
-  these is on the card. Hermes judges them from full technicals.
-  - These labels must not claim "promising".
-  - Each example records a `direction` (up / down / mixed / none), so a
-    later decision to deprioritise down-only activity needs no relabelling.
+**What it is not:**
+- whether to buy;
+- whether a long position will profit;
+- whether all indicators agree;
+- whether the company will pass downstream risk checks.
 
-**What the seven fields cannot support** (no new data sources were added):
+**Direction and agreement:**
+- Downward activity can warrant review, exactly like upward activity.
+- Conflicting indicators can also warrant review.
+- Neither makes a card ambiguous. Each example records a `direction`
+  (up / down / mixed / none) for information only.
+
+**Three annotation states:**
+- **review-worthy;**
+- **ordinary / lower priority;**
+- **ambiguous / insufficient evidence:** the card cannot support a
+  dependable label under the rubric.
+
+Ambiguous is an annotation state, never a production output and never a
+training label.
+
+**What the seven fields cannot support** (documented, not fixed; no
+production feature was changed and no data source was added):
 
 | Limitation | Consequence for labels |
 |---|---|
-| No market or sector context | Cannot tell an idiosyncratic −6% week from a market-wide one. Labels mean "unusual for this stock's own numbers", not "unusual vs. the market". |
-| No price levels, longer trend, gaps or intraday data | "Good long setup" is unlabelable (above). |
-| No liquidity or dollar volume, and no event flags (by design) | A 0.3× volume day could be a half-session or a data gap. This is flagged as ambiguous, not decided. |
-| MACD direction saturates | On the 153 explored real cards, |MACD dir| ≥ 0.9 on 54 (35%). It carries little extra information at the extremes, so it only supports other signals and never decides. |
-| Realized volatility includes the recent move | A vol-scaled move is useful, but it is partly circular. |
-| SMA distance and range position are highly correlated | They count as one "location" family. |
+| No market or sector context | Labels mean "unusual on this stock's own numbers", not "unusual vs. the market". |
+| No longer-run history | Only 20-day volatility exists. "Unusual for this particular stock" cannot be judged and must not be assumed. |
+| No price levels, longer trend, gaps or intraday data | A good long setup cannot be labelled, and labels must not claim one. |
+| No liquidity, session-length or data-quality field | A very low-volume day may be a shortened session or a data gap. |
+| MACD direction saturates | \|MACD dir\| ≥ 0.9 on 54 of 153 explored cards (35%). It supports other signals only and never counts. |
+| Volatility includes the recent move | The vol-scaled move is partly circular. |
+| SMA distance and range position are correlated | They count as one "location" family. |
 
 **Labels are independent of:**
 - future prices and outcomes;
-- company identity and dates (the reviewer sees seven numbers only);
+- company identity and dates;
 - Laya scores;
 - Hermes decisions;
 - prior shortlists.
 
-The pilot builder never reads the score fields of its source file. Its
-sample key uses only session and row ID (§3; tested).
+The tools never read the score fields of the source file. The sample key
+uses only session and row ID (tested).
 
-## 2. Labelling rubric `review-rubric-v0.1-proposed`
+## 2. Labelling rubric `review-rubric-v0.2-proposed`
 
-**Status:** proposed until human review. It is implemented as
-`laya_ft_pilot.rubric_reference` so that it can be audited and used as a
-control.
+**Status:** proposed until human review.
 
-### Fields and units
+**Implementation:** `laya_ft_pilot.rubric_reference`.
 
-All are as built by `laya_cards.py`:
+**It is a fixed formula, disclosed as such.** Every label follows
+deterministically from the anchors below, with no judgement overrides.
 
-| Field | Unit / meaning | Ordinary looks like |
+**What follows from that:**
+- If human reviewers simply apply these rules, a fine-tuned Laya would
+  distil this formula, not show better judgement. The formula itself would
+  then be the cheaper selector.
+- No subjective exceptions were added to make training look necessary.
+- Whether training could add anything depends on humans departing from
+  these rules for reasons the card supports.
+
+### Fields, units and what the rubric sees
+
+The rubric judges the exact 4-decimal values the model receives. The
+reviewer rendering shows the same values with units (tested):
+fractions as percent with 2 decimals; RSI, MACD and relative volume with 4
+decimals.
+
+| Field | Unit / meaning | Limitation |
 |---|---|---|
-| 5d return | Fraction; close vs the close 5 sessions earlier | within ±2–3% |
-| vs 20d avg | Fraction; close vs its 20-day SMA | within ±2–3% |
-| RSI14 | 0–100, Wilder; 50 is balanced | 40–60 |
-| MACD dir | tanh(MACD(12,26,9) histogram / price / 0.005), −1 to +1 | small |
-| Relative volume | × today vs the mean of the prior 20 sessions | 0.7–1.4× |
-| Annual volatility | Annualized stdev of the last 20 daily log returns | context only |
-| 20d range position | 0 = 20-day low, 1 = 20-day high | 0.2–0.8 |
+| 5d return | close vs the close 5 sessions earlier | — |
+| vs 20d avg | close vs its 20-day simple average | correlated with range position |
+| RSI14 | 0–100 (Wilder); 50 = balanced | — |
+| MACD dir | tanh(MACD(12,26,9) histogram / price / 0.005), −1…+1 | saturates; supporting only |
+| rel vol | today's volume ÷ mean of the prior 20 sessions | cannot flag short sessions |
+| ann vol | stdev of the last 20 daily log returns × √252 | 20 days only; includes the recent move |
+| 20d range pos | 0 = 20-day low, 1 = 20-day high | correlated with SMA distance |
 
-**Derived:** move vs own volatility = 5d return / (volatility × √(5/252)),
-i.e. the 5-day move in units of its own 5-day standard deviation.
+**Derived:** 5d move in own-vol sd = 5d return / (ann vol × √(5/252)).
 
-### Anchors by family
+### Anchors
 
-Correlated fields share one family.
+Correlated fields share a family. **Every number is a proposed policy
+choice, not an empirically optimal threshold.**
 
-| Family | Strong | Moderate |
+| Family | Strong (inclusive) | Moderate (inclusive) |
 |---|---|---|
-| Move | \|5d\| ≥ 7%, or \|move vs own vol\| ≥ 2.5 with \|5d\| ≥ 4% | \|5d\| ≥ 4% |
-| Location | \|vs 20d avg\| ≥ 7% | \|vs 20d avg\| ≥ 4%; range ≥ 0.90 or ≤ 0.10 |
+| Move | \|5d\| ≥ 7%, or own-vol move ≥ 2.5 sd with 4% ≤ \|5d\| < 7% | \|5d\| ≥ 4% |
+| Location | \|vs 20d avg\| ≥ 7% | \|vs 20d avg\| ≥ 4%; range pos ≥ 90% or ≤ 10% |
 | Oscillator | RSI ≤ 25 or ≥ 75 | RSI ≤ 32 or ≥ 68 |
 | Participation | rel vol ≥ 2.5× | rel vol ≥ 1.6× |
-| Momentum | supporting only | \|MACD dir\| ≥ 0.6 is noted, never counted |
+| Momentum | supporting only; never counted | \|MACD dir\| ≥ 0.6 is noted |
 
 ### Labels
 
-Apply these rules in order:
+1. **Review-worthy:** any strong signal, or moderate signals in two or
+   more families, in any direction.
+   - Conflicting directions do not reduce this.
+   - **Combinations that strengthen review priority**, for ranking within
+     review-worthy, where they are recorded in the rationale:
+     - more families with a strong signal;
+     - then more counted families.
+     - Typical strong combinations: a move with participation (a move on
+       heavy volume), or location with an oscillator extreme.
+2. **Ordinary / lower priority:** counted signals in one family only, or
+   none (MACD alone is none).
+3. **Ambiguous / insufficient evidence:** only when no family counts and
+   the card shows an unexplained extreme it cannot interpret:
+   - **rel vol ≤ 0.40×:** a shortened session, a data gap or genuinely
+     thin trading cannot be told apart;
+   - **ann vol ≥ 60%:** recent turbulence with quiet current fields; the
+     card has no longer-run baseline to say whether this is unusual for the
+     stock or already over.
 
-1. **Ambiguous** if the counted signals point in conflicting directions.
-   Example: down 6% in five days but still 4.5% above the 20-day average.
-2. **Review-worthy** if any strong signal is present.
-   - Exception: a lone strong signal within 10% of its anchor is
-     **ambiguous** (near threshold). RSI distance is measured from 50.
-3. **Review-worthy** if moderate signals appear in two or more families,
-   in a coherent direction.
-4. **Ordinary / lower priority** if moderate signals appear in one family
-   only.
-   - Exception: within 10% of a strong anchor, the card is **ambiguous**.
-5. **No counted signal:**
-   - **ambiguous** if annual volatility ≥ 60% or rel vol ≤ 0.4×, because
-     an unexplained single extreme could be recent turbulence, a
-     half-session or a data issue;
-   - otherwise **ordinary**.
+   Each ambiguous record carries this reason (tested).
 
-**Ambiguous is a dataset-review state, not a model output.** It is never a
-training label (the converter refuses it). An item still ambiguous after
-adjudication becomes an evaluation slice.
+**Borderline values:**
+- Anchors are inclusive cut points on the 4-decimal values.
+- A value within 10% of an anchor, measured from the field's neutral
+  value (0, RSI 50, rel vol 1.0, range pos 50%), is **flagged**
+  `near_anchor` for reviewer attention.
+- The label still **follows the anchor**: nearness is not missing
+  evidence. Human reviewers may disagree on such cards; that is what the
+  review is for.
 
-### Borderline cases reviewers should expect
-
-- **Several values just inside their anchors.** The rules may say
-  ordinary where a reviewer sees a quiet slide to an extreme. This is the
-  only case where the AI departed from the rules in the pilot.
-- **Volume burst with a flat price.** Review-worthy by rule; possibly
-  index rebalancing.
-- **Reversal.** A bounce off the 20-day low has conflicting directions, so
-  it is ambiguous by rule. Reviewers decide whether reversals count as
-  notable.
-- **High-volatility name moving 3–4%.** The vol-scaled move makes this
-  ordinary. A low-volatility name moving 4–6% can be strong.
-
-**The rubric is mostly a formula.** Rules 1–5 are deterministic. If
-reviewers simply apply them, a fine-tuned Laya would **distil this
-formula**, not demonstrate better judgement. In that case the formula
-itself, with zero inference cost, is the better selector (§5).
+**Contradictions in v0.1, corrected:**
+1. v0.1 called "conflicting directions" ambiguous. That contradicts the
+   task, so disagreement no longer decides anything.
+2. v0.1 called "near an anchor" ambiguous, which made a lone strong value
+   less certain than a weaker one. Nearness is now a flag.
+3. v0.1 allowed a recorded AI judgement override, citing an "unusually calm
+   stock". The card cannot support that, so overrides are removed.
+4. v0.1's "ordinary looks like ±2–3%" table conflicted with the 4%
+   anchors. Ordinary is now defined only by the anchors.
+5. v0.1 judged full-precision values but rendered rounded ones (RSI to 1
+   decimal, volatility to 0). Both now use the model's 4-decimal state.
 
 ## 3. Pilot (private, git-ignored)
 
-**Location:** `backtest-harness/.laya_ft_pilot/<run>/`, built with
-`python backtest-harness/laya_ft_pilot.py build --overrides <private json>`.
+**Location:** `backtest-harness/.laya_ft_pilot/`. History is preserved
+there:
 
-### Real cards: 12
+| Folder | Content |
+|---|---|
+| `20261005T171428Z/` (v0.1, untouched) | original 24 records, labels, provenance, review sheet; `pilot_dataset.json` SHA-256 `a2867fdc…b868` |
+| `ai_overrides.json` (v0.1, untouched) | the one recorded v0.1 override |
+| `20261006T142253Z_revision-v0.2/` | `pilot_revision.json`, `review_blind.csv`, `proposals.csv` |
 
-- **Source:** the saved, hash-verified cards of the Laya-vs-controls run.
-  - `private_results.json`, SHA-256 `8d140f99…08fa`;
-  - three sessions × 51 cards, with per-day input digests re-checked.
-- **Sampling method** (fixed in code before any label was assigned): per
-  session in date order, take the 4 cards with the smallest
-  `sha256("laya-ft-pilot-v1|session|row_id")`, skipping companies already
-  drawn. The result is 12 cards from 12 different companies.
-- **What the method never reads:** scores, ranks, shortlists, card values
-  or outcomes.
-- **These sessions are development material:** already explored, never a
-  final test.
+**How the revision was made:**
+- **Command:** `python backtest-harness/laya_ft_pilot.py revise <parent> --parent-sha256 <hex>`.
+- **Refusals:** it refuses unless the parent's hash matches and every card
+  value, sample member and private source equals its source. Real cards
+  are re-derived from the hash-verified saved run.
+- **The parent is only read** (tested; parent hashes re-checked after the
+  run).
 
-### Synthetic cards: 12
+**Sample, unchanged:**
+- **12 real cards:** per session, the 4 with the smallest
+  `sha256("laya-ft-pilot-v1|session|row_id")`, 12 different companies,
+  from the saved Laya-vs-controls cards (`8d140f99…08fa`). Development
+  material only.
+- **12 synthetic cards:** `laya_ft_pilot.SYNTHETIC`.
 
-The synthetic cards are listed in `laya_ft_pilot.SYNTHETIC`:
-- 3 ordinary;
-- 4 clear;
-- 5 borderline.
-
-### What each record carries
-
-- opaque `example_id`;
-- `source_type`;
-- the seven original values;
-- a one-line rendering with units;
-- `proposed_label` and the rules' `reference_label`;
-- `direction`;
-- a rationale and ambiguity flags;
+**Each revised record carries:**
+- the opaque ID, source type and unchanged card values;
+- the rendering;
+- `previous_label` with `previous_rubric_version`;
+- the revised `proposed_label` and `rubric_version`;
+- `direction`, a field-tied `rationale` and `flags`;
+- `ambiguity_reason` (ambiguous only);
+- `change_reason` (exactly when the label changed);
 - `label_status: ai_proposed_unreviewed`;
-- provenance;
-- `rubric_version`;
-- a company-group key;
-- for real cards only, the session and row ID (private).
+- provenance: AI-proposed by Claude applying v0.2 exactly; not
+  human-reviewed, not ground truth, not approved for training.
 
-### Provisional labels
+### Label counts (aggregate)
 
 | | Review-worthy | Ordinary | Ambiguous |
 |---|---|---|---|
-| Real (12) | 4 | 4 | 4 |
-| Synthetic (12) | 5 | 3 | 4 |
+| v0.1, real (12) | 4 | 4 | 4 |
+| v0.2, real (12) | 5 | 6 | 1 |
+| v0.1, synthetic (12) | 5 | 3 | 4 |
+| v0.2, synthetic (12) | 6 | 4 | 2 |
 
-**Provenance:** these labels are AI-proposed. Claude applied the reference
-rules and checked each card, with one recorded judgement override (a real
-card, ordinary → ambiguous). They are not independent ground truth and
-were not expert-validated. Agreement with them is not evidence of model
-quality.
+**5 of 24 labels changed** (3 real, 2 synthetic):
 
-**Rubric effect seen on the 153 explored cards:** 55 review-worthy, 88
-ordinary, 10 ambiguous. That is 17–20 review-worthy per day, more than the
-10 shortlist slots.
+| Change | Count | v0.1 cause |
+|---|---|---|
+| ambiguous → review-worthy | 1 | conflicting directions |
+| ambiguous → review-worthy | 1 | near anchor |
+| ambiguous → ordinary | 2 | near anchor |
+| ambiguous → ordinary | 1 | the removed override |
+
+No label moved out of review-worthy or ordinary.
 
 ### Synthetic examples (public)
 
-| Situation | Card | Proposed |
-|---|---|---|
-| Quiet | 5d +0.40%, vs avg +0.30%, RSI 51, MACD +0.05, vol 0.98×, ann vol 22%, range 52% | ordinary |
-| Breakout on volume | 5d +9.0%, vs avg +7.5%, RSI 74, MACD +0.75, vol 2.8×, ann vol 38%, range 98% | review-worthy (up) |
-| Volume spike, flat price | 5d +0.8%, vs avg +0.5%, RSI 53, MACD +0.10, vol 3.4×, ann vol 24%, range 60% | review-worthy |
-| Pullback after a run-up | 5d −6.0%, vs avg +4.5%, RSI 52, MACD −0.45, vol 1.2×, ann vol 35%, range 62% | ambiguous (mixed) |
-| Lone move near anchor | 5d +6.8%, vs avg +3.0%, RSI 63, MACD +0.40, vol 1.4×, ann vol 30%, range 85% | ambiguous (near threshold) |
+| Situation | Card (4-decimal state) | v0.1 → v0.2 | Why under v0.2 |
+|---|---|---|---|
+| Pullback after a run-up | 5d −6.00%, vs avg +4.50%, RSI 52, MACD −0.45, vol 1.2×, ann vol 35%, range 62% | ambiguous → **review-worthy (mixed)** | Moderate move plus moderate location = 2 families. The disagreement is itself activity. |
+| Lone move near anchor | 5d +6.80%, vs avg +3.00%, RSI 63, MACD +0.40, vol 1.4×, ann vol 30%, range 85% | ambiguous → **ordinary** | One family (move). 6.80% is flagged near the 7% anchor, but the label follows the anchor. |
+| Sell-off on volume | 5d −11.0%, vs avg −9.0%, RSI 22, MACD −0.80, vol 3.1×, ann vol 45%, range 3% | review-worthy → review-worthy (down) | Strong in four families. Downward activity counts. |
+| High volatility only | 5d +1.0%, vs avg −1.0%, RSI 48, MACD −0.10, vol 1.05×, ann vol 75%, range 45% | ambiguous → ambiguous | No family counts. Turbulence without a baseline is insufficient evidence. |
+| Volume spike, flat price | 5d +0.8%, vs avg +0.5%, RSI 53, MACD +0.10, vol 3.4×, ann vol 24%, range 60% | review-worthy → review-worthy | Strong participation alone. |
 
-### Review sheet `review_template.csv`
+### Blind review sheets
 
-No model predictions, dates, sources or identities appear in it.
+- **`review_blind.csv`** holds the card and seven values only. It shows no
+  proposal, previous label, source, date or identity (tested). For each
+  card the reviewer records their label (review_worthy / ordinary /
+  ambiguous), a reason, the insufficient-evidence reason if ambiguous,
+  their name and the date.
+- **`proposals.csv`** is opened only after the blind sheet is complete. It
+  shows the v0.2 proposal, rationale, ambiguity reason and near-anchor
+  fields. The reviewer records accept / change / ambiguous, the
+  `final_label`, their name and the date.
+- **Agreement** is computed on the blind labels.
 
-For each row, the reviewer:
-1. reads the card;
-2. fills `your_label_before_reading_proposal` (review_worthy / ordinary /
-   ambiguous) and a note;
-3. only then reads the proposal;
-4. records accept / change / ambiguous, the `final_label`, their name and
-   the date.
-
-Agreement is computed on the blind column.
+**Safeguards:** the converters still refuse any record that is not
+`human_reviewed`, and always refuse ambiguous labels (tested). No status
+was changed by this revision.
 
 ## 4. Smallest credible larger dataset (design; not built)
 
@@ -254,8 +291,14 @@ About 30 sessions × ~50 cards ≈ 1,500 cards:
 | Calibration | 4 | ~200 |
 | Test | 6 | ~300 |
 
-- **Reasoning:** at about 35% prevalence, the test set holds about 100
-  review-worthy cards, enough to estimate recall to roughly ±6 points.
+- **Reasoning:** at about 35–40% prevalence, the test set holds about
+  100 review-worthy cards, enough to estimate recall to roughly ±6 points.
+- **Rubric v0.2 on the 153 explored cards** (aggregate):
+  - 59 review-worthy (17–22 per day, more than the 10 shortlist slots);
+  - 92 ordinary and 2 ambiguous;
+  - 84 (55%) carry at least one near-anchor flag. Many real cards sit
+    close to the proposed cut points, so labels are sensitive to those
+    policy choices. Human agreement must be measured before scaling.
 - **Upstream scale for comparison:** a 1,200-case training split.
 - **Labelling effort:** two reviewers at about 20–30 s per card is roughly
   8–13 h each. This is unmeasured and should be timed in the pilot.
@@ -431,18 +474,18 @@ check below):
 
 | Area | Result |
 |---|---|
-| Label provenance | Every record carries `label_status: ai_proposed_unreviewed`, the provenance text, the rubric version and the rules' label beside the proposal. The one AI override is recorded with its reason. The converters refuse non-`human_reviewed` labels unless a format check asks, and always refuse `ambiguous` (tested). |
+| Label provenance | Every v0.2 record carries `label_status: ai_proposed_unreviewed`, the provenance text, the rubric version, its previous label and version, and a change reason exactly when the label changed. A record claiming any review status fails validation. The converters refuse non-`human_reviewed` labels unless a format check asks, and always refuse `ambiguous` (tested). The v0.1 folder and its override file are unchanged; their hashes were re-checked after the revision. |
 | Leakage | Labels use only the seven fields. Sampling never reads scores or values (tested). Synthetic and explored days are kept out of test, and identical cards and the embargo are checked (tested). |
 | Privacy | Real values, session dates, row IDs and group keys exist only in git-ignored `.laya_ft_pilot/`. The reviewer sheet has no source, date or identity. Committed files contain synthetic cards and aggregate counts only. Model-facing and reviewer-facing text is checked against identity, score and outcome terms (tested). |
 | Compatibility | As in §6. Pinned package and tag inspected; tokenizer and evals checks pass; deviations listed rather than patched. |
-| Fixed during preparation | The first rule draft counted MACD and correlated location fields as independent signals. On the real sample this promoted a −6.4% move with a saturated MACD to review-worthy. Families and "MACD supports only" were added before the final build. |
+| Fixed during preparation (v0.1) | The first rule draft counted MACD and correlated location fields as independent signals. On the real sample this promoted a −6.4% move with a saturated MACD to review-worthy. Families and "MACD supports only" were added before the final build. |
+| v0.2 revision audit (2026-10-06) | **Inconsistencies:** the five v0.1 contradictions are listed and corrected in §2. **Unsupported rationales:** v0.2 rationales are generated only from the card's fields; context terms the card cannot carry ("usually", "historically", sector, news…) fail validation (tested); the v0.1 "usually calm stock" override is removed. **Symmetry:** mirrored up/down cards get the same label (tested). **Privacy:** real values stay in the ignored folder; this document has synthetic cards and aggregate counts only. **Scope:** no production feature, question, worker, rule or watchlist changed; no model, Docker, market data or training. |
 
 ## 8. Open decisions (for the project owner)
 
 1. **Reviewers.** Who are the two independent reviewers (and the
    adjudicator)? Nothing scales until the 24-item pilot is reviewed.
-2. **Direction.** Should down-only activity stay review-worthy, as it is
-   now (direction-neutral, as in production), or be deprioritised for a
-   long-only agent? `direction` is recorded either way.
+2. **Direction:** settled 2026-10-06. Downward and conflicting activity
+   can warrant review (§1).
 3. **Hardware.** Local machine, Kaggle free GPUs (uploads card data to a
    third party), or a rented GPU, once training is ever approved.
