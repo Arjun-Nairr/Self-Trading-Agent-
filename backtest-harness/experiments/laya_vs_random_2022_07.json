@@ -5,7 +5,7 @@
  "authorization": "User request in the Claude Code session of 2026-10-06: run exactly two fresh, sequential July 2022 episodes (production Laya selector, then a seeded uniform-random control); no other months, extra runs, tuning or baseline changes.",
  "plan": {
   "path": "docs/evaluations/laya_vs_random_plan_2026-10-06.md",
-  "sha256": "5dd2b59d6c40ed14e5e024d4352a9d1e24f460d1a34b5503326a6269d4f82e3c"
+  "sha256": "c387cae7bfdba337b69dfbeda261904efc63cede2519debf8a494d3e8c293a7f"
  },
  "arms": [
   "laya",

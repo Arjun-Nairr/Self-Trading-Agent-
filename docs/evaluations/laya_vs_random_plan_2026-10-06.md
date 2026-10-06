@@ -212,8 +212,16 @@ happen:
 - the provenance check fails (model, pool, plan, code or alias map);
 - an arm halts;
 - a selector fails closed on more than a few days (operational issue);
-- a material integrity issue appears (a lookahead, a leak into a prompt,
-  journal and state disagreement).
+- a material integrity issue appears:
+  - a lookahead;
+  - a Laya score, rank or arm identity reaching a prompt;
+  - a ticker or full company name that `assert_clean` should have caught;
+  - journal and state disagreement.
+
+**Recorded, not a stop condition:** the pre-existing masking ceiling. It
+was seen in the blind review before launch, when abbreviated or partial
+company names survived in some headlines. It affects both arms
+identically, and it is quantified in the report.
 
 **Preserved, before and after:**
 - Round 2 `backtest_state.json` (`4b428d35…ba6d`);
