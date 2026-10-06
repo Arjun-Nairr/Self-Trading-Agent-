@@ -853,6 +853,23 @@ def _max_drawdown_pct(equity_curve: list[float]) -> float:
     return round(worst, 4)
 
 
+def resolve_episode_end_pending(portfolio: Portfolio) -> list:
+    """Episode-boundary semantics shared by every one-month evaluation
+    episode (see _run_episode): an episode never resumes, so each order still
+    pending at its end is resolved as rejected ("episode window ended before
+    execution") through the harness's own resolve_trade_rejection path --
+    best-effort per order -- and cleared. Open holdings are NOT liquidated.
+    Returns the orders it resolved."""
+    dangling = list(portfolio.pending_orders)
+    for order in dangling:
+        try:
+            resolve_trade_rejection(order.decision_id, "episode window ended before execution")
+        except Exception:
+            pass
+    portfolio.pending_orders = []
+    return dangling
+
+
 def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
                  watchlist: list[dict], checkpoint_dir: Path,
                  manifest: dict,
@@ -960,13 +977,7 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
     # Best-effort (never masks the episode's own halted/report outcome,
     # same discipline as do_observability above) -- but real: reuses the
     # exact resolve_trade_rejection path the main harness itself uses.
-    dangling_pending_orders = list(portfolio.pending_orders)
-    for order in dangling_pending_orders:
-        try:
-            resolve_trade_rejection(order.decision_id, "episode window ended before execution")
-        except Exception:
-            pass
-    portfolio.pending_orders = []
+    dangling_pending_orders = resolve_episode_end_pending(portfolio)
 
     fundamentals_assessment_counts = None
     if config.fundamentals_enabled and not halted:

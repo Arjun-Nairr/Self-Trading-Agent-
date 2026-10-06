@@ -1,0 +1,44 @@
+{
+ "_comment": "Frozen config for ONE user-authorized paired experiment (laya_vs_random.py). Not an eval-suite manifest; the fixed-watchlist manifest's approval does not cover it.",
+ "experiment_id": "laya-vs-random-2022-07-v1",
+ "status": "authorized",
+ "authorization": "User request in the Claude Code session of 2026-10-06: run exactly two fresh, sequential July 2022 episodes (production Laya selector, then a seeded uniform-random control); no other months, extra runs, tuning or baseline changes.",
+ "plan": {
+  "path": "docs/evaluations/laya_vs_random_plan_2026-10-06.md",
+  "sha256": "5dd2b59d6c40ed14e5e024d4352a9d1e24f460d1a34b5503326a6269d4f82e3c"
+ },
+ "arms": [
+  "laya",
+  "random"
+ ],
+ "run_kind": "evaluation",
+ "window": {
+  "start": "2022-07-01",
+  "end": "2022-07-31"
+ },
+ "pool": {
+  "path": "watchlist/experimental_pools/candidates60-v1-pool-2022-07-01-aafefb19a6c5.json",
+  "content_sha256": "c56a46727b701ac18a209031e9e2f6736c3d3e38c090649e721c13a99919c318",
+  "evidence_sha256": "aafefb19a6c54908a4fc747514decfdf02c356728c18de3fe20526dde4a6b387",
+  "universe_hash": "1f3d88b61b00441316e5c79e03bc11c0033b3eb6bbcf94d2d160256450d64d34",
+  "members": 48
+ },
+ "masking_seed": 42,
+ "random_seed": "laya-vs-random-2022-07-v1",
+ "k": 10,
+ "starting_equity": 100000,
+ "fundamentals_enabled": false,
+ "laya": {
+  "image": "hermes-laya-worker:2",
+  "image_id": "sha256:d423bbf734cfb4a887c8d108d81d78365daac7bc0dd6eb97d8f7267696822093",
+  "package_version": "0.3.23",
+  "checkpoint_revision": "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851",
+  "weights_sha256": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+  "question_format": "noul-criteria-v2"
+ },
+ "model": {
+  "model": "gpt-5.6-terra",
+  "provider": "openai-codex",
+  "reasoning_effort": "medium"
+ }
+}

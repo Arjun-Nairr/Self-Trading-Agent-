@@ -409,7 +409,8 @@ def test_only_selected_names_trigger_full_evidence_fetches_and_hermes_sees_no_la
     cap = _cycle(tmp_path, ctx)
     selected = _selected(tmp_path)
     assert len(selected) == 10
-    assert cap["tech_calls"] == [selected] and cap["news_calls"] == [selected]
+    shown = sorted(selected, key=cap["masking"].alias)             # neutral alias order, never the rank order
+    assert cap["tech_calls"] == [shown] and cap["news_calls"] == [shown]
     assert len(set(cap["tech_calls"][0])) == 10 < 30, "the other 20 names must trigger no technical/news fetch"
 
     # What Hermes was shown: only the selected, fully masked packet. (The masked RULES.md block
@@ -468,7 +469,8 @@ def test_held_position_keeps_exit_management_while_excluded_from_selection(tmp_p
     cap = _cycle(tmp_path, ctx, portfolio=held)
     selected = _selected(tmp_path)
     assert "OLN" not in selected and "OLN" not in ctx.fetch_calls[0][0]       # excluded from selection
-    assert cap["tech_calls"] == [selected + ["OLN"]] and cap["news_calls"] == [selected + ["OLN"]]
+    shown = sorted(selected, key=cap["masking"].alias) + ["OLN"]
+    assert cap["tech_calls"] == [shown] and cap["news_calls"] == [shown]
     m = cap["masking"]
     assert cap["evidence"][0]["input_payload"]["positions"][0]["alias"] == m.alias("OLN")
     assert cap["evidence"][0]["input_payload"]["positions"][0]["tech"] is not None

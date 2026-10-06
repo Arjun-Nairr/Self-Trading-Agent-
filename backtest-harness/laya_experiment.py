@@ -36,6 +36,7 @@ import json
 import math
 import os
 import queue
+import random
 import subprocess
 import threading
 import uuid
@@ -50,7 +51,8 @@ from laya_selector import (
     MAX_SELECTED, SELECTOR_VERSION, STATUS_DATA_UNAVAILABLE, STATUS_NOT_SELECTED,
     STATUS_SELECTED, CandidateCard, CardScorer, FixedUniverse, ScoreRecord, ScorerError,
     ScorerMetadata, SelectionSnapshot, SnapshotConflict, build_snapshot, load_snapshot,
-    make_row_ids, score_complete_cards, snapshot_to_json, write_snapshot,
+    SNAPSHOT_SCHEMA_VERSION, SelectionRow, inputs_digest, make_row_ids, score_complete_cards,
+    select_pool, snapshot_to_json, write_snapshot,
 )
 
 HERE = Path(__file__).resolve().parent
@@ -105,6 +107,8 @@ class SelectorOutcome:
 # --------------------------------------------------------------------------
 
 class SelectorContext:
+    mode = SELECTOR_MODE_LAYA_FIXED30
+
     def __init__(
         self, *, universe: FixedUniverse, seed: int, run_id: str, snapshot_dir: Path,
         scorer: CardScorer,
@@ -124,7 +128,7 @@ class SelectorContext:
     def select_for_day(self, day: date, held: Collection[str]) -> SelectorOutcome:
         eligible = [s for s in self.universe.symbols if s not in held]
         base = {
-            "mode": SELECTOR_MODE_LAYA_FIXED30,
+            "mode": self.mode,
             "universe_hash": self.universe.hash,
             "eligible": len(eligible),
             "excluded_held_or_pending": len(self.universe.symbols) - len(eligible),
@@ -211,6 +215,94 @@ class SelectorContext:
         }
         return SelectorOutcome(ok=True, selected=tuple(t for _, t in selected),
                                status_by_ticker=status, event=event)
+
+
+# --------------------------------------------------------------------------
+# seeded uniform-random CONTROL selector (laya-vs-random experiment)
+# --------------------------------------------------------------------------
+
+SELECTOR_MODE_RANDOM_CONTROL = "random_control_experimental"
+RANDOM_CONTROL_VERSION = "uniform-random-control-v1"
+_NO_SCORE_REASON = "no review score returned for this card"   # laya_selector.select_pool's wording
+
+
+def random_draw_seed(experiment_seed: str, day: date) -> int:
+    """Per-session draw seed: first 8 bytes (big-endian) of
+    sha256("<experiment_seed>|<ISO session date>")."""
+    return int.from_bytes(hashlib.sha256(f"{experiment_seed}|{day.isoformat()}".encode()).digest()[:8], "big")
+
+
+def select_random(cards: Sequence[CandidateCard], *, as_of: date, seed: int, draw_seed: int,
+                  latest_bar_dates: Mapping[str, date] | None = None,
+                  k: int = MAX_SELECTED) -> tuple[SelectionRow, ...]:
+    """Up to `k` cards drawn uniformly WITHOUT replacement by
+    random.Random(draw_seed) from the sorted row IDs of the selectable cards.
+    Availability is exactly laya_selector.select_pool's rule (incomplete or
+    stale cards are data_unavailable with select_pool's own reasons): it is
+    obtained by calling select_pool with NO scores, so every selectable card
+    comes back as "no review score". Nothing is scored -- review_probability
+    and answer_confidence stay None; `rank` is a selected row's draw position."""
+    base = select_pool(cards, {}, as_of=as_of, seed=seed, latest_bar_dates=latest_bar_dates, k=k)
+    fresh = {r.row_id: r for r in base if r.reason == _NO_SCORE_REASON}
+    drawn = random.Random(draw_seed).sample(sorted(fresh), min(k, len(fresh)))
+    rows = [SelectionRow(row_id=rid, status=STATUS_SELECTED,
+                         reason=f"random draw {i} of {len(drawn)} (draw seed {draw_seed})", rank=i,
+                         review_probability=None, answer_confidence=None, data_complete=True,
+                         freshness=fresh[rid].freshness, tie_break_key=fresh[rid].tie_break_key)
+            for i, rid in enumerate(drawn, start=1)]
+    rows += [SelectionRow(row_id=rid, status=STATUS_NOT_SELECTED, reason="not drawn", rank=None,
+                          review_probability=None, answer_confidence=None, data_complete=True,
+                          freshness=fresh[rid].freshness, tie_break_key=fresh[rid].tie_break_key)
+             for rid in sorted(set(fresh) - set(drawn))]
+    return tuple(rows) + tuple(r for r in base if r.reason != _NO_SCORE_REASON)
+
+
+class RandomControl:
+    """Stands in the scorer slot of a RandomSelectorContext ONLY to carry the
+    control's identity (provider "random_control"); it never scores."""
+
+    def __init__(self, experiment_seed: str) -> None:
+        self.metadata = ScorerMetadata(
+            provider="random_control", package_version=RANDOM_CONTROL_VERSION, checkpoint="none",
+            revision=None, question="",
+            settings=json.dumps({"control": "uniform_random_without_replacement", "k": MAX_SELECTED,
+                                 "experiment_seed": experiment_seed,
+                                 "draw_seed": "sha256(experiment_seed|session)[:8] big-endian"},
+                                sort_keys=True, separators=(",", ":")))
+
+    def score(self, cards: Sequence[CandidateCard]) -> list[ScoreRecord]:
+        raise ScorerError("the random control never scores cards")
+
+
+class RandomSelectorContext(SelectorContext):
+    """Same eligibility (held/pending excluded), card building, availability,
+    up-to-10 limit, immutable per-date snapshot and replay checks as the Laya
+    SelectorContext -- only the choice differs: a seeded uniform draw."""
+    mode = SELECTOR_MODE_RANDOM_CONTROL
+
+    def __init__(self, *, experiment_seed: str, **kw: Any) -> None:
+        self.experiment_seed = experiment_seed
+        super().__init__(scorer=RandomControl(experiment_seed), **kw)
+
+    def _build_and_store(self, day: date, eligible: Sequence[str]) -> SelectionSnapshot:
+        history = self._fetch_history(eligible, day) if eligible else {}
+        ids = {s: self.row_ids[s] for s in eligible}
+        cards, latest, _reasons = build_day_cards(history, eligible, day, ids)
+        rows = select_random(cards, as_of=day, seed=self.seed,
+                             draw_seed=random_draw_seed(self.experiment_seed, day), latest_bar_dates=latest)
+        snap = SelectionSnapshot(
+            schema_version=SNAPSHOT_SCHEMA_VERSION, selector_version=SELECTOR_VERSION,
+            scorer=self.scorer.metadata, universe_version=self.universe.version,
+            universe_hash=self.universe.hash, as_of=day.isoformat(), seed=self.seed, k=MAX_SELECTED,
+            inputs_digest=inputs_digest(cards, latest), rows=rows)
+        try:
+            write_snapshot(self.snapshot_dir, self.run_id, snap)
+        except SnapshotConflict:
+            existing = load_snapshot(self.snapshot_dir, self.run_id, day.isoformat())
+            if existing is None:
+                raise
+            return existing
+        return snap
 
 
 # --------------------------------------------------------------------------

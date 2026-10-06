@@ -5494,7 +5494,10 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             "selected": len(selector_outcome.selected), "k": 10,
             "shortfall": len(selector_outcome.selected) < 10,
             "status": "selected" if selector_outcome.ok else "failed_closed"})
-        candidate_tickers = list(selector_outcome.selected)
+        # Neutral presentation order (alias order, the same order the masked
+        # rules block lists the universe in): the order Hermes sees never
+        # carries a selector's rank or a random draw's order.
+        candidate_tickers = sorted(selector_outcome.selected, key=masking.alias)
         summary["selector"] = dict(selector_outcome.event)
     _wf.emit("evidence", "started", {"shortlisted": len(candidate_tickers), "held": len(held_tickers)})
     all_technicals = (fetch_technicals(candidate_tickers + held_tickers, day)
