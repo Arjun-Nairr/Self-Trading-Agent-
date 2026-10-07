@@ -10,6 +10,7 @@ nobody can fully test is not a safety layer").
 
 Run: python test_execution_semantics.py
 """
+from run_backtest import levels_payload  # observed-only level fixtures (integrity repair)
 import json
 import tempfile
 import uuid
@@ -475,7 +476,7 @@ def test_real_lifecycle_checkpoint_commit_then_best_effort_observability():
     fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
     fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
-                               "support": [95.0], "resistance": [110.0]}}
+                               **levels_payload(93.0, 110.0)}}   # the BUY's stop is the observed low
     fake_news = {"OLN": []}
 
     journal_calls = []
@@ -1440,7 +1441,7 @@ def test_stopped_out_today_resets_unconditionally_even_on_a_quiet_day():
     fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
     fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
-                               "support": [95.0], "resistance": [110.0]}}
+                               **levels_payload(95.0, 110.0)}}
 
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "nothing qualifies today"},
@@ -2467,9 +2468,14 @@ def _run_backtest_scenario(portfolio, day, day_index, run_key, masking, watchlis
 
     fake_bars = {t["symbol"]: {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0}
                 for t in watchlist}
+    # Each proposed BUY's stop is supplied as that ticker's observed low, so
+    # these scenarios keep testing sizing/escalation, not level evidence
+    # (test_integrity_repair.py owns that).
+    stop_by_alias = {d.get("alias"): d.get("stop_price") for d in decisions_to_propose
+                     if str(d.get("action", "")).upper() == "BUY" and d.get("stop_price") is not None}
     fake_technicals = {t["symbol"]: {"price": 100.0, "rsi": 50.0, "rsi_signal": "neutral",
                                      "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
-                                     "support": [95.0], "resistance": [110.0]}
+                                     **levels_payload(stop_by_alias.get(masking.alias(t["symbol"]), 95.0), 110.0)}
                        for t in watchlist}
     fake_news = news_payload if news_payload is not None else {t["symbol"]: [] for t in watchlist}
     intraday_needed = sorted(set(portfolio.holdings) | {o.ticker for o in portfolio.pending_orders})
@@ -2615,7 +2621,7 @@ def _evidence_scenario(decisions_to_propose, tmp_dir):
     fake_bars = {t: {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5} for t in ("OLN", "DINO")}
     fake_technicals = {t: {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
                            "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
-                           "support": [95.0], "resistance": [110.0]} for t in ("OLN", "DINO")}
+                           **levels_payload(95.0, 110.0)} for t in ("OLN", "DINO")}
     fake_news = {"OLN": [], "DINO": []}
 
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
@@ -2889,7 +2895,7 @@ def test_evidence_write_failure_then_replay_does_not_call_hermes_twice():
     fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
     fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
-                               "support": [95.0], "resistance": [110.0]}}
+                               **levels_payload(95.0, 110.0)}}
 
     hermes_calls = []
 
@@ -2975,7 +2981,7 @@ def test_checkpoint_replay_derives_candidate_status_from_the_checkpoint_not_a_fr
     fake_bars = {t: {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5} for t in ("OLN", "DINO")}
     both_technicals = {t: {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
                            "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
-                           "support": [95.0], "resistance": [110.0]} for t in ("OLN", "DINO")}
+                           **levels_payload(95.0, 110.0)} for t in ("OLN", "DINO")}
     # Replay-time fetch deliberately returns a DIFFERENT candidate set (DINO
     # dropped) -- must have zero effect on the recorded evidence.
     only_olin_technicals = {"OLN": both_technicals["OLN"]}
@@ -3048,7 +3054,7 @@ def test_checkpoint_replay_reuses_fundamentals_provenance_never_refetches():
     fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
     fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
-                               "support": [95.0], "resistance": [110.0]}}
+                               **levels_payload(95.0, 110.0)}}
 
     class _FakeSnapshot:
         def __init__(self, cik):
@@ -3122,7 +3128,7 @@ def test_active_limits_reflects_a_non_default_risklimits_instance():
     fake_bars = {"OLN": {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5}}
     fake_technicals = {"OLN": {"price": 100.5, "rsi": 50.0, "rsi_signal": "neutral",
                                "macd_signal": "bullish", "trend": "up", "outlook": "neutral",
-                               "support": [95.0], "resistance": [110.0]}}
+                               **levels_payload(95.0, 110.0)}}
 
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False, run_id=None, day_index=None, runtime=None):
         return HermesResult(response={"decisions": [], "no_action_reason": "n/a"},
@@ -3379,7 +3385,7 @@ def test_run_day_rejects_a_buy_for_an_alias_absent_from_this_cycles_candidates()
     m = _two_ticker_masking()
     technicals = {
         "OLN": {"price": 100.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-               "trend": "up", "outlook": "neutral", "support": [95.0], "resistance": [110.0]},
+               "trend": "up", "outlook": "neutral", **levels_payload(95.0, 110.0)},
         "WMG": {"error": "simulated maverick outage for WMG"},
     }
 
@@ -3409,9 +3415,9 @@ def test_run_day_still_queues_a_normal_valid_candidate_proposal_unchanged():
     m = _two_ticker_masking()
     technicals = {
         "OLN": {"price": 100.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-               "trend": "up", "outlook": "neutral", "support": [95.0], "resistance": [110.0]},
+               "trend": "up", "outlook": "neutral", **levels_payload(93.0, 110.0)},
         "WMG": {"price": 50.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-               "trend": "up", "outlook": "neutral", "support": [45.0], "resistance": [55.0]},
+               "trend": "up", "outlook": "neutral", **levels_payload(45.0, 55.0)},
     }
 
     def fake_ask_hermes(prompt, usage_totals, is_reflection_day=False, fundamentals_enabled=False,
@@ -3464,9 +3470,9 @@ def test_run_day_routes_recent_insights_through_the_leak_gate():
     m = _two_ticker_masking()
     technicals = {
         "OLN": {"price": 100.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-               "trend": "up", "outlook": "neutral", "support": [95.0], "resistance": [110.0]},
+               "trend": "up", "outlook": "neutral", **levels_payload(95.0, 110.0)},
         "WMG": {"price": 50.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-               "trend": "up", "outlook": "neutral", "support": [45.0], "resistance": [55.0]},
+               "trend": "up", "outlook": "neutral", **levels_payload(45.0, 55.0)},
     }
     watchlist = [{"symbol": "OLN", "sector": "Basic Materials"},
                 {"symbol": "WMG", "sector": "Communication Services"}]
@@ -3939,7 +3945,7 @@ def test_pre_fill_gate_cancelled_order_resolves_once_and_is_deterministic_across
     fake_bars = {t: {"open": 100.0, "high": 101.0, "low": 99.0, "close": 100.5} for t in ("OLN", "WMG")}
     fake_technicals = {
         t: {"price": 100.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-            "trend": "up", "outlook": "neutral", "support": [95.0], "resistance": [110.0]}
+            "trend": "up", "outlook": "neutral", **levels_payload(95.0, 110.0)}
         for t in ("OLN", "WMG")
     }
     tmp_dir = Path(tempfile.mkdtemp())
@@ -4637,8 +4643,8 @@ def test_build_prompt_embeds_masked_rules_md_and_bumps_schema_version():
     straight past the entire masking gate. Without a masking object
     (existing formula-only test call sites), the block is skipped
     entirely rather than ever risking an unmasked embed."""
-    assert PROMPT_SCHEMA_VERSION == 3, \
-        "build_prompt's shape changed (RULES.md block + no-tools notice) -- the schema version must say so"
+    assert PROMPT_SCHEMA_VERSION == 4, \
+        "build_prompt's shape changed (RULES.md block + no-tools notice; observed-only levels) -- the schema version must say so"
 
     account = {"equity": 100_000.0, "cash": 100_000.0, "exposure_pct": 0.0,
               "daily_pl_pct": 0.0, "weekly_pl_pct": 0.0, "drawdown_pct": 0.0}

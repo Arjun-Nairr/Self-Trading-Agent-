@@ -399,6 +399,21 @@ unapproved pending that decision.
         `close × 0.95` level.
     - **Next:** a masking and level-provenance repair block, with
       regression tests, before any further performance claim or run.
+    - **Repair implemented 2026-10-07**
+      (`docs/evaluations/integrity_repair_2026-10-07.md`; offline only):
+      - **Masking:** verified identity variants are added; other parties
+        are neutrally redacted; an independent known-cue/residue check
+        runs on the final decision and gate prompts and at every Hermes
+        call.
+      - **Levels:** agent-facing levels are observed 30-session extremes
+        only, with provenance. A BUY stop must equal a supplied observed
+        support level, or the BUY is rejected before queueing.
+      - **Checks:** 35 new regressions; suite 593 passed; `verify.py`
+        12/12; no container rebuild needed.
+      - **Still needed:** a separately authorized acceptance run. The
+        pilot's historical caveats stand.
+      - **Outside this block:** live-mode maverick levels are still
+        synthetic (fixing them needs a `maverick-mcp` rebuild).
 
     **Fine-tuning preparation (2026-10-05); human label review required. Not
     approved for training** (`docs/scopes/LAYA_FINETUNE_PILOT_V0.md`).

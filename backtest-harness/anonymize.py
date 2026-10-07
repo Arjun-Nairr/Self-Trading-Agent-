@@ -145,6 +145,31 @@ _YEAR_PATTERN = re.compile(r"\b(?:19|20)\d{2}\b")
 _DATE_REDACTED = "[DATE REDACTED]"
 _YEAR_REDACTED = "[YEAR REDACTED]"
 
+# OTHER parties whose names identify a masked company (and often the period):
+# investors, partners, affiliates, separately listed subsidiaries, products.
+# They are NOT the company, so they never become its alias -- they become a
+# neutral role token, keeping the sentence's meaning ("[REDACTED INVESTOR]
+# boosts stake ..."). Verified in stored prompts (laya_vs_random report §11,
+# integrity audit H4); config, not code. Longest-first, case-insensitive.
+NEUTRAL_REDACTIONS: dict[str, str] = {
+    "Berkshire Hathaway": "[REDACTED INVESTOR]",
+    "Berkshire": "[REDACTED INVESTOR]",
+    "Warren Buffett": "[REDACTED INVESTOR]",
+    "Buffett": "[REDACTED INVESTOR]",
+    "Charlie Munger": "[REDACTED INVESTOR]",
+    "Great Wolf Resorts": "[REDACTED PARTNER]",
+    "Great Wolf": "[REDACTED PARTNER]",
+    "Holly Energy Partners": "[REDACTED AFFILIATE]",
+    "Aspen Technology": "[REDACTED SUBSIDIARY]",
+    "AspenTech": "[REDACTED SUBSIDIARY]",
+    "Wordle": "[REDACTED PRODUCT]",
+    "PF Black Card": "[REDACTED PRODUCT]",
+}
+_REDACTION_PATTERNS = [
+    (re.compile(rf"(?<![A-Za-z0-9]){re.escape(term)}(?![A-Za-z0-9])", re.IGNORECASE), token)
+    for term, token in sorted(NEUTRAL_REDACTIONS.items(), key=lambda kv: len(kv[0]), reverse=True)
+]
+
 
 def _term_pattern(term: str, case_sensitive: bool = False) -> re.Pattern[str]:
     r"""Word-boundary-anchored matcher for a company name or ticker.
@@ -296,6 +321,8 @@ class RunMasking:
         absolute dates and years."""
         for pattern, ticker in self._patterns:
             text = pattern.sub(self._to_alias[ticker], text)
+        for pattern, token in _REDACTION_PATTERNS:
+            text = pattern.sub(token, text)
         for pattern in _DATE_PATTERNS:
             text = pattern.sub(_DATE_REDACTED, text)
         return _YEAR_PATTERN.sub(_YEAR_REDACTED, text)

@@ -69,6 +69,7 @@ from zoneinfo import ZoneInfo
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "risk-checker"))
 
 from anonymize import RunMasking                                    # noqa: E402
+import identity_cues                                                # noqa: E402
 from risk_checker import (                                          # noqa: E402
     AccountState, Context, MarketClock, Position, ProposedTrade, RiskLimits,
     check_trade,
@@ -96,7 +97,10 @@ STARTING_EQUITY = 100_000.0
 # RULES.md's full verbatim text plus an explicit no-tools-available
 # notice -- every cycle's rendered prompt genuinely changed shape, so an
 # old evidence row's prompt_text is visibly told apart from a new one.
-PROMPT_SCHEMA_VERSION = 3
+# 4 (2026-10-07 integrity repair): candidate levels are observed-only with
+# provenance (S#/R#), plus a STOP EVIDENCE instruction; maverick's synthetic
+# percentage levels are no longer rendered.
+PROMPT_SCHEMA_VERSION = 4
 # The masking seed used when nothing is stored yet and no --seed is given
 # (a fresh or --reset run) -- was argparse's own default before item 7's
 # seed-persistence fix; unchanged in value, only in where it lives.
@@ -158,6 +162,20 @@ _BRAND_OVERRIDES = {
     "SFM": ["Sprouts"],
     "BRX": ["Brixmor"],
     "ALGM": ["Allegro"],
+    # 2026-10-07 integrity repair: identity variants verified in stored
+    # backtest prompts (laya_vs_random report §11; integrity audit H4) --
+    # former names, abbreviations, labels/subsidiaries and partial-name
+    # forms of the COMPANY ITSELF, so they map to its alias. Other parties
+    # (investors, partners, affiliates, products) are neutrally redacted in
+    # anonymize.NEUTRAL_REDACTIONS instead. A bare "Marathon"/"Warner" is
+    # deliberately absent: those also name unrelated companies.
+    "ATI": ["Allegheny Technologies", "Allegheny Technologies Incorporated"],
+    "DINO": ["HollyFrontier", "HollyFrontier Corporation"],
+    "WMG": ["Warner Records", "Warner Chappell", "Warner Chappell Music"],
+    "AIG": ["American Intl Gr", "American Intl Group"],
+    "SCHW": ["Charles Schwab"],
+    "HBAN": ["Huntington Bancshares"],
+    "MPC": ["Marathon Los Angeles"],
 }
 
 
@@ -2072,9 +2090,112 @@ asyncio.run(main())
     return json_from(run_in("alpaca-mcp", script))["bars"]
 
 
-def fetch_technicals(tickers: list[str], day: date) -> dict[str, dict]:
-    """Point-in-time technicals — `as_of` is the no-future-data gate."""
-    script = f'''
+# 2026-10-07 integrity repair: maverick's support_resistance mixes the 30-bar
+# low/high with SYNTHETIC close x 0.90/0.95/1.05/1.10 values, and every BUY
+# stop in the July 2022 pilot sat on the synthetic 0.95 level. Agent-facing
+# levels are now ONLY observed extremes, computed here from the same price
+# source's daily bars (point-in-time: bars after the decision date are never
+# used), each with its provenance. Not pivot analysis.
+LEVEL_LOOKBACK_SESSIONS = 30          # = maverick's own sr_lookback window
+LEVEL_METHOD = ("observed extremes: lowest intraday low / highest intraday high of the last 30 daily "
+                "sessions through the decision close (not pivot analysis)")
+STOP_EVIDENCE_TOLERANCE = 0.01        # dollars: a stop must equal a supplied observed support level
+_TECH_FIELDS = ("price", "rsi", "rsi_signal", "macd_signal", "trend", "outlook")
+
+
+def levels_payload(low: float, high: float, sessions: int = LEVEL_LOOKBACK_SESSIONS) -> dict:
+    """The agent-facing level fields for one candidate: observed values only,
+    each with a reference (S1/R1) and its provenance. No calendar metadata."""
+    low, high = round(float(low), 2), round(float(high), 2)
+    return {"support": [low], "resistance": [high],
+            "level_evidence": {"method": LEVEL_METHOD, "lookback_sessions": sessions,
+                               "levels": {"S1": {"price": low, "kind": "observed_low"},
+                                          "R1": {"price": high, "kind": "observed_high"}}}}
+
+
+def _no_levels(reason: str) -> dict:
+    return {"support": [], "resistance": [], "level_evidence": {"method": LEVEL_METHOD, "unavailable": reason}}
+
+
+def observed_levels_from_bars(bars, as_of: date, lookback: int = LEVEL_LOOKBACK_SESSIONS) -> dict:
+    """Observed lookback-session low/high from daily bars dated ON OR BEFORE
+    `as_of` (later bars are dropped -- the point-in-time gate). Fails to
+    `unavailable` (no levels, so no evidenced stop) on no bars, a malformed or
+    non-finite bar, no bar on `as_of` itself, or fewer than `lookback`
+    sessions. Provenance comes from this calculation, never from whether a
+    number happens to equal a percentage of price."""
+    if not isinstance(bars, list) or not bars:
+        return _no_levels("no bars")
+    by_date = {}
+    for b in bars:
+        try:
+            d = date.fromisoformat(str(b["date"])[:10])
+            hi, lo = float(b["high"]), float(b["low"])
+        except (KeyError, TypeError, ValueError):
+            return _no_levels("malformed bar")
+        if not (math.isfinite(hi) and math.isfinite(lo)) or lo <= 0 or hi < lo:
+            return _no_levels("malformed bar")
+        if d <= as_of:
+            by_date[d] = (hi, lo)
+    if not by_date or max(by_date) != as_of:
+        return _no_levels("no bar on the decision date")
+    window = [by_date[d] for d in sorted(by_date)][-lookback:]
+    if len(window) < lookback:
+        return _no_levels(f"fewer than {lookback} sessions of history")
+    return levels_payload(min(lo for _, lo in window), max(hi for hi, _ in window), lookback)
+
+
+def _valid_levels(tech: dict) -> dict:
+    """{ref: (price, kind)} from a candidate's level_evidence, or {} when it
+    is absent, unavailable or malformed."""
+    ev = (tech or {}).get("level_evidence")
+    levels = ev.get("levels") if isinstance(ev, dict) else None
+    if not isinstance(levels, dict):
+        return {}
+    out = {}
+    for ref, v in levels.items():
+        try:
+            price, kind = float(v["price"]), v["kind"]
+        except (KeyError, TypeError, ValueError):
+            return {}
+        if not math.isfinite(price) or price <= 0 or kind not in ("observed_low", "observed_high"):
+            return {}
+        out[ref] = (price, kind)
+    return out
+
+
+def stop_evidence(decision: dict, candidate: dict) -> "tuple[bool, dict | None]":
+    """BUY only: is the stop one of the candidate's SUPPLIED observed support
+    levels (to the cent)? -> (ok, record). The record (stored privately in
+    candidate_status) names the stop's level and states the target's actual
+    basis: a supplied observed resistance, or derived (no rule requires a
+    target to be a level). SELLs and held positions are never checked."""
+    if str(decision.get("action", "")).upper() != "BUY":
+        return True, None
+    levels = _valid_levels((candidate or {}).get("tech"))
+
+    def match(value, kind):
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return None
+        return next((ref for ref, (p, k) in sorted(levels.items())
+                     if k == kind and abs(p - v) <= STOP_EVIDENCE_TOLERANCE + 1e-9), None)
+
+    stop_ref = match(decision.get("stop_price"), "observed_low")
+    target_ref = match(decision.get("target_price"), "observed_high")
+    record = {"stop_ref": stop_ref, "stop_basis": "observed_low" if stop_ref else "unsupported",
+              "target_ref": target_ref,
+              "target_basis": "observed_high" if target_ref else "derived_not_a_supplied_level"}
+    return stop_ref is not None, record
+
+
+def _technicals_script(tickers: list[str], day: date) -> str:
+    """The maverick-mcp script: indicator fields from TechnicalService plus
+    the raw daily bars (same market-data service) for the observed levels.
+    maverick's own `levels` are deliberately NOT read."""
+    start = day - timedelta(days=LEVEL_LOOKBACK_SESSIONS * 2 + 30)
+    return f'''
 import asyncio, json
 from datetime import date
 from maverick.platform.config import get_platform_settings
@@ -2092,24 +2213,43 @@ async def main():
                            Cache(s.cache, redis_settings=s.redis), yf,
                            build_mover_fetcher(get_market_data_settings(), yf))
     tech = TechnicalService(md)
+    as_of = date.fromisoformat("{day}")
     out = {{}}
     for t in {tickers!r}:
         try:
-            r = await tech.get_full_analysis(t, as_of=date.fromisoformat("{day}"))
+            r = await tech.get_full_analysis(t, as_of=as_of)
             d = r.model_dump()
             out[t] = {{"price": d["current_price"],
                        "rsi": d["rsi"]["current"], "rsi_signal": d["rsi"]["signal"],
                        "macd_signal": d["macd"]["indicator_signal"],
-                       "trend": d["trend"]["direction"], "outlook": d["outlook"],
-                       "support": d["levels"]["support"][:3],
-                       "resistance": d["levels"]["resistance"][:3]}}
+                       "trend": d["trend"]["direction"], "outlook": d["outlook"]}}
         except Exception as e:
             out[t] = {{"error": str(e)[:120]}}
+            continue
+        try:
+            df = await md.get_price_history(t, date.fromisoformat("{start}"), as_of)
+            out[t]["bars"] = [{{"date": str(idx.date()), "high": float(r["High"]), "low": float(r["Low"]),
+                                "close": float(r["Close"])}} for idx, r in df.iterrows()]
+        except Exception as e:
+            out[t]["bars"] = {{"error": str(e)[:120]}}
     print(json.dumps({{"tech": out}}, default=str))
 
 asyncio.run(main())
 '''
-    return json_from(run_in("maverick-mcp", script))["tech"]
+
+
+def fetch_technicals(tickers: list[str], day: date) -> dict[str, dict]:
+    """Point-in-time technicals -- `as_of` is the no-future-data gate. Only
+    the indicator fields plus observed levels (observed_levels_from_bars)
+    are passed on; raw bars and anything else stay here."""
+    raw = json_from(run_in("maverick-mcp", _technicals_script(tickers, day)))["tech"]
+    out = {}
+    for t, r in raw.items():
+        if not isinstance(r, dict) or "error" in r:
+            out[t] = r if isinstance(r, dict) else {"error": "malformed technicals result"}
+            continue
+        out[t] = {**{k: r[k] for k in _TECH_FIELDS if k in r}, **observed_levels_from_bars(r.get("bars"), day)}
+    return out
 
 
 def fetch_news(tickers: list[str], day: date, decision_cutoff_at: str) -> dict[str, list]:
@@ -2515,7 +2655,7 @@ def _parse_pre_fill_confirmation(raw: str, aliases: list[str]) -> dict[str, str]
 def apply_pre_fill_news_gate(
     pending_orders: list["QueuedOrder"], fill_day: date, masking: RunMasking,
     usage_totals: dict, fetch_news_fn=None, call_hermes_fn=None,
-    checkpointed_gate: dict | None = None,
+    checkpointed_gate: dict | None = None, watchlist: "list[dict] | None" = None,
 ) -> tuple[list["QueuedOrder"], list[dict], dict | None]:
     """Harness-owned overnight/pre-fill news gate. Runs BEFORE
     simulate_trading_day, using real I/O outside the risk checker (which
@@ -2702,6 +2842,10 @@ def apply_pre_fill_news_gate(
                 [{"alias": b["alias"], "articles": b["articles"]} for b in batch]
             )
             masking.assert_clean(prompt)
+            # Independent known-cue/residue check on the final gate prompt: a
+            # leak halts the cycle -- the order is neither confirmed nor
+            # treated as "no adverse news".
+            identity_cues.assert_prompt_clean(prompt, masking, watchlist, "pre-fill gate prompt")
             # 2026-09-27 hardening pass (M1/M3): call_hermes_fn now returns
             # raw response BYTES (matching _call_hermes's own real contract
             # -- see its docstring) -- hash before decode, same discipline
@@ -4122,6 +4266,20 @@ def package_rules_for_experiment(masked_rules: str, masking: "RunMasking",
     return masked_rules[:start] + section + masked_rules[end:]
 
 
+def _levels_line(t: dict) -> str:
+    """One candidate's observed levels with provenance, or an explicit
+    'unavailable' line (no evidenced stop, so no BUY). Never synthetic."""
+    levels = _valid_levels(t)
+    ev = t.get("level_evidence") if isinstance(t.get("level_evidence"), dict) else {}
+    if not levels:
+        return (f"      observed levels unavailable ({ev.get('unavailable', 'no level evidence')}) "
+                "-- no evidenced stop exists, so no BUY")
+    names = {"observed_low": "observed low", "observed_high": "observed high"}
+    parts = "  ".join(f"{ref} ${p:.2f} ({names[k]})" for ref, (p, k) in sorted(levels.items()))
+    return (f"      observed levels [lowest low / highest high of the last {ev.get('lookback_sessions')} "
+            f"sessions through today's close; not pivot analysis]: {parts}")
+
+
 def build_prompt(day_label: str, account: dict, positions: list[dict],
                  candidates: list[dict], recent_insights: list[str],
                  reflection_trades: list[dict] | None = None,
@@ -4230,6 +4388,14 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         "    cash size          = floor(remaining_cash / sizing price)",
         "    required quantity  = min(stop-based size, concentration size, cash size)",
         "",
+        "STOP EVIDENCE (RULES.md §6a: a real technical level, not an arbitrary percentage)",
+        "  The only technical levels supplied are each candidate's observed levels (S#/R#).",
+        "  A BUY's stop_price must EQUAL one of that candidate's observed support levels (S#),",
+        "  to the cent; any other stop (e.g. a percentage of price) is rejected before queueing.",
+        "  If no observed support level puts the stop inside the §6a band, do not propose that BUY.",
+        "  A target may be an observed resistance (R#) or derived from your reward:risk; it is",
+        "  recorded as whichever it is.",
+        "",
     ]
 
     lines.append("OPEN POSITIONS")
@@ -4277,7 +4443,7 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
             f" ({t['rsi_signal']}) | MACD {t['macd_signal']} | trend {t['trend']}"
             f" | outlook {t['outlook']}"
         )
-        lines.append(f"      support {t['support']}  resistance {t['resistance']}")
+        lines.append(_levels_line(t))
         for a in c["news"][:3]:
             lines.append(f"      news ({a['age_days']}d ago): {a['headline'][:110]}")
         if fundamentals_enabled:
@@ -4428,7 +4594,7 @@ def _full_candidate_status(all_tickers: list[str], held_tickers: list[str],
     silently dropped), or 'proposed'/'no_proposal' (delegated to
     _candidate_status, unchanged)."""
     candidate_aliases = {c["alias"] for c in candidates}
-    proposed_status = {c["alias"]: c["status"] for c in _candidate_status(candidates, response)}
+    proposed_rows = {c["alias"]: c for c in _candidate_status(candidates, response)}
     out = []
     for ticker in all_tickers:
         alias = masking.alias(ticker)
@@ -4437,7 +4603,7 @@ def _full_candidate_status(all_tickers: list[str], held_tickers: list[str],
         elif alias not in candidate_aliases:
             out.append(_non_candidate_status(ticker, alias, selector_status))
         else:
-            out.append({"alias": alias, "status": proposed_status.get(alias, "no_proposal")})
+            out.append(proposed_rows.get(alias, {"alias": alias, "status": "no_proposal"}))
     return out
 
 
@@ -4472,10 +4638,17 @@ def _candidate_status(candidates: list[dict], response: dict) -> list[dict]:
     proposed_aliases = {
         d.get("alias") for d in response.get("decisions", []) if isinstance(d, dict)
     }
-    return [
-        {"alias": c["alias"], "status": "proposed" if c["alias"] in proposed_aliases else "no_proposal"}
-        for c in candidates
-    ]
+    out = []
+    for c in candidates:
+        row = {"alias": c["alias"], "status": "proposed" if c["alias"] in proposed_aliases else "no_proposal"}
+        # Private stop/target evidence for a proposed BUY (2026-10-07): which
+        # supplied observed level the stop used, and the target's real basis.
+        buy = next((d for d in response.get("decisions", []) if isinstance(d, dict)
+                    and d.get("alias") == c["alias"] and str(d.get("action", "")).upper() == "BUY"), None)
+        if buy is not None:
+            row["stop_evidence"] = stop_evidence(buy, c)[1]
+        out.append(row)
+    return out
 
 
 @dataclass(frozen=True)
@@ -4549,6 +4722,10 @@ def _call_hermes(prompt: str, runtime: "HermesRuntime | None" = None) -> tuple[b
     H2) for this invocation only -- never the live `default` profile's
     sticky selection, and never the shared workdir the live agent's real
     AGENTS.md/RULES.md/SOUL.md are mounted at."""
+    # Last line of defence for EVERY model call (decision, retry, pre-fill
+    # gate): the independent known-cue list, checked on the exact text about
+    # to be sent. Raises before any subprocess -- the cycle halts.
+    identity_cues.assert_prompt_clean(prompt, where="Hermes prompt")
     runtime = runtime or _DEFAULT_HERMES_RUNTIME
     # --usage-file: real per-call token accounting (input/output/cache/
     # reasoning tokens, api_calls) written to a JSON report inside the
@@ -5135,7 +5312,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
     working.pending_orders, _pre_fill_gate_events, _pre_fill_gate_call_evidence = apply_pre_fill_news_gate(
         working.pending_orders, day, masking, summary["usage"],
         fetch_news_fn=fetch_news_window, call_hermes_fn=lambda p: _call_hermes(p, runtime),
-        checkpointed_gate=(checkpoint or {}).get("pre_fill_gate"),
+        checkpointed_gate=(checkpoint or {}).get("pre_fill_gate"), watchlist=watchlist,
     )
     # Durably checkpoint the gate's OWN verdicts the instant they're known
     # -- BEFORE the main Hermes call below, which may itself fail/crash.
@@ -5649,6 +5826,10 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
                           fundamentals_enabled=fundamentals_enabled,
                           masking=masking,
                           experimental_universe=watchlist if selector is not None else None)
+    # The FINAL rendered text, not just the packets above: the independent
+    # known-cue list plus alias-adjacent legal-name residues. Fails closed
+    # (cycle halts) before any Hermes call.
+    identity_cues.assert_prompt_clean(prompt, masking, watchlist, "decision prompt")
 
     # -- checkpoint gate (2026-08-28 correctness pass, item 2) ------------
     # A retry of this EXACT (run_key, day_index) reuses the response
@@ -5948,6 +6129,25 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         except (TypeError, ValueError):
             summary["blocked"].append(f"{real_ticker}: invalid entry_price -- cannot queue")
             continue
+        if action == "BUY":
+            # 2026-10-07 integrity repair: the stop must be one of THIS
+            # candidate's supplied observed support levels (checkpoint-
+            # consistent input_payload, the same evidence Hermes was shown).
+            # No fallback level is ever manufactured: no evidenced in-band
+            # stop means no entry. Controller-side; risk_checker unchanged.
+            _cand = next((c for c in input_payload["candidates"] if c["alias"] == decision["alias"]), None)
+            _ok, _ = stop_evidence(decision, _cand)
+            if not _ok:
+                _have = ", ".join(f"{r} ${p:.2f}" for r, (p, k) in sorted(_valid_levels((_cand or {}).get("tech")).items())
+                                  if k == "observed_low") or "none supplied"
+                line = (
+                    f"{real_ticker}: decision-time evidence check rejected -- §6a: stop {stop_price!r} "
+                    f"is not a supplied observed support level (observed supports: {_have}) "
+                    f"[profile={working.profile_level} min_rr={active_min_rr}]"
+                )
+                summary["blocked"].append(line)
+                activity.append(("risk_check", line, None))
+                continue
 
         proposal = ProposedTrade(
             ticker=real_ticker, action=action, quantity=quantity,

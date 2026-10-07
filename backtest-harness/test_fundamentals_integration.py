@@ -18,6 +18,7 @@ fundamentals_v1_acceptance.md's follow-up integration milestone:
 
 Run: python test_fundamentals_integration.py
 """
+from run_backtest import levels_payload  # observed-only level fixtures (integrity repair)
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -175,7 +176,7 @@ def test_build_prompt_fundamentals_rendering_never_leaks_identity():
     candidate = {
         "alias": "ALPHA", "sector": "Tech",
         "tech": {"price": 100.0, "rsi": 55.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-                  "trend": "up", "outlook": "positive", "support": [95], "resistance": [110]},
+                  "trend": "up", "outlook": "positive", **levels_payload(95, 110)},
         "news": [],
         "fundamentals": mask_fundamentals({
             "ok": True,
@@ -222,7 +223,7 @@ def test_fundamentals_prompt_never_renders_a_raw_magnitude_only_ratio_growth_con
     candidate = {
         "alias": "ALPHA", "sector": "Tech",
         "tech": {"price": 100.0, "rsi": 55.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-                  "trend": "up", "outlook": "positive", "support": [95], "resistance": [110]},
+                  "trend": "up", "outlook": "positive", **levels_payload(95, 110)},
         "news": [], "fundamentals": masked,
     }
     account = {"equity": 100000, "cash": 90000, "exposure_pct": 10.0, "drawdown_pct": 0}
@@ -403,7 +404,7 @@ def test_build_prompt_default_output_unchanged_without_fundamentals():
     candidate_plain = {
         "alias": "ALPHA", "sector": "Tech",
         "tech": {"price": 100.0, "rsi": 55.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-                  "trend": "up", "outlook": "positive", "support": [95], "resistance": [110]},
+                  "trend": "up", "outlook": "positive", **levels_payload(95, 110)},
         "news": [],
     }
     account = {"equity": 100000, "cash": 90000, "exposure_pct": 10.0, "drawdown_pct": 0}
@@ -424,7 +425,7 @@ def test_build_prompt_with_fundamentals_key_present_but_disabled_still_omits_it(
     candidate = {
         "alias": "ALPHA", "sector": "Tech",
         "tech": {"price": 100.0, "rsi": 55.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-                  "trend": "up", "outlook": "positive", "support": [95], "resistance": [110]},
+                  "trend": "up", "outlook": "positive", **levels_payload(95, 110)},
         "news": [],
         "fundamentals": {"available": True, "reason": None, "filing_age_days": 5,
                           "metrics": {"revenue": {"value": 1000}}},

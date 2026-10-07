@@ -5,6 +5,7 @@ real SelectorContext over a deterministic FAKE scorer and synthetic bars.
 No Docker, no Neon, no Hermes, no model weights, no trading/evaluation run.
 Run: python -m pytest -q test_laya_wiring.py
 """
+from run_backtest import levels_payload  # observed-only level fixtures (integrity repair)
 import json
 import socket
 import sys
@@ -90,7 +91,7 @@ def _masking():
 
 def _tech(**over):
     t = {"price": 100.0, "rsi": 50.0, "rsi_signal": "neutral", "macd_signal": "bullish",
-         "trend": "up", "outlook": "neutral", "support": [95.0], "resistance": [110.0]}
+         "trend": "up", "outlook": "neutral", **levels_payload(95.0, 110.0)}
     t.update(over)
     return t
 
