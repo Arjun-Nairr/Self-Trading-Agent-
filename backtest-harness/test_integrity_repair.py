@@ -188,12 +188,27 @@ def test_pre_fill_gate_prompt_with_an_unmasked_cue_is_refused_not_confirmed():
     art = {"headline": "Keybanc on Allegheny Technologies", "summary": "", "symbols": [],
            "created_at": "2022-07-05T12:00:00Z"}
     calls = []
-    with pytest.raises(DETECTED):
-        rb.apply_pre_fill_news_gate(
-            [_buy_order(legacy.alias("OLN"))], date(2022, 7, 5), legacy, {},
-            fetch_news_fn=lambda ts, a, b: {t: {"articles": [art], "complete": True} for t in ts},
-            call_hermes_fn=lambda p: calls.append(p) or (b"", {}), watchlist=wl)
+    sell = rb.QueuedOrder(ticker="DINO", alias=legacy.alias("DINO"), action="SELL", quantity=5, stop_price=None,
+                          target_price=None, entry_price=50.0, queued_day_index=0, decision={},
+                          decision_id="d-sell", decision_cutoff_at="2022-07-01T16:00:00-04:00")
+    buy = _buy_order(legacy.alias("OLN"))
+    surviving, events, evidence = rb.apply_pre_fill_news_gate(
+        [sell, buy], date(2022, 7, 5), legacy, {},
+        fetch_news_fn=lambda ts, a, b: {t: {"articles": [art], "complete": True} for t in ts},
+        call_hermes_fn=lambda p: calls.append(p) or (b"", {}), watchlist=wl)
     assert calls == [], "never sent, never confirmed, never read as 'no adverse news'"
+    assert surviving == [sell] and evidence is None
+    (ev,) = events
+    assert ev["outcome"] == "cancel" and ev["reason"] == rb.PRE_FILL_IDENTITY_CHECK_FAILED_REASON
+    assert ev["reason"] not in (rb.PRE_FILL_NEWS_VETO_REASON, rb.PRE_FILL_NEWS_UNAVAILABLE_REASON)
+    assert ev["verification_failure"]["check"] == "IdentityCueDetected"
+    assert "Allegheny" not in json.dumps({k: v for k, v in ev.items() if k != "order"})
+    # only identity failures are caught: a provider failure still propagates
+    with pytest.raises(RuntimeError):
+        rb.apply_pre_fill_news_gate(
+            [buy], date(2022, 7, 5), legacy, {}, watchlist=wl,
+            fetch_news_fn=lambda *a: (_ for _ in ()).throw(RuntimeError("provider down")),
+            call_hermes_fn=lambda p: calls.append(p) or (b"", {}))
     # repaired masker: the gate proceeds to Hermes with clean text
     fixed, wl2 = _pool_masking()
     sent = []
@@ -202,6 +217,66 @@ def test_pre_fill_gate_prompt_with_an_unmasked_cue_is_refused_not_confirmed():
         fetch_news_fn=lambda ts, a, b: {t: {"articles": [art], "complete": True} for t in ts},
         call_hermes_fn=lambda p: sent.append(p) or (json.dumps({"verdicts": []}).encode(), {}), watchlist=wl2)
     assert len(sent) == 1 and ic.find_known_cues(sent[0]) == []
+
+
+_CUTOFF = "2026-03-19T16:00:00-04:00"            # the session close before test_laya_wiring.DAY
+_UNSAFE = {"OLN": [{"headline": "Charles Schwab Cuts Its View On A Chemicals Peer", "summary": "",
+                    "created_at": f"{DAY}T12:00:00Z", "symbols": []}]}   # 08:00 ET, inside the pre-fill window
+
+
+class _NoFetch(dict):
+    def get(self, *a, **k):
+        raise AssertionError("a replay must not re-fetch pre-fill news")
+
+
+def _gate_portfolio(m):
+    p = rb.Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
+    # WMG reaches its stop at the open (intraday is flat at 100); DINO has a queued SELL
+    p.holdings = {"WMG": rb.Holding("WMG", 10, 110.0, 101.0, 130.0, 25, 1),
+                  "DINO": rb.Holding("DINO", 10, 90.0, 80.0, 130.0, 25, 1)}
+    p.pending_orders = [
+        rb.QueuedOrder(ticker="DINO", alias=m.alias("DINO"), action="SELL", quantity=10, stop_price=None,
+                       target_price=None, entry_price=100.0, queued_day_index=30, decision={},
+                       decision_id="d-sell", decision_cutoff_at=_CUTOFF),
+        rb.QueuedOrder(ticker="OLN", alias=m.alias("OLN"), action="BUY", quantity=10, stop_price=93.0,
+                       target_price=120.0, entry_price=100.0, queued_day_index=30, decision={},
+                       decision_id="d-buy", decision_cutoff_at=_CUTOFF),
+    ]
+    return p
+
+
+def test_unsafe_buy_news_cancels_the_buy_but_sells_and_stop_exits_still_execute(tmp_path):
+    m = _masking()       # the current masker: "Charles Schwab" is outside this population's dictionary
+    with patch("run_backtest._call_hermes", side_effect=AssertionError("unsafe gate prompt sent")):
+        cap = _cycle(tmp_path, None, portfolio=_gate_portfolio(m), masking=m, prefill_news=_UNSAFE)
+    reason = rb.PRE_FILL_IDENTITY_CHECK_FAILED_REASON
+    assert cap["rejections"] == [("d-buy", reason)]
+    assert cap["fills"] == ["d-sell"], "the queued SELL still fills"
+    assert [a[0] for a, _ in cap["exits"]] == ["WMG"] and cap["exits"][0][0][3].startswith("stop")
+    w = cap["working"]
+    assert set(w.holdings) == set() and w.pending_orders == [], "BUY never filled; both exits happened"
+    blocked = " ".join(cap["summary"]["blocked"])
+    assert reason in blocked and "Schwab" not in blocked
+    assert "veto" not in blocked and "no adverse" not in blocked
+    gate = json.loads(cap["checkpoint_path"].read_text())["pre_fill_gate"]
+    assert gate["verdicts"]["d-buy"]["reason"] == reason and gate["gate_calls"] == []
+    assert "Schwab" not in json.dumps(gate), "the private verdict keeps a hash, not the identifying text"
+
+
+def test_identity_cancellation_replays_without_a_second_call_or_journal_write(tmp_path):
+    m, journal, ckpt = _masking(), {}, tmp_path / "ckpt"
+    ckpt.mkdir()
+    with patch("run_backtest._call_hermes", side_effect=AssertionError("unsafe gate prompt sent")):
+        with pytest.raises(RuntimeError):     # attempt 1 dies at the main Hermes call, after the gate
+            _cycle(tmp_path, None, portfolio=_gate_portfolio(m), masking=m, prefill_news=_UNSAFE,
+                   checkpoint_dir=ckpt, journal=journal, run_key="run-replay",
+                   hermes_error=RuntimeError("main call failed"))
+        cap = _cycle(tmp_path, None, portfolio=_gate_portfolio(m), masking=m, prefill_news=_NoFetch(),
+                     checkpoint_dir=ckpt, journal=journal, run_key="run-replay")
+    reason = rb.PRE_FILL_IDENTITY_CHECK_FAILED_REASON
+    # the replay re-issues the same pending-only resolution; the store keeps one row outcome
+    assert cap["rejections"] == [("d-buy", reason)] and journal == {"d-buy": reason}
+    assert cap["fills"] == ["d-sell"] and [a[0] for a, _ in cap["exits"]] == ["WMG"]
 
 
 # -- observed technical levels -------------------------------------------------
@@ -272,6 +347,105 @@ def test_technicals_adapter_drops_synthetic_levels_and_raw_bars(monkeypatch):
                       "level_evidence"}
     assert out["DINO"] == {"error": "no data"}
     assert seen[0][0] == "maverick-mcp" and 'd["levels"]' not in seen[0][1] and "get_price_history" in seen[0][1]
+
+
+_STUB_MAVERICK = {
+    "maverick/__init__.py": "",
+    "maverick/platform/__init__.py": "",
+    "maverick/platform/config.py": "class _S:\n    http = database = cache = redis = None\n"
+                                   "def get_platform_settings():\n    return _S()\n",
+    "maverick/platform/db.py": "def create_engine_from_settings(s):\n    return None\n",
+    "maverick/platform/cache.py": "class Cache:\n    def __init__(self, *a, **k):\n        pass\n",
+    "maverick/market_data/__init__.py": "",
+    "maverick/market_data/config.py": "def get_market_data_settings():\n    return None\n",
+    "maverick/market_data/fetchers.py": "class YFinanceFetcher:\n    def __init__(self, **k):\n        pass\n"
+                                        "def build_mover_fetcher(*a):\n    return None\n",
+    "maverick/market_data/service.py": '''
+import json, os
+from datetime import datetime, timedelta
+LOG = os.environ["STUB_LOG"]
+
+class _DF:
+    def __init__(self, rows):
+        self.rows = rows
+    def iterrows(self):
+        return iter(self.rows)
+
+class MarketDataService:
+    def __init__(self, *a):
+        pass
+    async def get_price_history(self, t, start, end):
+        with open(LOG, "a") as f:
+            f.write(json.dumps(["history", t, str(start), str(end)]) + "\\n")
+        if t == "DINO":
+            raise RuntimeError("provider gap")
+        # 45 sessions through `end` plus one bar AFTER it (a provider superset)
+        days = [end - timedelta(days=44 - i) for i in range(46)]
+        return _DF([(datetime(d.year, d.month, d.day), {"High": 110.0 + (d == end) + 5 * (d > end), "Low": 90.0 - i * 0.01,
+                                                         "Close": 100.0}) for i, d in enumerate(days)])
+''',
+    "maverick/technical/__init__.py": "",
+    "maverick/technical/service.py": '''
+import json, os
+LOG = os.environ["STUB_LOG"]
+
+class _R:
+    def model_dump(self):
+        return {"current_price": 100.0, "rsi": {"current": 48.0, "signal": "neutral"},
+                "macd": {"indicator_signal": "bullish"}, "trend": {"direction": "up"}, "outlook": "neutral",
+                "levels": {"support": [95.0, 90.0], "resistance": [105.0, 110.0]}}
+
+class TechnicalService:
+    def __init__(self, md):
+        pass
+    async def get_full_analysis(self, t, as_of):
+        with open(LOG, "a") as f:
+            f.write(json.dumps(["analysis", t, str(as_of)]) + "\\n")
+        return _R()
+''',
+}
+
+
+def test_generated_technicals_script_runs_against_stub_provider_modules(tmp_path, monkeypatch):
+    """Executes the real generated maverick script (not a canned reply)
+    against stub provider modules: request dates, returned bar format, and
+    conversion into observed-level packets."""
+    import subprocess
+    import sys
+    for rel, src in _STUB_MAVERICK.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(src)
+    log = tmp_path / "calls.jsonl"
+    env = {"PYTHONPATH": str(tmp_path), "STUB_LOG": str(log), "SYSTEMROOT": __import__("os").environ.get("SYSTEMROOT", "")}
+    raw_out = {}
+
+    def run_script(svc, script):
+        assert svc == "maverick-mcp"
+        out = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True, timeout=60)
+        assert out.returncode == 0, out.stderr
+        raw_out["json"] = json.loads(out.stdout)
+        return out.stdout
+
+    monkeypatch.setattr(rb, "run_in", run_script)
+    out = rb.fetch_technicals(["OLN", "DINO"], DAY)
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    start = DAY - timedelta(days=rb.LEVEL_LOOKBACK_SESSIONS * 2 + 30)
+    assert ["analysis", "OLN", DAY.isoformat()] in calls
+    assert ["history", "OLN", start.isoformat(), DAY.isoformat()] in calls
+    bars = raw_out["json"]["tech"]["OLN"]["bars"]
+    assert set(bars[0]) == {"date", "high", "low", "close"} and all(isinstance(b["low"], float) for b in bars)
+    assert bars[-1]["date"] > DAY.isoformat(), "the stub returned a bar after the cutoff"
+    t = out["OLN"]
+    assert set(t) == {"price", "rsi", "rsi_signal", "macd_signal", "trend", "outlook", "support", "resistance",
+                      "level_evidence"}, "maverick's synthetic levels and raw bars are not passed on"
+    window = [b for b in bars if b["date"] <= DAY.isoformat()][-rb.LEVEL_LOOKBACK_SESSIONS:]
+    assert t["support"] == [round(min(b["low"] for b in window), 2)]
+    assert t["resistance"] == [111.0], "the as-of bar's high counts; the later bar's does not"
+    ev = t["level_evidence"]
+    assert ev["lookback_sessions"] == rb.LEVEL_LOOKBACK_SESSIONS and ev["levels"]["S1"]["kind"] == "observed_low"
+    assert "95.0" not in json.dumps(t) and "105.0" not in json.dumps(t)
+    # a provider failure on the history call leaves the indicators but no levels -> no evidenced stop
+    assert out["DINO"]["support"] == [] and "unavailable" in out["DINO"]["level_evidence"]
 
 
 def test_prompt_labels_observed_levels_and_shows_no_synthetic_values(tmp_path):

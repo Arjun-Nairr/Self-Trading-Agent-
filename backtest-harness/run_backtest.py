@@ -68,7 +68,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "risk-checker"))
 
-from anonymize import RunMasking                                    # noqa: E402
+from anonymize import LeakDetected, RunMasking                      # noqa: E402
 import identity_cues                                                # noqa: E402
 from risk_checker import (                                          # noqa: E402
     AccountState, Context, MarketClock, Position, ProposedTrade, RiskLimits,
@@ -2346,6 +2346,11 @@ asyncio.run(main())
 
 PRE_FILL_NEWS_VETO_REASON = "pre_fill_news_veto"
 PRE_FILL_NEWS_UNAVAILABLE_REASON = "pre_fill_news_unavailable"
+# The confirmation prompt itself failed identity verification (masker
+# self-check or the independent known-cue check), so it was never sent.
+# Distinct from both reasons above: this is neither a model veto nor a
+# missing feed, and never "no adverse news".
+PRE_FILL_IDENTITY_CHECK_FAILED_REASON = "pre_fill_identity_check_failed"
 # The queued-BUY fill point simulate_trading_day itself already uses
 # ("09:45" -- see _bar_at(intraday, order.ticker, "09:45") there). Not a
 # shared constant with that code (out of scope to touch technical/
@@ -2841,11 +2846,27 @@ def apply_pre_fill_news_gate(
             prompt = _build_pre_fill_confirmation_prompt(
                 [{"alias": b["alias"], "articles": b["articles"]} for b in batch]
             )
-            masking.assert_clean(prompt)
-            # Independent known-cue/residue check on the final gate prompt: a
-            # leak halts the cycle -- the order is neither confirmed nor
-            # treated as "no adverse news".
-            identity_cues.assert_prompt_clean(prompt, masking, watchlist, "pre-fill gate prompt")
+            # Identity verification of the final gate prompt (masker
+            # self-check + independent known-cue/residue check). A failure
+            # cancels THIS confirmation batch only -- the unsafe prompt is
+            # never sent, the BUYs are neither confirmed nor treated as "no
+            # adverse news", and SELLs/exits still execute. Only these two
+            # identity failures are caught; nothing else is swallowed. The
+            # private verdict keeps a prompt hash, never the identifying text.
+            try:
+                masking.assert_clean(prompt)
+                identity_cues.assert_prompt_clean(prompt, masking, watchlist, "pre-fill gate prompt")
+            except (LeakDetected, identity_cues.IdentityCueDetected) as exc:
+                failure = {"check": type(exc).__name__,
+                           "unsent_prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest()}
+                for order, b in zip(to_confirm, batch):
+                    gate_events.append({
+                        "order": order, "outcome": "cancel", "reason": PRE_FILL_IDENTITY_CHECK_FAILED_REASON,
+                        "window_start": b["window_start"], "window_end": b["window_end"],
+                        "article_count": b["article_count"], "article_timestamps": b["article_timestamps"],
+                        "verification_failure": failure,
+                    })
+                return sells + surviving_buys, gate_events, gate_call_evidence
             # 2026-09-27 hardening pass (M1/M3): call_hermes_fn now returns
             # raw response BYTES (matching _call_hermes's own real contract
             # -- see its docstring) -- hash before decode, same discipline

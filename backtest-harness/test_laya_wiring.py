@@ -97,7 +97,8 @@ def _tech(**over):
 
 
 def _cycle(tmp, selector, *, portfolio=None, decisions=None, technicals=None, news=None,
-           masking=None, watchlist=None, cap=None, progress=None, hermes_error=None, fill_price=100.0):
+           masking=None, watchlist=None, cap=None, progress=None, hermes_error=None, fill_price=100.0,
+           prefill_news=None, checkpoint_dir=None, journal=None, run_key=None):
     """One real run_day with only I/O mocked. Returns a dict of captures."""
     portfolio = portfolio or Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
     masking = masking or _masking()
@@ -134,7 +135,13 @@ def _cycle(tmp, selector, *, portfolio=None, decisions=None, technicals=None, ne
     session = _expected_session_bar_times("09:30", "16:00")
     intraday = {t: [{"time": s, "open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0} for s in session]
                 for t in needed}
-    tmp_dir = Path(tempfile.mkdtemp())
+    tmp_dir = Path(checkpoint_dir or tempfile.mkdtemp())
+    journal = journal if journal is not None else {}
+
+    def fake_reject(decision_id, reason):
+        cap.setdefault("rejections", []).append((decision_id, reason))
+        journal.setdefault(decision_id, reason)       # store contract: resolves only a still-pending row
+
     with patch("run_backtest.CHECKPOINT_PATH", tmp_dir / "cycle_checkpoint.json"), \
          patch("run_backtest.fetch_bars", return_value={t: {"open": 100.0, "high": 100.0, "low": 100.0, "close": 100.0} for t in tickers}), \
          patch("run_backtest.fetch_intraday_bars", return_value=intraday), \
@@ -145,15 +152,17 @@ def _cycle(tmp, selector, *, portfolio=None, decisions=None, technicals=None, ne
          patch("run_backtest.ask_hermes", side_effect=fake_ask), \
          patch("run_backtest.record_cycle_evidence", side_effect=lambda **kw: cap["evidence"].append(kw)), \
          patch("run_backtest.record_queued_decision", side_effect=lambda *a, **kw: cap["queued"].append((a, kw))), \
-         patch("run_backtest.resolve_trade_fill", return_value=None), \
-         patch("run_backtest.resolve_trade_rejection", return_value=None), \
+         patch("run_backtest.resolve_trade_fill", side_effect=lambda d, f: cap.setdefault("fills", []).append(d)), \
+         patch("run_backtest.resolve_trade_rejection", side_effect=fake_reject), \
          patch("run_backtest.record_snapshot_once", return_value=True), \
          patch("run_backtest.log_activity", return_value=None), \
-         patch("run_backtest.simulate_trading_day", side_effect=spy_sim),          patch("run_backtest.fetch_news_window", side_effect=lambda ts, a, b: {t: {"articles": []} for t in ts}),          patch("run_backtest.simulate_fill", side_effect=lambda alias, action, q, ref, bar: {
-             "status": "filled", "fill_price": fill_price, "fill_quantity": q}),          patch("run_backtest.record_exit", side_effect=lambda *a, **k: k.get("decision_id")):
+         patch("run_backtest.simulate_trading_day", side_effect=spy_sim),          patch("run_backtest.fetch_news_window", side_effect=lambda ts, a, b: {
+             t: {"articles": list((prefill_news or {}).get(t, []))} for t in ts}),          patch("run_backtest.simulate_fill", side_effect=lambda alias, action, q, ref, bar: {
+             "status": "filled", "fill_price": fill_price, "fill_quantity": q}),          patch("run_backtest.record_exit", side_effect=lambda *a, **k: cap.setdefault("exits", []).append(
+             (a, k)) or k.get("decision_id")):
         working, summary, _obs = run_day(
             DAY, 31, portfolio, masking, watchlist, _limits_for_profile(portfolio.profile_level),
-            str(uuid.uuid4()), selector=selector, progress=progress)
+            run_key or str(uuid.uuid4()), selector=selector, progress=progress)
     cap.update(working=working, summary=summary, masking=masking,
                checkpoint_path=tmp_dir / "cycle_checkpoint.json")
     return cap
@@ -536,6 +545,32 @@ def test_no_fetch_at_all_when_selection_is_empty_and_nothing_is_held(tmp_path):
     cap = _cycle(tmp_path, _ctx(tmp_path, FailingScorer()))
     assert cap["tech_calls"] == [] and cap["news_calls"] == []
     assert cap["evidence"][0]["input_payload"]["candidates"] == []
+
+
+def test_shortlist_rotation_keeps_aliases_stable_and_the_held_position_managed(tmp_path):
+    """Three cycles whose scores rotate the shortlist out and back in: each
+    rendered candidate set is the shortlist (<=10, no duplicates, held name
+    excluded) in alias order, a re-entering name keeps its alias, and the
+    held position stays in Hermes' position list and the exit machinery."""
+    m = _masking()
+    reverse = lambda ts, day: {t: _bars(0.001 * (31 - SYMBOLS.index(t)), end=day) for t in ts}
+    shown_aliases = {}
+    picks = []
+    for i, fetch in enumerate((None, reverse, None)):
+        held = Portfolio(cash=90_000.0, equity_curve=[100_000.0] * 6, trading_days_elapsed=3,
+                         holdings={"OLN": Holding("OLN", 100, 100.0, 95.0, 120.0, 28, 2)})
+        cap = _cycle(tmp_path / str(i), _ctx(tmp_path / str(i), fetch=fetch), portfolio=held, masking=m)
+        selected = _selected(tmp_path / str(i))
+        rendered = [c["alias"] for c in cap["evidence"][0]["input_payload"]["candidates"]]
+        assert 0 < len(selected) <= 10 and len(set(selected)) == len(selected) and "OLN" not in selected
+        assert rendered == sorted(m.alias(t) for t in selected), "rendered candidates == shortlist, alias order"
+        assert cap["evidence"][0]["input_payload"]["positions"][0]["alias"] == m.alias("OLN")
+        assert cap["sim_watchlists"][0] == SYMBOLS
+        for t in selected:
+            assert shown_aliases.setdefault(t, m.alias(t)) == m.alias(t)
+        picks.append(set(selected))
+    left_and_returned = (picks[0] - picks[1]) & picks[2]
+    assert left_and_returned, "the scenario must rotate names out and back in"
 
 
 def test_a_replayed_cycle_reports_the_selection_it_was_decided_under(tmp_path):
