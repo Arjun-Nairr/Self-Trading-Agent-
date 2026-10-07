@@ -1,6 +1,6 @@
 # Laya candidate-selector — scope v1
 
-**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; standalone current-data demo completed 2026-10-03 (question format corrected to `noul-criteria-v2`); connected-smoke integration fixes done 2026-10-03; the fixed-30 attempt was not launched (coverage), then the 60-candidate frozen-pool smoke run COMPLETED GREEN on 2026-10-03 (`docs/evaluations/laya_connected_smoke_60pool_2026-10-03.md`); one bounded downstream Laya-vs-random July 2022 pair ran on 2026-10-06 (`docs/evaluations/laya_vs_random_2022-07_2026-10-06.md`, corrected 2026-10-07: operationally correct; selection evidence inconclusive; better observed Laya-arm outcome with an unidentified cause; identity leaks and unlabeled synthetic levels must be repaired before further performance claims); no activation or dashboard view has happened**
+**status: approved phased prototype — Phase 1 (foundation) and Phase 2 (opt-in experimental wiring) implemented; standalone current-data demo completed 2026-10-03 (question format corrected to `noul-criteria-v2`); connected-smoke integration fixes done 2026-10-03; the fixed-30 attempt was not launched (coverage), then the 60-candidate frozen-pool smoke run COMPLETED GREEN on 2026-10-03 (`docs/evaluations/laya_connected_smoke_60pool_2026-10-03.md`); one bounded downstream Laya-vs-random July 2022 pair ran on 2026-10-06 (`docs/evaluations/laya_vs_random_2022-07_2026-10-06.md`, corrected 2026-10-07: operationally correct; selection evidence inconclusive; better observed Laya-arm outcome with an unidentified cause; identity leaks and unlabeled synthetic levels must be repaired before further performance claims); repaired 2026-10-07 (`fd4b409`, `e09773c`); **experimental implementation CLOSED OUT GREEN 2026-10-07** — acceptance smoke `5e977606…` passed (`docs/evaluations/laya_selector_closeout_2026-10-07.md`); no performance, calibration or live claim; no activation**
 
 > **User decision (2026-10-03):** Laya stays in the project as an experimental
 > portfolio/CV component. A controlled comparison against random and
@@ -542,6 +542,30 @@ selection, packets, masked Hermes, risk and simulated execution all ran:
 
 Not exercised: stop/time-stop exits, the pre-fill gate's Hermes
 classification (no overnight news), and a whole-day selector failure.
+
+---
+
+## Closeout (2026-10-07) — experimental implementation complete
+
+Report: `docs/evaluations/laya_selector_closeout_2026-10-07.md`. **GREEN.**
+
+What is now proven:
+- a daily, changing shortlist of up to 10 from the frozen eligible pool;
+- held and pending names excluded from selection, while held positions
+  keep independent exit management;
+- fail-closed selector failure that blocks entries only;
+- identity checks on every final prompt;
+- observed-only levels with a checkable stop basis;
+- a pre-fill gate that cancels only an identity-unsafe BUY batch and
+  never blocks exits.
+
+All of this is proven offline. The five-session acceptance smoke
+`5e977606…` (July 2022, 48-name pool) then completed cleanly.
+
+The task is closed. It does **not** show trading benefit, calibration or
+freedom from fixed-universe bias. Live paper stays inactive. A
+market-wide, point-in-time live-universe screen is a separate track, not a
+continuation of this selector.
 
 ---
 

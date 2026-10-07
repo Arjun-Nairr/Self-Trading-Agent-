@@ -414,6 +414,25 @@ unapproved pending that decision.
         pilot's historical caveats stand.
       - **Outside this block:** live-mode maverick levels are still
         synthetic (fixing them needs a `maverick-mcp` rebuild).
+    - **Selector closed out 2026-10-07: GREEN**
+      (`docs/evaluations/laya_selector_closeout_2026-10-07.md`).
+      - **Implementation (`e09773c`):** a pre-fill gate identity-check
+        failure now cancels only that BUY batch
+        (`pre_fill_identity_check_failed`), with no model call; SELLs and
+        exits still run.
+      - **Offline checks:** shortlist rotation and the generated technicals
+        script run against stub provider modules. Suite 597 passed, with 0
+        external calls attempted; `verify.py` 12/12.
+      - **Acceptance smoke:** run `5e977606…`, July 1–8 2022, 5/5 sessions.
+        The audit found 0 problems: no identity cues or selector data
+        reached a prompt, every BUY stop was the observed S1, and the
+        shortlist rotated. There were no fills; one pending BUY was
+        resolved at the boundary. Protected state is unchanged.
+      - **Done as an implementation task;** the selector is not reopened.
+        Trading value and calibration are unproven. Masking is finite
+        known-cue protection. The universe is fixed and retrospective.
+        Levels are minimal observed extremes. Live paper is inactive.
+        Market-wide screening is a separate track.
 
     **Fine-tuning preparation (2026-10-05); human label review required. Not
     approved for training** (`docs/scopes/LAYA_FINETUNE_PILOT_V0.md`).
