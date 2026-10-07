@@ -98,7 +98,7 @@ def _tech(**over):
 
 def _cycle(tmp, selector, *, portfolio=None, decisions=None, technicals=None, news=None,
            masking=None, watchlist=None, cap=None, progress=None, hermes_error=None, fill_price=100.0,
-           prefill_news=None, checkpoint_dir=None, journal=None, run_key=None):
+           prefill_news=None, checkpoint_dir=None, journal=None, run_key=None, injection_monitor=None):
     """One real run_day with only I/O mocked. Returns a dict of captures."""
     portfolio = portfolio or Portfolio(cash=100_000.0, equity_curve=[100_000.0] * 6)
     masking = masking or _masking()
@@ -162,7 +162,8 @@ def _cycle(tmp, selector, *, portfolio=None, decisions=None, technicals=None, ne
              (a, k)) or k.get("decision_id")):
         working, summary, _obs = run_day(
             DAY, 31, portfolio, masking, watchlist, _limits_for_profile(portfolio.profile_level),
-            run_key or str(uuid.uuid4()), selector=selector, progress=progress)
+            run_key or str(uuid.uuid4()), selector=selector, progress=progress,
+            injection_monitor=injection_monitor)
     cap.update(working=working, summary=summary, masking=masking,
                checkpoint_path=tmp_dir / "cycle_checkpoint.json")
     return cap

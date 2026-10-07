@@ -1764,8 +1764,13 @@ def _validate_selector_args(selector_mode: str, args) -> None:
     container -- there is no host-process worker); off mode must not be given
     the laya flags (a silent no-op is a trap). Pure flag checks; the Docker
     availability check is verify_docker_worker_available (see main)."""
+    if getattr(args, "injection_monitor", False):
+        if not args.laya_checkpoint or not Path(args.laya_checkpoint).is_dir():
+            raise SystemExit("--injection-monitor requires --laya-checkpoint (the local pinned checkpoint "
+                             "directory, mounted read-only into the monitor's own container)")
     if selector_mode == SELECTOR_MODE_OFF:
-        if args.laya_image or args.laya_checkpoint or getattr(args, "selector_universe", None):
+        checkpoint_unused = args.laya_checkpoint and not getattr(args, "injection_monitor", False)
+        if args.laya_image or checkpoint_unused or getattr(args, "selector_universe", None):
             raise SystemExit("--laya-image/--laya-checkpoint/--selector-universe were given but --selector-mode "
                              f"is off; pass --selector-mode {SELECTOR_MODE_LAYA_FIXED30} to use them")
         return
@@ -1783,6 +1788,7 @@ def _validate_selector_args(selector_mode: str, args) -> None:
 # state exactly as before). None here = laya_experiment.SNAPSHOT_DIR.
 DEFAULT_STATE_DIR = Path(__file__).resolve().parent
 SELECTOR_SNAPSHOT_DIR: "Path | None" = None
+INJECTION_MONITOR_DIR = DEFAULT_STATE_DIR / ".injection_monitor"   # private shadow-monitor records
 
 
 def apply_state_dir(state_dir: "str | None") -> None:
@@ -1792,7 +1798,7 @@ def apply_state_dir(state_dir: "str | None") -> None:
     directory itself (that is where the preserved Round 2 state lives: an
     explicit --state-dir must never resume or --reset it) and a path that
     exists but is not a directory."""
-    global STATE_PATH, CHECKPOINT_PATH, DIAGNOSTICS_DIR, SELECTOR_SNAPSHOT_DIR
+    global STATE_PATH, CHECKPOINT_PATH, DIAGNOSTICS_DIR, SELECTOR_SNAPSHOT_DIR, INJECTION_MONITOR_DIR
     if state_dir is None:
         return
     d = Path(state_dir).expanduser().resolve()
@@ -1807,6 +1813,7 @@ def apply_state_dir(state_dir: "str | None") -> None:
     CHECKPOINT_PATH = d / "cycle_checkpoint.json"
     DIAGNOSTICS_DIR = d / ".diagnostics"
     SELECTOR_SNAPSHOT_DIR = d / "selector_snapshots"
+    INJECTION_MONITOR_DIR = d / "injection_monitor"
 
 
 _ACTIVE_PROGRESS = None  # the run's WorkflowEmitter, flushed by main()'s finally
@@ -1823,10 +1830,26 @@ def _close_active_progress() -> None:
 
 
 def _close_active_selector() -> None:
-    global _ACTIVE_SELECTOR
+    global _ACTIVE_SELECTOR, _ACTIVE_MONITOR
     ctx, _ACTIVE_SELECTOR = _ACTIVE_SELECTOR, None
     if ctx is not None:
         ctx.close()
+    mon, _ACTIVE_MONITOR = _ACTIVE_MONITOR, None
+    if mon is not None:
+        mon.close()
+
+
+_ACTIVE_MONITOR = None  # the run's shadow InjectionMonitor (--injection-monitor), closed with the selector
+
+
+def _build_injection_monitor(run_id: str, args):
+    """Opt-in SHADOW monitor (laya_injection.py): imported only here, so the
+    default path never loads it. Its container starts lazily on the first
+    snippet; any failure there only makes its records `unavailable`."""
+    from laya_injection import InjectionMonitor, InjectionWorker
+    out = INJECTION_MONITOR_DIR
+    return InjectionMonitor(InjectionWorker(args.laya_checkpoint, log_path=out / run_id / "worker.log"),
+                            out, run_id)
 
 
 def _check_reset_allowed(existing_state: dict | None, confirmed: bool) -> None:
@@ -2593,6 +2616,27 @@ asyncio.run(main())
     return json_from(run_in("alpaca-mcp", script))["news"]
 
 
+def _decision_news_text(a: dict) -> str:
+    """A news line's text exactly as build_prompt renders it (shared with the
+    shadow injection monitor, so it scores the very text Hermes is shown)."""
+    return a["headline"][:110]
+
+
+def _prefill_news_text(a: dict) -> str:
+    """An article's text exactly as the pre-fill confirmation prompt renders it."""
+    return f'"{a["headline"]}" -- {a["summary"]}'
+
+
+def _decision_news_texts(positions: list[dict], candidates: list[dict]) -> list[str]:
+    """Every news line build_prompt renders, in prompt order (same slices/skips)."""
+    out = [_decision_news_text(a) for p in positions for a in (p.get("news") or [])[:3]]
+    for c in candidates:
+        if "error" in c["tech"]:
+            continue
+        out += [_decision_news_text(a) for a in c["news"][:3]]
+    return out
+
+
 def _build_pre_fill_confirmation_prompt(batch: list[dict]) -> str:
     """Pure. `batch`: [{"alias": str, "articles": [already alias-masked
     article dicts, see RunMasking.mask_news]}] -- masking and window-
@@ -2627,7 +2671,7 @@ def _build_pre_fill_confirmation_prompt(batch: list[dict]) -> str:
     for entry in batch:
         lines.append(f"ALIAS: {entry['alias']}")
         for a in entry["articles"]:
-            lines.append(f'  - [{a["age_days"]}d ago] "{a["headline"]}" -- {a["summary"]}')
+            lines.append(f'  - [{a["age_days"]}d ago] {_prefill_news_text(a)}')
         lines.append("")
     lines.append(
         "Reply with ONLY a JSON object mapping every alias above to exactly "
@@ -2661,6 +2705,7 @@ def apply_pre_fill_news_gate(
     pending_orders: list["QueuedOrder"], fill_day: date, masking: RunMasking,
     usage_totals: dict, fetch_news_fn=None, call_hermes_fn=None,
     checkpointed_gate: dict | None = None, watchlist: "list[dict] | None" = None,
+    on_prompt_snippets: "Callable[[str, list[str]], None] | None" = None,
 ) -> tuple[list["QueuedOrder"], list[dict], dict | None]:
     """Harness-owned overnight/pre-fill news gate. Runs BEFORE
     simulate_trading_day, using real I/O outside the risk checker (which
@@ -2867,6 +2912,14 @@ def apply_pre_fill_news_gate(
                         "verification_failure": failure,
                     })
                 return sells + surviving_buys, gate_events, gate_call_evidence
+            if on_prompt_snippets is not None:
+                # SHADOW ONLY (--injection-monitor): the exact article texts this
+                # prompt renders, observed before it is sent; nothing flows back.
+                try:
+                    on_prompt_snippets(hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12],
+                                       [_prefill_news_text(a) for b in batch for a in b["articles"]])
+                except Exception as exc:
+                    print(f"  INJECTION-MONITOR (shadow) skipped: {type(exc).__name__}")
             # 2026-09-27 hardening pass (M1/M3): call_hermes_fn now returns
             # raw response BYTES (matching _call_hermes's own real contract
             # -- see its docstring) -- hash before decode, same discipline
@@ -4439,7 +4492,7 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
                     f"| trend {t['trend']} | outlook {t['outlook']}"
                 )
             for a in (p.get("news") or [])[:3]:
-                lines.append(f"      news ({a['age_days']}d ago): {a['headline'][:110]}")
+                lines.append(f"      news ({a['age_days']}d ago): {_decision_news_text(a)}")
     else:
         lines.append("  (none)")
     lines.append("")
@@ -4466,7 +4519,7 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         )
         lines.append(_levels_line(t))
         for a in c["news"][:3]:
-            lines.append(f"      news ({a['age_days']}d ago): {a['headline'][:110]}")
+            lines.append(f"      news ({a['age_days']}d ago): {_decision_news_text(a)}")
         if fundamentals_enabled:
             lines += fundamentals_prompt_lines(c.get("fundamentals"))
     lines.append("")
@@ -5150,7 +5203,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             run_key: str, fundamentals_enabled: bool = False,
             runtime: "HermesRuntime | None" = None,
             selector: "Any | None" = None,
-            progress: "Any | None" = None) -> tuple[Portfolio, dict, "Callable[[], None]"]:
+            progress: "Any | None" = None,
+            injection_monitor: "Any | None" = None) -> tuple[Portfolio, dict, "Callable[[], None]"]:
     """Run one simulated trading day. Returns (new_portfolio, summary,
     do_observability).
 
@@ -5334,6 +5388,9 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         working.pending_orders, day, masking, summary["usage"],
         fetch_news_fn=fetch_news_window, call_hermes_fn=lambda p: _call_hermes(p, runtime),
         checkpointed_gate=(checkpoint or {}).get("pre_fill_gate"), watchlist=watchlist,
+        on_prompt_snippets=None if injection_monitor is None else (
+            lambda key, texts: summary.setdefault("injection_monitor", {}).__setitem__(
+                f"prefill-{key}", injection_monitor.record("prefill", day.isoformat(), f"prefill-{key}", texts))),
     )
     # Durably checkpoint the gate's OWN verdicts the instant they're known
     # -- BEFORE the main Hermes call below, which may itself fail/crash.
@@ -5945,6 +6002,17 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             **({"selector": selector_outcome.to_record()} if selector_outcome is not None else {}),
         })
 
+    if injection_monitor is not None:
+        # SHADOW ONLY (--injection-monitor): the news lines of the prompt that
+        # produced `response` (checkpoint-consistent on a replay), recorded
+        # privately; the prompt and everything downstream are unaffected.
+        try:
+            summary.setdefault("injection_monitor", {})["decision"] = injection_monitor.record(
+                "decision", day.isoformat(), "decision",
+                _decision_news_texts(input_payload["positions"], input_payload["candidates"]))
+        except Exception as exc:
+            print(f"  INJECTION-MONITOR (shadow) skipped: {type(exc).__name__}")
+
     _wf_decisions = list((response or {}).get("decisions", []) or [])
     _wf.emit("hermes", "completed", lambda: {
         "candidates": len(input_payload["candidates"]), "positions": len(input_payload["positions"]),
@@ -6445,6 +6513,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
                              "laya_adapter.provision_checkpoint(), mounted READ-ONLY into the "
                              "private worker container (only with --selector-mode "
                              "laya_fixed30_experimental)")
+    parser.add_argument("--injection-monitor", action="store_true", default=False,
+                        help="EXPERIMENTAL, SHADOW ONLY: ask Laya (own isolated container, image "
+                             "hermes-laya-injection-monitor:1) whether each masked news snippet "
+                             "rendered for Hermes looks like a prompt-injection attempt, and record "
+                             "it privately. Never blocks or alters news or trading. Requires "
+                             "--laya-checkpoint. Off by default.")
     parser.add_argument("--laya-image", default=None,
                         help="worker image tag (default hermes-laya-worker:2; build it with "
                              "backtest-harness/laya_worker_image/Dockerfile). Docker is "
@@ -6701,6 +6775,11 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
             selector_universe, seed, run_id, args)
         print(f"selector mode: {selector_mode} (EXPERIMENTAL -- universe "
               f"{selector_universe.version}, {len(selector_universe.members)} names)")
+    injection_monitor = None
+    if args.injection_monitor:
+        global _ACTIVE_MONITOR
+        injection_monitor = _ACTIVE_MONITOR = _build_injection_monitor(run_id, args)
+        print("injection monitor: ON (shadow only -- records privately, never blocks or alters news)")
 
     # Workflow progress telemetry (dashboard-v2 Workflow page): best effort,
     # background-written, never read back -- see workflow_events.py.
@@ -6747,7 +6826,8 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
         result, halted = _run_cycle_or_halt(
             lambda: run_day(cursor, day_index, portfolio, masking, watchlist, todays_limits_ctx, run_key,
                             fundamentals_enabled=fundamentals_enabled, runtime=runtime,
-                            selector=selector_ctx, progress=progress),
+                            selector=selector_ctx, progress=progress,
+                            injection_monitor=injection_monitor),
             day_label=masking.day_index(cursor),
             run_id=run_id,
         )
@@ -6782,6 +6862,8 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
                   f"{' (replayed snapshot)' if ev.get('replayed') else ''}: "
                   f"{ev['selected']} selected of {ev['eligible']} eligible"
                   f"{'' if ev['status'] == 'selected' else ' -- ' + str(ev['reason'])}")
+        for _path, _c in (summary.get("injection_monitor") or {}).items():  # counts only
+            print(f"  INJECTION-MONITOR (shadow) {_path}: {_c}")
         if not summary["decisions"] and not summary["blocked"]:
             print(f"  no trade — {summary['no_action_reason'][:160]}")
 

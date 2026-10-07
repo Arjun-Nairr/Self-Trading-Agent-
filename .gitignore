@@ -34,6 +34,8 @@ backtest-harness/.laya_framing/
 backtest-harness/.laya_ft_pilot/
 # Laya vs. random experiment (laya_vs_random.py): PRIVATE per-arm state, snapshots, ledgers, fact hashes.
 backtest-harness/.laya_vs_random/
+# Shadow prompt-injection monitor (laya_injection.py): PRIVATE per-run records (fingerprints, scores).
+backtest-harness/.injection_monitor/
 
 # Scalable screener (Stage 1): local write-once screen snapshots -- runtime
 # data, never committed.
