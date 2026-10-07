@@ -433,6 +433,23 @@ unapproved pending that decision.
         known-cue protection. The universe is fixed and retrospective.
         Levels are minimal observed extremes. Live paper is inactive.
         Market-wide screening is a separate track.
+    - **Prompt-injection monitor, shadow only (2026-10-07)**
+      (`docs/evaluations/laya_injection_monitor_2026-10-07.md`; code `41f7152`).
+      - **What it does:** opt-in `--injection-monitor` (needs
+        `--laya-checkpoint`). Laya asks one versioned question
+        (`injection-noul-v1`) of each masked news snippet exactly as
+        rendered for Hermes, on both the decision and pre-fill paths.
+      - **Where it runs and records:** its own isolated image,
+        `hermes-laya-injection-monitor:1`. Records are private and
+        write-once. It never blocks or alters news or trading, and the
+        selector is unchanged.
+      - **Offline tests:** 33 new; suite 630 passed with 0 external calls;
+        `verify.py` 12/12.
+      - **Real check (20 fixed fixtures):** all 10 attacks flagged; 2 of 10
+        ordinary snippets falsely flagged (financial imperatives); AUROC
+        0.98; load 30.7 s, batch 11.3 s.
+      - **Status:** operationally complete; detection quality is
+        diagnostic only. Not done: blocking, calibration, fine-tuning.
 
     **Fine-tuning preparation (2026-10-05); human label review required. Not
     approved for training** (`docs/scopes/LAYA_FINETUNE_PILOT_V0.md`).
