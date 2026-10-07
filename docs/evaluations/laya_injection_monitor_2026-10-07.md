@@ -144,10 +144,71 @@ so none was unavailable.
 - **Cleanup:** no worker container remained afterwards. Round 2 state,
   protected files and user-owned files are unchanged.
 
+## Correction: request deadline now covers the send (2026-10-07)
+
+**Defect:** `InjectionWorker.classify` wrote and flushed the request
+*before* the response deadline started.
+- **Failure:** a worker that sent its ready handshake and then stopped
+  reading made a large request block in `write()` once the pipe was full.
+  That could take up to 64 snippets of 4,000 characters, about 250 KB.
+- **Impact:** the pre-fill monitor runs synchronously, so the trading cycle
+  could stall indefinitely. Catching exceptions cannot interrupt a blocked
+  write.
+
+**Repair** (`laya_injection.py` only; the selector's transport and
+`run_backtest.py` are unchanged):
+- **One deadline:** `request_timeout`, 120 s by default, now covers send,
+  flush and reply. The write runs on a helper thread, and the reply read
+  gets whatever time remains.
+- **On expiry:**
+  - The worker process is killed first. That fails the blocked write and
+    ends the thread.
+  - The thread is joined, with a 5 s bound.
+  - The worker is torn down through the existing bounded `close()`, which
+    includes `docker rm -f`.
+  - `close()` is never called under a still-blocked writer, because its
+    stdin flush would deadlock.
+- **Outcome:** the snippets are `unavailable`, and the existing rule still
+  disables the monitor for the rest of the invocation.
+- **Unchanged:** the separate startup deadline.
+
+**Regression:** `test_a_ready_worker_that_stops_reading_cannot_hang_the_controller`.
+- **Setup:** a fake worker sends a valid handshake and never reads, and the
+  request is a permitted 64 × 3,900-character batch. It runs in a child
+  process under an independent 120 s outer timeout.
+- **Before the fix:** it hung until the outer timeout and failed. The one
+  orphaned fake worker it left behind was then removed by hand.
+- **After the fix:**
+  - The 2 s deadline interrupts the send; the assertion allows under 5 s
+    for kill, join and scheduling, and the run took about 13 s in total.
+  - All 64 snippets are `unavailable`, and every spawned process is dead.
+  - The next call is `unavailable`, and the worker is not restarted.
+  - A full `run_day` with a stalled monitor on the pre-fill path completes
+    with fills, exits, rejections, prompts and final state identical to a
+    run without the monitor.
+  - A fixed run leaves no process behind.
+
+**Other checks:**
+- The 33 earlier monitor tests still pass, covering normal replies,
+  response timeouts, malformed replies, replay and default-off.
+- Monitor plus selector-related files: 164 passed. Selector test files
+  are unchanged.
+- Full harness suite: 631 passed under the offline guard, with 0 Docker,
+  Hermes or network attempts.
+- `verify.py` 12/12, and `git diff --check` clean.
+- No real-model or trading run was needed.
+
+**Known residual (not changed here):** the numeric selector's shared
+transport (`LayaWorkerScorer.score`) has the same write-before-deadline
+shape. Its requests are small, under about 60 cards, and the selector was
+closed out unchanged by design.
+
 ## Status
 
-**Operationally complete:** it is opt-in, isolated, bounded, replayable,
-non-interfering and verified with the real model.
+**Operationally complete:** an optional shadow monitor that is opt-in,
+isolated, bounded (including the send since the correction above),
+replayable, non-interfering and verified with the real model. It is
+**not** proven injection protection.
 
 **Detection quality:** a separate matter, and only diagnostic. Expect
 false flags on imperative financial headlines, and treat flags as

@@ -356,3 +356,93 @@ def test_monitor_runs_in_its_own_isolated_image_and_the_selector_image_is_untouc
     sel = (HERE / "laya_worker_image/Dockerfile").read_text()
     assert "COPY laya_worker.py laya_adapter.py laya_selector.py /app/" in sel and "injection" not in sel
     assert li.InjectionWorker("ck").metadata != __import__("laya_adapter").expected_metadata()
+
+
+# -- request deadline covers the send (2026-10-07 correction) ------------------------------------
+
+_HANG_WORKER = (
+    "import sys, json, time, laya_injection as li\n"
+    "m = li.expected_metadata()\n"
+    "sys.stdout.write(json.dumps({'event': 'ready', 'package_version': m.package_version, "
+    "'checkpoint': m.checkpoint, 'revision': m.revision, 'question': m.question, "
+    "'settings': m.settings}) + chr(10))\n"
+    "sys.stdout.flush()\n"
+    "time.sleep(600)\n"            # ready, then never reads stdin
+)
+
+_STALL_SCENARIO = r'''
+import json, subprocess, sys, tempfile, time
+from pathlib import Path
+from unittest.mock import patch
+sys.path.insert(0, HERE)
+import laya_injection as li, laya_injection_worker as w, run_backtest as rb
+spawned, real = [], subprocess.Popen
+class Spy(real):
+    def __init__(s, *a, **k):
+        super().__init__(*a, **k)
+        spawned.append(s)
+subprocess.Popen = Spy
+DEADLINE = 2.0
+tmp = Path(tempfile.mkdtemp())
+worker = li.InjectionWorker("unused", worker_cmd=[sys.executable, "-c", HANG], request_timeout=DEADLINE)
+mon = li.InjectionMonitor(worker, tmp, "r")
+worker._start()
+texts = ["x" * (li.MAX_SNIPPET_CHARS - 100)] * w.MAX_TEXTS_PER_REQUEST       # ~250 KB: beyond any pipe buffer
+t0 = time.monotonic()
+out = mon.record("prefill", "d1", "prefill-a", texts)
+dt = time.monotonic() - t0
+rec = json.loads((tmp / "r/d1-prefill-a.json").read_text())["records"]
+alive_after = [p.poll() is None for p in spawned]
+n_spawned = len(spawned)
+later = mon.record("decision", "d2", "decision", ["Analyst Upgrades XY12"])
+reason2 = json.loads((tmp / "r/d2-decision.json").read_text())["records"][0]["reason"]
+
+# the surrounding controller path continues: same run_day outcome with a stalled monitor
+from test_laya_wiring import _cycle, _masking, DAY
+from test_integrity_repair import _gate_portfolio
+m = _masking()
+arts = [{"headline": f"H{i}", "summary": "s" * 3800, "created_at": f"{DAY}T12:00:00Z", "symbols": []}
+        for i in range(w.MAX_TEXTS_PER_REQUEST)]
+confirm = lambda p, *a, **k: (json.dumps({m.alias("OLN"): "CONFIRM"}).encode(), {})
+stalled = li.InjectionMonitor(li.InjectionWorker("unused", worker_cmd=[sys.executable, "-c", HANG],
+                                                 request_timeout=DEADLINE), tmp / "c", "run-c")
+with patch("run_backtest._call_hermes", side_effect=confirm):
+    t1 = time.monotonic()
+    a = _cycle(tmp / "a", None, portfolio=_gate_portfolio(m), masking=m, prefill_news={"OLN": arts},
+               injection_monitor=stalled, run_key="same")
+    dt_cycle = time.monotonic() - t1
+    b = _cycle(tmp / "b", None, portfolio=_gate_portfolio(m), masking=m, prefill_news={"OLN": arts}, run_key="same")
+stalled.close()
+same = all(a.get(k) == b.get(k) for k in ("fills", "exits", "rejections", "prompts")) and \
+    a["working"].to_dict() == b["working"].to_dict()
+print("RESULT " + json.dumps({"dt": dt, "out": out, "statuses": sorted({r["status"] for r in rec}),
+    "reason": rec[0]["reason"], "alive_after": alive_after, "proc_cleared": worker._proc is None,
+    "later": later, "reason2": reason2, "spawned_before_later": n_spawned,
+    "dt_cycle": dt_cycle, "cycle_monitor": a["summary"].get("injection_monitor"), "same_outcome": same,
+    "all_dead": all(p.poll() is not None for p in spawned)}))
+'''
+
+
+def test_a_ready_worker_that_stops_reading_cannot_hang_the_controller():
+    """A worker that sends a valid handshake and then never reads stdin must
+    not block the send past the request deadline. Run in a child process
+    under an independent outer timeout, so a broken implementation fails
+    this test instead of hanging the suite."""
+    script = f"HERE = {str(HERE)!r}\nHANG = {_HANG_WORKER!r}\n" + _STALL_SCENARIO
+    try:
+        out = subprocess.run([sys.executable, "-c", script], cwd=HERE, capture_output=True, text=True,
+                             timeout=120)
+    except subprocess.TimeoutExpired:
+        pytest.fail("the controller hung on a stalled worker (outer 120 s timeout hit)")
+    line = next((ln for ln in out.stdout.splitlines() if ln.startswith("RESULT ")), None)
+    assert line, out.stderr[-1500:]
+    r = json.loads(line[len("RESULT "):])
+    # deadline 2.0 s for send+flush+receive; tolerance 3 s for kill, join and scheduling
+    assert r["dt"] < 5.0, r["dt"]
+    assert r["statuses"] == ["unavailable"] and r["out"]["unavailable"] == 64 and "within" in r["reason"]
+    assert r["proc_cleared"] and not any(r["alive_after"]) and r["all_dead"], "no orphan worker process"
+    assert r["later"]["unavailable"] == 1 and r["reason2"].startswith("monitor disabled after failure")
+    assert r["spawned_before_later"] == 1, "the broken worker is never restarted"
+    assert r["same_outcome"], "a stalled monitor must not change the trading cycle"
+    prefill = [v for k, v in r["cycle_monitor"].items() if k.startswith("prefill-")]
+    assert r["dt_cycle"] < 20.0 and prefill and prefill[0]["unavailable"] == 64

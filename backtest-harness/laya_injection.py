@@ -30,6 +30,7 @@ import hashlib
 import json
 import math
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
@@ -103,17 +104,47 @@ class InjectionWorker(LayaWorkerScorer):
         self.metadata = expected_metadata()
 
     def classify(self, texts: Sequence[str]) -> tuple[int, list[dict]]:
+        """ONE deadline (request_timeout) covers send, flush and reply. A
+        large request to a worker that has stopped reading blocks in write()
+        once the pipe is full, so the write runs on a helper thread and the
+        deadline is enforced here: on expiry the worker process is KILLED
+        first -- which fails the blocked write and ends the thread -- then the
+        thread is joined and the worker torn down (docker rm -f) with bounded
+        waits. Killing before close() matters: close() flushes stdin, which
+        would block behind the stuck writer."""
         if self._proc is None or self._proc.poll() is not None:
             self._start()
-        assert self._proc is not None and self._proc.stdin is not None
+        proc = self._proc
+        assert proc is not None and proc.stdin is not None
         self._next_id += 1
-        try:
-            self._proc.stdin.write(json.dumps({"id": self._next_id, "texts": list(texts)}) + "\n")
-            self._proc.stdin.flush()
-        except OSError as exc:
+        deadline = time.monotonic() + self._request_timeout
+        payload = json.dumps({"id": self._next_id, "texts": list(texts)}) + "\n"
+        failed: list[BaseException] = []
+
+        def send() -> None:
+            try:
+                proc.stdin.write(payload)
+                proc.stdin.flush()
+            except BaseException as exc:  # reported to the caller below
+                failed.append(exc)
+
+        sender = threading.Thread(target=send, daemon=True)
+        sender.start()
+        sender.join(max(0.0, deadline - time.monotonic()))
+        if sender.is_alive():
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            sender.join(5.0)
+            if sender.is_alive():      # never close() under a still-blocked writer: it would deadlock
+                proc.stdin = None
             self.close()
-            raise ScorerError(f"could not send texts to the monitor worker: {exc}") from exc
-        reply = self._read(self._request_timeout)
+            raise ScorerError(f"monitor worker did not accept the request within {self._request_timeout:g}s")
+        if failed:
+            self.close()
+            raise ScorerError(f"could not send texts to the monitor worker: {failed[0]}") from failed[0]
+        reply = self._read(max(0.001, deadline - time.monotonic()))
         try:
             return parse_classify_reply(reply, self._next_id, len(texts))
         except ScorerError:
