@@ -383,14 +383,22 @@ unapproved pending that decision.
     - **Operational:** correct, 20/20 sessions each. All 1,007 fetches both
       arms made returned identical data, and no selector data reached a
       prompt.
-    - **Selection:** Laya not distinguishable from random. It hit the review
-      heuristic at the base rate, and overlap was at chance.
-    - **Trading:** Laya arm +8.26% vs random +4.02%, from one path each. The
-      gap is not attributed to Laya: the random arm sat idle for the first
-      7 sessions of a rally.
+    - **Selection:** inconclusive. The heuristic hit rate was at the base
+      rate, but the heuristic is unvalidated, and chance-level overlap with
+      one random draw is not a quality test.
+    - **Trading:** the Laya arm had the better observed outcome (+8.26% vs
+      +4.02%) from one path each; the cause is unidentified. Earlier entry
+      timing could be a selection pathway or variance.
     - **Code change:** shortlisted candidates are now shown to Hermes in
       neutral alias order.
-    - **Next:** no automatic second month.
+    - **Evidence review 2026-10-07 (report §11):**
+      - verified identity cues reached 8/20 Laya vs 14/20 random decision
+        prompts, plus 1 Laya gate prompt; the leak checker shares the
+        masker's dictionary and cannot see them;
+      - all 45 BUY stops sat on maverick's unlabeled synthetic
+        `close × 0.95` level.
+    - **Next:** a masking and level-provenance repair block, with
+      regression tests, before any further performance claim or run.
 
     **Fine-tuning preparation (2026-10-05); human label review required. Not
     approved for training** (`docs/scopes/LAYA_FINETUNE_PILOT_V0.md`).
