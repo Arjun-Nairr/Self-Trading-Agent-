@@ -183,8 +183,8 @@ async def test_get_trend_bullish_frame():
 async def test_get_support_resistance_bullish_frame():
     result = await _service(_bullish_frame()).get_support_resistance("AAPL")
 
-    assert result.support == [123.66, 130.53, 132.0]
-    assert result.resistance == [138.0, 144.27, 151.14]
+    assert result.support == [132.0]  # observed lowest low only (2026-10-08)
+    assert result.resistance == [138.0]
 
 
 async def test_get_full_analysis_bullish_frame():
@@ -200,7 +200,7 @@ async def test_get_full_analysis_bullish_frame():
     assert result.stochastic.signal == "bullish"
     assert result.bollinger.position == "above middle band"
     assert result.volume.signal == "bullish (high volume on up move)"
-    assert result.levels.support == [123.66, 130.53, 132.0]
+    assert result.levels.support == [132.0]
     assert result.analysis_metadata["bars_analyzed"] == 247
     assert result.analysis_metadata["as_of"] == "2020-12-10"
 

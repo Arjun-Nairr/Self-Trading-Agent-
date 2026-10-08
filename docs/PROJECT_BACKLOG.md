@@ -562,24 +562,25 @@ historical-classification block); left untouched as out of scope here.
     anonymous-SELECT-only boundary as it exists today. Revisit together
     with the access-hardening review above, not in isolation.
 - **Later:**
-  - Live bracket/OCO orders (broker-side protective exits — today's
-    `alpaca-mcp` submits a single order only). Status `deferred`.
-    Prerequisite: live-mode order design.
-  - Ambiguous-write reconciliation/retry (check broker state after a
-    timeout/5xx before retrying, so an order is never duplicated).
-    Status `deferred`. Prerequisite: needed before serious continuous
-    live-paper operation.
-  - Broker partial-fill handling (not modeled in the current one-lot
-    flow). Status `deferred`. Prerequisite: same as above.
-  - Deterministic news-verification gate for live entries. Status
-    `approved` / `Later`. Before live-paper activation, a new BUY must
-    carry an explicit successful, fresh news-fetch verification; an
-    empty-but-successful headline result is valid, but an error, missing,
-    or stale result is not. Reject only new entries when verification is
-    absent — exits remain permitted regardless of news availability.
-    Prerequisite: wire the status into the live entry-validation path,
-    not merely agent instructions. The backtest already fails closed when
-    its historical-news fetch fails.
+  - **Live-paper controller (2026-10-08) — `implemented`, mock-verified,
+    never run against the broker.** `live/` (policy: `live/LIVE_POLICY.md`;
+    runbook, capabilities and limits: `docs/live_paper_runbook.md`). It
+    supersedes the four items previously listed here: broker-held
+    protection (an OCO sized to the *actual* filled quantity, verified by
+    status, quantity AND prices), ambiguous-write reconciliation (intent
+    persisted first, then lookup by client order id; restart recovery),
+    partial-fill handling (fills recognised while unresolved, pending/
+    partial/rejected exits settled across cycles), and the deterministic
+    fresh-quote + fresh-news entry gate (missing, stale or failed news
+    blocks entries only). First paper session needs its own authorization.
+  - Live-paper known limits, all `deferred`: IEX quotes only (no SIP);
+    replacing a stop is cancel -> confirm -> resubmit, so protection has a
+    brief gap and entries pause until it is re-verified; a broker stop
+    does not cap loss across a gap; one process runs everything (a long
+    selector refresh delays reconciliation, not broker-held stops);
+    an entry order that reaches Alpaca after the 2-minute grace shows as
+    an unmanaged position; no intraday-halt or corporate-action handling;
+    the injection monitor is not wired into live mode.
 
 ---
 

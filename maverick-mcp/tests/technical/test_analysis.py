@@ -443,8 +443,10 @@ class TestSupportResistance:
         )
         result = support_resistance(df, SETTINGS)
 
-        assert result.support == [92.7, 95.0, 97.85]
-        assert result.resistance == [108.15, 110.0, 113.3]
+        # observed extremes only -- no synthetic +-5%/+-10% offsets (2026-10-08)
+        assert result.support == [95.0]
+        assert result.resistance == [110.0]
+        assert result.lookback_bars == 3 and "observed" in result.method
 
     def test_lookback_window_excludes_older_bars(self):
         # sr_lookback defaults to 30: the first 5 rows carry an extreme
@@ -458,8 +460,9 @@ class TestSupportResistance:
         )
         result = support_resistance(df, SETTINGS)
 
-        assert result.support == [90.0, 95.0]
-        assert result.resistance == [105.0, 110.0]
+        assert result.support == [95.0]
+        assert result.resistance == [110.0]
+        assert result.lookback_bars == 30
 
     def test_missing_columns_returns_empty_levels(self):
         df = pd.DataFrame({"Close": [100, 101]})

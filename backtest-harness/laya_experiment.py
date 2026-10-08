@@ -113,7 +113,11 @@ class SelectorContext:
         self, *, universe: FixedUniverse, seed: int, run_id: str, snapshot_dir: Path,
         scorer: CardScorer,
         fetch_history: Callable[[Sequence[str], date], Mapping[str, Any]],
+        k: int = MAX_SELECTED,
     ) -> None:
+        # `k` defaults to the historical limit of ten; only the live adapter
+        # passes a larger snapshot size (live/selector.py).
+        self.k = k
         self.universe = universe
         self.seed = seed
         self.run_id = run_id
@@ -159,7 +163,7 @@ class SelectorContext:
         scores = score_complete_cards(self.scorer, cards)
         snap = build_snapshot(
             universe=self.universe, scorer=self.scorer.metadata, as_of=day, seed=self.seed,
-            cards=cards, scores=scores, latest_bar_dates=latest, k=MAX_SELECTED,
+            cards=cards, scores=scores, latest_bar_dates=latest, k=self.k, max_k=self.k,
         )
         try:
             write_snapshot(self.snapshot_dir, self.run_id, snap)
@@ -183,7 +187,7 @@ class SelectorContext:
             mismatches.append("seed")
         if snap.selector_version != SELECTOR_VERSION:
             mismatches.append("selector_version")
-        if snap.k != MAX_SELECTED:
+        if snap.k != self.k:
             mismatches.append("k")
         if snap.scorer != self.scorer.metadata:
             mismatches.append("scorer_metadata")

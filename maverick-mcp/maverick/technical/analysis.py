@@ -368,27 +368,26 @@ def analyze_trend(df: pd.DataFrame, settings: TechnicalSettings) -> TrendAnalysi
 
 
 def support_resistance(df: pd.DataFrame, settings: TechnicalSettings) -> LevelsResult:
-    """The legacy simple algorithm, verbatim: a `settings.sr_lookback`-bar
-    high/low window (or the whole frame when shorter) plus synthetic
-    +-5%/+-10% levels around the current close. Real pivot detection is a
-    future feature -- this is deliberately simple, not parity with
-    professional S/R analysis."""
+    """OBSERVED levels only: the lowest low and highest high of the last
+    `settings.sr_lookback` bars (or the whole frame when shorter), with their
+    provenance. Changed 2026-10-08: the legacy algorithm also mixed in
+    synthetic +-5%/+-10% offsets from the close, unlabelled, which an agent
+    could mistake for real structure. An observed extreme is evidence of
+    where price traded -- not a claim that the level is predictive, and not
+    pivot/support analysis."""
     if df.empty or not {"High", "Low", "Close"}.issubset(df.columns):
         return LevelsResult(support=[], resistance=[])
 
     lookback = settings.sr_lookback
     window = df.iloc[-lookback:] if len(df) >= lookback else df
-    min_low = float(window["Low"].min())
-    max_high = float(window["High"].max())
-    close = float(df["Close"].iloc[-1])
-
-    support = sorted(
-        {round(min_low, 2), round(close * 0.95, 2), round(close * 0.90, 2)}
+    last = window.index[-1]
+    return LevelsResult(
+        support=[round(float(window["Low"].min()), 2)],
+        resistance=[round(float(window["High"].max()), 2)],
+        method="observed lowest low / highest high of the lookback window; not pivot analysis",
+        lookback_bars=len(window),
+        as_of=str(last.date()) if hasattr(last, "date") else str(last),
     )
-    resistance = sorted(
-        {round(max_high, 2), round(close * 1.05, 2), round(close * 1.10, 2)}
-    )
-    return LevelsResult(support=support, resistance=resistance)
 
 
 def generate_outlook(

@@ -25,6 +25,9 @@ own optional reading — **not** required context and not authoritative.
 This file and the repo's own source (`RULES.md`, `AGENTS.md`, `SOUL.md`,
 actual code) are.
 
+**Standing workflow:** read this file → implement → verify → update this file → commit.
+The handoff refresh is part of completion, not optional.
+
 ---
 
 ## 2. Project purpose
@@ -41,8 +44,8 @@ swing-trading horizon** (days to weeks) — reasoning over technicals and news
 and gated by a hard-coded risk checker before anything executes. It runs using
 the Hermes agentic harness. The trading system has two modes: **backtest**
 (point-in-time historical simulation, identity-masked so the model can't
-recall what really happened) and **live** (real Alpaca paper-trading API,
-never yet run). This is a **permanent paper-money sandbox** — the goal is
+recall what really happened) and **live** (real Alpaca paper-trading API; the
+`live/` controller is built and is the active direction, §10). This is a **permanent paper-money sandbox** — the goal is
 honest evidence about whether the trading agent's judgment is any good, not
 protecting a balance or preparing for real capital.
 
@@ -55,7 +58,7 @@ Two rounds so far:
 
 ---
 
-## 3. Current verified state
+## 3. Historical Round 2 run — verified state (frozen)
 
 **Active run:** `run_id e68525f9-ce89-4588-a57e-866f28cd99fd`, window
 2026-02-17 → 2026-08-14, seed 42.
@@ -71,7 +74,8 @@ Two rounds so far:
 
 **Verified via real, run-scoped Neon queries:** no duplicate `cycle_id` or `decision_id` anywhere in this run; exactly one `cycle_failed` activity row exists (the Day 50 incident below — preserved intentionally, not deleted); `backtest_cycle_evidence` holds exactly 25 rows (cycles 26–50 only — see §7); all 35 tranche-1 `trades` rows are byte-for-byte unchanged from their original values.
 
-**Git:** branch `round2-prep-judgment-layer`, merged into `main` and pushed (§7's benchmark/sensitivity work is the most recent addition). `docs/PROJECT_BACKLOG.md` and `docs/research/` are separate, still-iterating untracked documents — leave untouched unless the user says otherwise. Full commit history: `git log`, not restated here.
+**Git:** work happens on `main`; history is in `git log`. `docs/research/` and other user-owned working
+files stay untouched and unstaged unless the user says otherwise.
 
 **The Day 50 incident, resolved:** a real `expected_reward_risk` BUY/SELL contract mismatch halted cycle 9 of a resumed attempt (real date 2026-04-07); fixed in `7c4ac06` (made the contract action-aware: BUY requires finite `>0`, SELL/other permits finite `>=0`), verified against the real checkpointed payload, and the run completed cleanly to 50 cycles with zero further failures. Full narrative: `docs/history/HANDOFF_FULL_2026-09-01_PRE_COMPACTION.md`. The historical `cycle_failed` Neon row is preserved as an honest record, not deleted.
 
@@ -101,8 +105,10 @@ same-day lookahead. Essential cycle data commits atomically before
 best-effort observability is attempted — a crash after commit can lose
 dashboard detail but never duplicate a trade or a trading-agent call.
 
-**Live mode:** the trading agent calls MCP tools directly against real (paper)
-broker/news endpoints. Never yet run.
+**Live mode:** the `live/` controller (not the gateway's default profile) runs a durable reconcile →
+manage → research → plan → validate → submit loop on Alpaca's paper account. Hermes runs in an isolated
+`live` profile with whitelisted research tools only; the controller sizes, submits, protects and
+journals. Real names and times; the masker is not used. Limits: `docs/live_paper_runbook.md`.
 
 **Where each kind of data lives:**
 
@@ -136,6 +142,8 @@ restatement of every threshold.
   `>= 0` — 0.0 is the honest value for a closing decision, never
   fabricated. Enforced identically in the backtest response validator,
   `trade-journal-mcp`'s Python validation, and the Neon `CHECK` constraint.
+- **Live policy** (`live/LIVE_POLICY.md`) overrides `RULES.md` only where it says so: no §6c 5-day time
+  stop, no activity goals. Numeric limits, prohibitions, veto-only news and models are unchanged.
 
 ---
 
@@ -174,45 +182,21 @@ restatement of every threshold.
   at execution-time risk checks, 0 fills. Confirmed: real SEC provenance
   recorded privately, zero real ticker/CIK/filing identity agent-facing,
   `anonymous` still zero grants, Round 2 untouched (sha256-verified each
-  attempt). (4) **still not done:** live mode; any training/evaluation
+  attempt). (4) **still not done:** any training/evaluation
   run — the path
   works end-to-end but no BUY has ever filled under it — frozen pending
   that decision.
-- **Regime-diverse evaluation suite** (`backtest-harness/eval_suite.py`,
-  `test_eval_suite.py` 128 assertions, implemented 2026-09-13, corrected
-  twice same day) — infrastructure only, not an approved experiment
-  (`docs/PROJECT_BACKLOG.md` §4). Manifest generation classifies SPY
-  months by a fixed pre-committed rule, stratified-samples a comparison
-  suite + later disjoint holdout, and writes a versioned, SHA-256-hashed
-  `"proposed"` manifest. **First correction pass**: non-bypassable
-  approval (`run_configuration()` is the only public executor,
-  `_run_episode` internal, verified before any register_run/journal/
-  market-data call), `fill_count` derived from `run_day`'s new
-  structured `summary["fills"]`/`["proposals"]` instead of `decisions`
-  text, and guaranteed 4-regime holdout coverage via backward pool
-  expansion. **Second correction pass (experiment design)**: (1)
-  **"sideways" is now genuinely quiet**, not a residual bucket — requires
-  both a small net move (±2%) AND low daily variance (<1.0 pct pt); a
-  month meeting none of the 4 required regimes is `"unclassified"` and
-  excluded from both pools, never forced into sideways — this exposed
-  and fixed a latent bug in `select_holdout_pool`'s own stop condition
-  (assumed a dense month list; now stops at the calendar boundary of the
-  earliest eligible month); (2) a **read-only fixed-watchlist viability
-  audit** now runs for every selected episode — `run_backtest.
-  fetch_technicals` (the SAME real production path) checked at the
-  episode's first/last trading day per ticker, plus a purely descriptive,
-  never-gating monthly movement range; `propose_manifest` fails clearly,
-  naming the ticker/month, if any watchlist name lacks enough point-in-
-  time data; `run_configuration` now also refuses any manifest whose
-  `watchlist_viability` is missing/malformed/failing, even if approved
-  and hash-valid. **Manifest regeneration still blocked, by design, on a
-  real finding, not a bug** — see §14 for the 2026-09-15 attempt at the
-  user's own chosen range (`2022-06-01`), why it's ALSO infeasible, and
-  the exact tradeoff still unresolved. The committed
-  `eval_suites/manifest_20260913T154853_887d30cff268.json` stays stale
-  (`manifest_version: 2`) and `run_configuration` correctly refuses it.
-  Still **defined but never invoked** either way — no episode,
-  comparison, or Bayesian search has run.
+- **Live-paper controller** (`live/`, 2026-10-08): `engine.py` (state machine), `agent.py` (Hermes seam),
+  `selector.py` (Laya adapter), `adapters.py` (broker/journal I/O in the service containers),
+  `run_live.py` (CLI), tests `live/test_live*.py`. Mock- and read-only-verified only; see §10 and
+  `docs/live_paper_runbook.md`.
+- **Regime-diverse evaluation suite** (`backtest-harness/eval_suite.py`, `test_eval_suite.py`) —
+  experiment infrastructure (`docs/PROJECT_BACKLOG.md` §4): classifies SPY months by a fixed rule,
+  stratified-samples comparison + holdout episodes, writes a versioned SHA-256-hashed manifest;
+  `run_configuration()` is the only executor and refuses unapproved, stale or non-viable manifests
+  (`eval_suites/manifest_20260913T154853_887d30cff268.json` is stale v2 and correctly refused).
+  The v4 manifest was approved and `baseline_v1` ran its four comparison episodes (§14); no holdout
+  episode, Bayesian search or training run has been executed. Correction-pass detail: §13/§14.
 
 ---
 
@@ -242,8 +226,7 @@ Backs this with a durable **exit provenance** field (`trades.exit_provenance`, `
 
 ## 8. Known limitations and deferred work
 
-- **Live bracket orders** — `alpaca-mcp`'s `place_order` submits one order, no OCO/bracket; nothing rests a real stop at the broker live.
-- **Broker partial fills** — not modeled in either mode.
+- **Live bracket orders / partial fills** — handled only by `live/` (OCO sized to the filled quantity, verified at the broker); `alpaca-mcp`'s `place_order` stays single-order and unused there; the backtest models neither.
 - **Circuit-breaker latching** — breakers re-evaluate fresh every cycle from live P&L, not latched for the rest of a halted period.
 - **Survivorship bias** — the watchlist was screened using data from inside the exact backtest window.
 - **Asyncpg statement-cache fix's narrow scope** — `statement_cache_size=0` is only applied in `trade-journal-mcp/server.py`.
@@ -272,35 +255,32 @@ number needs to go through the user explicitly.
 
 ## 10. Exact next step
 
-**Two independent tracks are both mid-flight — do not conflate them.**
+**Active direction (2026-10-08): live-paper trading on Alpaca's paper account.** Historical
+development is frozen except minimal regression checks (`python verify.py`). The masker, manifests,
+results, checkpoints and `baseline_*` evidence are out of scope and must not change. Runbook,
+commands and evidence: `docs/live_paper_runbook.md`; rules for live Hermes: `live/LIVE_POLICY.md`.
 
-**Evaluation track:** the read-only evaluation and benchmark/sensitivity
-pass on the complete 50-cycle run are done (§7). Next: a human decision
-among that report's own three options — (a) existing evidence suffices
-for Bayesian optimization, (b) run another unchanged tranche first, or
-(c) improve measurement first. **Its own recommendation is (c)**, a
-recommendation to weigh, not a decision made. Until that review happens:
-no start/reset/resume training; no `RULES.md`/`AGENTS.md`/`SOUL.md`/
-model/provider change; no Bayesian optimization; no fundamental-data work.
+**What exists, by evidence level (do not conflate):**
+- **Implemented:** `live/` — durable broker reconciliation, entry/exit/protection state machine,
+  fresh-quote/news execution gate, Laya shortlist adapter (up to 20 names, daily snapshot), isolated
+  `live` Hermes profile (research tools only), journal writes, OS-level cycle lock.
+- **Mock-tested:** 73 `live/` tests plus `python verify.py` (13/13 suites) against a fake broker
+  that models Alpaca's states and refusals.
+- **Real-data-tested, read-only (2026-10-08):** paper broker reads, maverick bars, the Laya worker on
+  the frozen ten names (`--universe watchlist`, a temporary explicit choice), and one Hermes
+  research call; zero orders. **No real paper-order lifecycle (entry, OCO, cancel, replace, partial
+  fill) has been verified**, and the 20-name pool path has not run on real data.
 
-**Implementation track (agreed NOW order — see `docs/obsidian/03-project-workflow.canvas`):**
-step 1, the Obsidian vault, is **done**. Step 2, **Dashboard V2**
-(`dashboard-v2/`, full IA + visual rebuild) **exists as an unactivated
-candidate, not yet cut over to be the active dashboard** — V1 stays
-active until an explicit cutover decision, but V2 is already a genuinely
-**public** Cloudflare Pages preview (`dashboard-v2/README.md` §Deployment)
-— not loopback-only; corrects §4/§6 (prior audit H3). Then the
-individual-trade view, then the experiment/optimization framework.
-NEXT/LATER canvas items stay discussion-only until explicitly approved.
+**Next, in order:** (1) record the wider-pool snapshot (prerequisite) — `watchlist/scalable_screener.py
+--write` on a Saturday/Sunday UTC, usable from the following Monday — then repeat the read-only dry
+run on the default `--universe screened`; (2) a separately authorized, supervised paper session
+(`python live/run_live.py cycle`, watched; no unattended `loop`); (3) only then deployment preparation.
 
-**Current status (2026-10-04):** V2's **Workflow** page is now an approved
-agent-centred diagram, with Hermes inside the backtest controller. It reads
-`public_workflow_events` and opens on exemplar smoke run `a0f96768…`, Day
-2. See `docs/evaluations/workflow_dashboard_2026-10-03.md` §6.
-`baseline_v1` and `baseline_v2` are both complete, and their read-only
-comparison (`docs/evaluations/baseline_v1_vs_v2_evaluation.md`) is mixed
-and makes no causal claim. Whether to freeze the pair is still the user's
-decision.
+**Paused tracks (not cancelled; links only):** evaluation — the 50-cycle report recommends improving
+measurement first (`docs/evaluations/round2_50cycle_evaluation_extract.md`; §7, §14), no training,
+no Bayesian optimization; Dashboard V2 is a public preview with V1 still active (`dashboard-v2/README.md`);
+`baseline_v1`/`baseline_v2` are complete and compared without a causal claim
+(`docs/evaluations/baseline_v1_vs_v2_evaluation.md`); Workflow page: `docs/evaluations/workflow_dashboard_2026-10-03.md`.
 
 ---
 
@@ -313,6 +293,7 @@ decision.
 | `SOUL.md` | The trading agent's identity/temperament (Phase 2, active). |
 | `backtest-harness/run_backtest.py`, `anonymize.py`, `backtest_state.json` | Harness/orchestrator (masking, checkpointing, escalation, evidence capture); local gitignored in-progress portfolio state. |
 | `risk-checker/risk_checker.py` | Deterministic rule enforcement, shared live/backtest. |
+| `live/`, `docs/live_paper_runbook.md` | Live-paper controller + tests; operator runbook (commands, evidence, limits). |
 | `trade-journal-mcp/server.py`, `schema.sql` | Neon reads/writes, idempotency, action-aware `expected_reward_risk` validation, `backtest_cycle_evidence`. |
 | `alpaca-mcp/`, `maverick-mcp/`, `google-news-rss-mcp/`, `execution-sim-mcp/` | The other four tool containers. |
 | `dashboard/index.html` | Local-only dashboard frontend (V1 — see §10 for V2). |
@@ -327,7 +308,7 @@ decision.
 
 ## 12. Resume command — reference only, guarded by explicit approval
 
-**Do not run this until the user has reviewed §10 and explicitly says to
+**Historical development is frozen (§10). Do not run this until the user explicitly says to
 continue training this run.**
 
 ```

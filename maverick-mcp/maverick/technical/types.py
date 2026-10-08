@@ -56,6 +56,11 @@ class TrendAnalysis(BaseModel):
 class LevelsResult(BaseModel):
     support: list[float]
     resistance: list[float]
+    # Provenance (2026-10-08): how the levels were obtained. None only when
+    # no levels could be computed.
+    method: str | None = None
+    lookback_bars: int | None = None
+    as_of: str | None = None
 
 
 class FullTechnicalAnalysis(BaseModel):

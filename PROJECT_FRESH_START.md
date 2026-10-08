@@ -2,7 +2,7 @@
 
 **Purpose of this file:** a from-zero, code-verified explanation of what this project actually is *today*. Every claim below was checked directly against the repository (code and active configuration) as of 2026-08-29, not recalled from memory or from prior conversations. Where something is a plan rather than a fact, it is labeled as a plan. If you remember this project differently, trust this file over your memory.
 
-**Status note (2026-08-29):** the six-month controlled training run has started (`run_id` live in `backtest_state.json`), following four correctness passes after this file's original 2026-08-27 audit. The architecture below reflects the current, post-training-start code — see `HANDOFF.md` for the live run's own progress, which this file does not track.
+**Status note (2026-08-29):** the six-month controlled training run has started (`run_id` live in `backtest_state.json`), following four correctness passes after this file's original 2026-08-27 audit. The architecture below reflects the current, post-training-start code — see `HANDOFF.md` for the live run's own progress, which this file does not track. **Update 2026-10-08:** historical development is frozen and live-paper trading is the active direction; `HANDOFF.md` §10 is authoritative for status and the next step.
 
 Not a history lesson — past decisions are mentioned only when they explain why something works the way it does now.
 
@@ -308,8 +308,8 @@ This is `AGENTS.md`'s live-mode cycle, in order. The **backtest** mode follows t
 ### Deferred known issues
 *(Real, open items — from direct repo/`HANDOFF.md` verification.)*
 
-- **Live bracket orders** — `alpaca-mcp`'s `place_order` submits one order, no OCO/bracket; nothing rests a stop at the broker in live mode
-- **Broker partial fills** — neither live nor backtest models an involuntary broker partial fill (venue fills fewer shares than requested); every fill is all-or-nothing. Distinct from the one-lot model (RULES.md §9.1): as of 2026-08-28 a *discretionary* partial SELL is rejected outright by `risk_checker.py` at both decision and execution time — this bullet is about the broker's own fill granularity, unrelated and still open.
+- **Live bracket orders** — solved only in `live/` (an OCO sized to the filled quantity, verified at the broker); `alpaca-mcp`'s `place_order` still submits one order and live paper does not use it
+- **Broker partial fills** — the backtest does not model an involuntary broker partial fill (`live/` handles them) (venue fills fewer shares than requested); every fill is all-or-nothing. Distinct from the one-lot model (RULES.md §9.1): as of 2026-08-28 a *discretionary* partial SELL is rejected outright by `risk_checker.py` at both decision and execution time — this bullet is about the broker's own fill granularity, unrelated and still open.
 - **Circuit-breaker latching** — breakers are re-evaluated fresh every cycle from live P&L, not latched for the rest of a halted period
 - **Survivorship bias** — the watchlist was screened using data from inside the exact window being backtested; tuning-window P&L should be read as noise, not signal
 - **No benchmark series** — no S&P MidCap 400 comparison line is wired into results yet

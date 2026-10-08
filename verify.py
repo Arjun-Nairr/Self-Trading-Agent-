@@ -37,6 +37,8 @@ REPO = Path(__file__).resolve().parent
 SUITES: list[tuple[str, str, list[str], dict[str, str]]] = [
     ("backtest-harness (pytest)", "backtest-harness",
      [sys.executable, "-m", "pytest", "-q"], {}),
+    ("live paper controller (pytest)", "live",
+     [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"], {}),
     ("risk-checker", "risk-checker",
      [sys.executable, "test_risk_checker.py"], {}),
     ("alpaca-mcp: account_math", "alpaca-mcp",

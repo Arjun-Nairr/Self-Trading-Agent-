@@ -360,7 +360,7 @@ def select_pool(
     as_of: date,
     seed: int,
     latest_bar_dates: Mapping[str, date] | None = None,
-    k: int = MAX_SELECTED,
+    k: int = MAX_SELECTED, max_k: int = MAX_SELECTED,
 ) -> tuple[SelectionRow, ...]:
     """Rank by DESCENDING review_probability; break exact ties by ascending
     seeded hash of the opaque row ID; select up to `k` (default 10) -- fewer
@@ -373,8 +373,8 @@ def select_pool(
     (stale). `latest_bar_dates` (row_id -> date of the last bar the card was
     built from) is optional; without it freshness is "unverified" and not
     gated on. A bar dated AFTER `as_of` is lookahead and raises."""
-    if not 0 < k <= MAX_SELECTED:
-        raise ValueError(f"k must be in 1..{MAX_SELECTED}, got {k}")
+    if not 0 < k <= max_k:
+        raise ValueError(f"k must be in 1..{max_k}, got {k}")
     ids = [c.row_id for c in cards]
     if len(set(ids)) != len(ids):
         raise ValueError("duplicate row_id among cards")
@@ -468,10 +468,10 @@ def inputs_digest(
 def build_snapshot(
     *, universe: FixedUniverse, scorer: ScorerMetadata, as_of: date, seed: int,
     cards: Sequence[CandidateCard], scores: Mapping[str, ScoreRecord],
-    latest_bar_dates: Mapping[str, date] | None = None, k: int = MAX_SELECTED,
+    latest_bar_dates: Mapping[str, date] | None = None, k: int = MAX_SELECTED, max_k: int = MAX_SELECTED,
 ) -> SelectionSnapshot:
     rows = select_pool(cards, scores, as_of=as_of, seed=seed,
-                       latest_bar_dates=latest_bar_dates, k=k)
+                       latest_bar_dates=latest_bar_dates, k=k, max_k=max_k)
     return SelectionSnapshot(
         schema_version=SNAPSHOT_SCHEMA_VERSION, selector_version=SELECTOR_VERSION,
         scorer=scorer, universe_version=universe.version, universe_hash=universe.hash,
