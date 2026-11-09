@@ -207,6 +207,7 @@ def _episode_end(tmp, n, journal, backend=None):
         def f(decision_id, reason):
             log.append((decision_id, reason))
             journal(decision_id)
+            return {"status": "rejected", "applied": True}       # the journal's reply for a still-pending row
         return f
     p1 = Portfolio(cash=1.0, holdings=dict(held), pending_orders=_pending(m, n))
     with patch("eval_suite.resolve_trade_rejection", side_effect=fake(calls_plain)):
@@ -497,6 +498,7 @@ def _eval_episode(tmp_path, monkeypatch, manifest, *, pending, journal_fails=Fal
         journal.append(reason)
         if journal_fails:
             raise RuntimeError("journal down for OLN Olin Corporation")
+        return {"status": "rejected", "applied": True}
 
     backend = Backend("raise" if mode == "raising" else 200)
     trace_dir = tmp_path / "bt"

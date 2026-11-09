@@ -184,6 +184,9 @@ _BRAND_OVERRIDES = {
     "SCHW": ["Charles Schwab"],
     "HBAN": ["Huntington Bancshares"],
     "MPC": ["Marathon Los Angeles"],
+    # 2026-11-09: halted July 2022 Laya run 6cc8687b -- headlines use the two-word short form, which the
+    # suffix-stripping and the one-word brand never produced, so the guard saw "<alias> Interactive".
+    "TTWO": ["Take-Two Interactive"],
 }
 
 
@@ -3776,24 +3779,37 @@ asyncio.run(main())
     run_in("trade-journal", script)
 
 
-def resolve_trade_rejection(decision_id: str, reason: str) -> None:
+def resolve_trade_rejection(decision_id: str, reason: str) -> "dict | None":
     """Resolve an already-journaled queued decision to a REJECTION --
     never fabricates fill_price/fill_quantity (both stay NULL, the
-    correct honest state for something that never actually filled)."""
+    correct honest state for something that never actually filled).
+
+    The journal only changes a row that is still 'pending' and otherwise
+    returns the row as it already is, so this reports what actually
+    happened: {"status": <row status after the call>, "applied": True only
+    if the row now carries THIS rejection}. None if the reply could not be
+    read (callers must then say the outcome is unknown, never "written")."""
     script = f'''
-import asyncio
+import asyncio, json
 from server import _record_execution_result
 
 async def main():
-    await _record_execution_result(
+    row = await _record_execution_result(
         {decision_id!r}, status="rejected",
         rejection_reason={reason[:900]!r},
         execution_mode="backtest",
     )
+    print(json.dumps({{"status": row.get("status"), "rejection_reason": row.get("rejection_reason")}}, default=str))
 
 asyncio.run(main())
 '''
-    run_in("trade-journal", script)
+    out = run_in("trade-journal", script)
+    try:
+        row = json_from(out)
+    except Exception:
+        return None
+    return {"status": row.get("status"),
+            "applied": row.get("status") == "rejected" and row.get("rejection_reason") == reason[:900]}
 
 
 def _exit_provenance_for_reason(reason: str) -> str:

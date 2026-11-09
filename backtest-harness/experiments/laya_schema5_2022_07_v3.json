@@ -1,0 +1,55 @@
+{
+ "_comment": "Frozen config for ONE single-arm July 2022 Laya rerun at prompt schema 5 after the v2 halt (run 6cc8687b). Same pool, window, seed, Laya worker/checkpoint, Hermes model and decision path as v2; differs only by the masking, halt-reporting and trace-redaction fixes in code.",
+ "experiment_id": "laya-schema5-2022-07-v3",
+ "status": "authorized",
+ "authorization": "User request in the Claude Code session of 2026-11-09: authorize laya_schema5_2022_07_v3.json, make a scoped local commit with the verified fixes and this config, and launch the July 2022 Laya arm once with Langfuse tracing; historical simulation only; v2 and existing hosted traces intact.",
+ "plan": {
+  "path": "docs/evaluations/laya_schema5_plan_v3_2026-11-09.md",
+  "sha256": "8d1dc7d75c3310fc7c6c1f3a6cc3546817ee66008736fe04c2ab15e5a377d729"
+ },
+ "arms": [
+  "laya",
+  "random"
+ ],
+ "authorized_arms": [
+  "laya"
+ ],
+ "run_kind": "evaluation",
+ "prompt_schema_version": 5,
+ "buy_quantity_owner": "controller (run_backtest.required_entry_quantity)",
+ "window": {
+  "start": "2022-07-01",
+  "end": "2022-07-31"
+ },
+ "pool": {
+  "path": "watchlist/experimental_pools/candidates60-v1-pool-2022-07-01-aafefb19a6c5.json",
+  "content_sha256": "c56a46727b701ac18a209031e9e2f6736c3d3e38c090649e721c13a99919c318",
+  "evidence_sha256": "aafefb19a6c54908a4fc747514decfdf02c356728c18de3fe20526dde4a6b387",
+  "universe_hash": "1f3d88b61b00441316e5c79e03bc11c0033b3eb6bbcf94d2d160256450d64d34",
+  "members": 48
+ },
+ "masking_seed": 42,
+ "random_seed": "laya-schema5-2022-07-v3",
+ "k": 10,
+ "starting_equity": 100000,
+ "fundamentals_enabled": false,
+ "laya": {
+  "image": "hermes-laya-worker:2",
+  "image_id": "sha256:d423bbf734cfb4a887c8d108d81d78365daac7bc0dd6eb97d8f7267696822093",
+  "package_version": "0.3.23",
+  "checkpoint_revision": "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851",
+  "weights_sha256": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+  "question_format": "noul-criteria-v2"
+ },
+ "model": {
+  "model": "gpt-5.6-terra",
+  "provider": "openai-codex",
+  "reasoning_effort": "medium"
+ },
+ "tracing": "optional controller-side backtest tracing (backtest_tracing.py; ~/.hermes-trading-agent-backtest), export-only, fail-open",
+ "supersedes": {
+  "experiment_id": "laya-schema5-2022-07-v2",
+  "run_id": "6cc8687b-696d-4a80-b23a-c2a754c2aa37",
+  "outcome": "halted session 2 (identity guard); preserved unchanged"
+ }
+}

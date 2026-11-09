@@ -266,7 +266,8 @@ def _arm(tmp_path, monkeypatch, mode, pending=True):
          patch("run_backtest._cleanup_ephemeral_hermes_runtime"), \
          patch("laya_experiment.RandomSelectorContext", Sel), \
          patch("run_backtest.run_day", side_effect=fake_run_day) as fake, \
-         patch("eval_suite.resolve_trade_rejection", side_effect=lambda d, r: journal.append((d, r))):
+         patch("eval_suite.resolve_trade_rejection",
+               side_effect=lambda d, r: journal.append((d, r)) or {"status": "rejected", "applied": True}):
         rc = lvr.run_arm("random", None, cfg_path, root=tmp_path / "out")
         assert rb.run_day is fake, "run_day restored after the arm"
     assert es.resolve_episode_end_pending.__name__ == "resolve_episode_end_pending"

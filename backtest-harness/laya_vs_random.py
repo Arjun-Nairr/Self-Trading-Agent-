@@ -324,19 +324,34 @@ def run_arm(arm: str, laya_checkpoint: str | None, config_path: Path = CONFIG_PA
             rb._clear_checkpoint()
             cursor += timedelta(days=1)
 
-        dangling = es.resolve_episode_end_pending(portfolio)
+        # A halted cycle may already have journaled a fill/exit that its discarded state never committed.
+        rec = es.halted_reconciliation(run_id, portfolio) if halted else {"status": "not_needed"}
+        committed = portfolio.to_dict()              # before episode-end resolution clears pending orders
+        outcomes: dict = {}
+        dangling = es.resolve_episode_end_pending(portfolio, outcomes)
+        unreconciled = rec["status"] == "unreconciled"
+        curve = portfolio.equity_curve
         final = {
             "status": "halted" if halted else "completed", "run_id": run_id, "finished_at": _now(),
             "sessions_completed": sessions, "halted_on": cursor.isoformat() if halted else None,
-            "terminal_pending_resolved": [{"ticker": o.ticker, "decision_id": o.decision_id} for o in dangling],
-            "equity_curve": portfolio.equity_curve, "portfolio": portfolio.to_dict(),
+            "terminal_pending_resolved": [{"ticker": o.ticker, "decision_id": o.decision_id,
+                                           "journal_outcome": outcomes.get(o.decision_id)} for o in dangling],
+            "portfolio_reconciliation": rec,
+            # Unreconciled: the journal holds activity this portfolio never committed, so neither the equity
+            # curve nor return/drawdown is reported; the last committed portfolio is kept, labelled as such.
+            "equity_curve": None if unreconciled else curve,
+            "return_pct": None if unreconciled or not curve else round((curve[-1] - curve[0]) / curve[0] * 100, 4),
+            "max_drawdown_pct": None if unreconciled else es._max_drawdown_pct(curve),
+            "portfolio": None if unreconciled else portfolio.to_dict(),
+            "last_committed_portfolio": committed if unreconciled else None,
             "alias_mapping_hash": alias_hash, "masking_seed": seed, "provenance": prov,
         }
         (arm_dir / "result.json").write_text(json.dumps(final, indent=1, default=str), encoding="utf-8")
         _write_marker(arm_dir, {**marker, "status": final["status"], "run_id": run_id,
                                 "sessions_completed": sessions}, exclusive=False)
+        equity = "UNRECONCILED (see result.json)" if unreconciled else f"{portfolio.equity_curve[-1]:,.2f}"
         print(f"arm {arm}: {final['status']}, run_id {run_id}, {sessions} sessions, "
-              f"equity {portfolio.equity_curve[-1]:,.2f}, terminal pending resolved {len(dangling)}")
+              f"equity {equity}, terminal pending resolved {len(dangling)}")
         return 0 if not halted else 1
     except BaseException as exc:
         if (arm_dir / "ARM.json").exists():

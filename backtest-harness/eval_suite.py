@@ -853,19 +853,71 @@ def _max_drawdown_pct(equity_curve: list[float]) -> float:
     return round(worst, 4)
 
 
-def resolve_episode_end_pending(portfolio: Portfolio) -> list:
+EPISODE_END_REASON = "episode window ended before execution"
+
+
+def journal_outcome_label(result) -> str:
+    """What the journal actually did with an episode-end rejection request (resolve_trade_rejection's reply)."""
+    if not isinstance(result, dict) or not result.get("status"):
+        return "rejection requested; journal status not reported"
+    if result["status"] == "rejected":
+        return "rejected; journal row written" if result.get("applied") else "already rejected; no change"
+    return f"not rejected: journal row already {result['status']}"
+
+
+def journal_trade_statuses(run_id: str) -> list[dict]:
+    """Read-only: (decision_id, action, status) of every trades row this run wrote."""
+    script = f'''
+import asyncio, json
+from server import get_pool
+async def main():
+    pool = await get_pool()
+    rows = await pool.fetch("SELECT decision_id, action, status FROM trades WHERE run_id = $1::uuid", "{run_id}")
+    print(json.dumps({{"rows": [dict(r) for r in rows]}}, default=str))
+asyncio.run(main())
+'''
+    return json_from(run_in("trade-journal", script))["rows"]
+
+
+def halted_reconciliation(run_id: str, portfolio: Portfolio, fetch_rows=None) -> dict:
+    """After a halt, compare the journal with the LAST COMMITTED portfolio (a halted cycle's state is discarded,
+    but anything it already journaled stays). Conflicts: a pending order the journal no longer has pending (e.g.
+    already filled), a pending journal row the portfolio does not carry, or more filled SELL rows than closed
+    trades. Any conflict -> "unreconciled": the portfolio cannot be recovered safely from existing state, so
+    return and drawdown must not be reported. A journal that cannot be read is also unreconciled."""
+    try:
+        rows = (fetch_rows or journal_trade_statuses)(run_id)
+    except Exception as exc:
+        return {"status": "unreconciled", "reason": f"journal unreadable ({type(exc).__name__})", "conflicts": []}
+    pending = {o.decision_id for o in portfolio.pending_orders}
+    conflicts = [{"decision_id": r["decision_id"], "journal_status": r["status"], "portfolio": "pending order"}
+                 for r in rows if r["decision_id"] in pending and r["status"] != "pending"]
+    conflicts += [{"decision_id": r["decision_id"], "journal_status": "pending", "portfolio": "absent"}
+                  for r in rows if r["status"] == "pending" and r["decision_id"] not in pending]
+    sells = sum(1 for r in rows if str(r.get("action")).upper() == "SELL" and r["status"] == "filled")
+    if sells > len(portfolio.closed_pnl):
+        conflicts.append({"journal_filled_sells": sells, "portfolio_closed_trades": len(portfolio.closed_pnl)})
+    return {"status": "unreconciled" if conflicts else "reconciled", "conflicts": conflicts}
+
+
+def resolve_episode_end_pending(portfolio: Portfolio, outcomes: dict | None = None) -> list:
     """Episode-boundary semantics shared by every one-month evaluation
     episode (see _run_episode): an episode never resumes, so each order still
     pending at its end is resolved as rejected ("episode window ended before
     execution") through the harness's own resolve_trade_rejection path --
     best-effort per order -- and cleared. Open holdings are NOT liquidated.
-    Returns the orders it resolved."""
+    Returns the orders it resolved. `outcomes` (optional) receives, per
+    decision_id, what the journal actually did (journal_outcome_label): an
+    order the journal already holds as filled is reported as such, never as
+    a written rejection."""
     dangling = list(portfolio.pending_orders)
     for order in dangling:
         try:
-            resolve_trade_rejection(order.decision_id, "episode window ended before execution")
-        except Exception:
-            pass
+            label = journal_outcome_label(resolve_trade_rejection(order.decision_id, EPISODE_END_REASON))
+        except Exception as exc:
+            label = f"journal write failed ({type(exc).__name__})"
+        if outcomes is not None:
+            outcomes[order.decision_id] = label
     portfolio.pending_orders = []
     return dangling
 
@@ -1005,6 +1057,8 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
         # Best-effort (never masks the episode's own halted/report outcome,
         # same discipline as do_observability above) -- but real: reuses the
         # exact resolve_trade_rejection path the main harness itself uses.
+        # A halted cycle may already have journaled a fill/exit its discarded state never committed.
+        reconciliation = halted_reconciliation(run_id, portfolio) if halted else {"status": "not_needed"}
         dangling_pending_orders = resolve_episode_end_pending(portfolio)
     finally:
         _close_episode_tracing(tracing)
@@ -1051,12 +1105,15 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
         },
         "halted": halted,
         "days_completed": len(day_summaries),
-        "return_pct": (
+        # None when a halt left the journal and the last committed portfolio disagreeing (unreconciled).
+        "portfolio_reconciliation": reconciliation,
+        "return_pct": None if reconciliation["status"] == "unreconciled" else (
             round((portfolio.equity_curve[-1] - portfolio.equity_curve[0])
                   / portfolio.equity_curve[0] * 100, 4)
             if portfolio.equity_curve else 0.0
         ),
-        "max_drawdown_pct": _max_drawdown_pct(portfolio.equity_curve),
+        "max_drawdown_pct": (None if reconciliation["status"] == "unreconciled"
+                             else _max_drawdown_pct(portfolio.equity_curve)),
         "fill_count": len(fills),
         "proposal_count": len(proposals),
         "closed_trade_count": len(portfolio.closed_pnl),

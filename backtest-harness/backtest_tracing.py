@@ -66,6 +66,10 @@ def trace_dir_problem(d: Path) -> str | None:
     return None
 
 
+# An identity-guard failure (identity_cues.IdentityCueDetected, anonymize.LeakDetected) carries the very cue it
+# blocked; any exported string containing one becomes a fixed reason code.
+_IDENTITY_FAILURE = re.compile(r"\b(?:IdentityCueDetected|LeakDetected)\b")
+IDENTITY_BLOCKED = "IdentityCueDetected: reason=identity_guard_blocked (detail withheld from export)"
 _UUID = re.compile(r"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b")
 
 
@@ -94,6 +98,8 @@ class Scrubber:
         return u if u == self._run_id else "ref-" + hmac.new(self._key, u.encode(), "sha256").hexdigest()[:16]
 
     def text(self, s: str) -> str:
+        if _IDENTITY_FAILURE.search(s):
+            return IDENTITY_BLOCKED          # the guard's own message names the cue it blocked: never export it
         for pattern, alias in self._subs:
             s = pattern.sub(alias, s)
         return _UUID.sub(self._ref, s)
@@ -240,7 +246,9 @@ class TraceSession:
                     except Exception as exc:
                         outcomes[str(decision_id)] = f"journal write failed ({type(exc).__name__})"
                         raise
-                    outcomes[str(decision_id)] = "rejected; journal row written"
+                    label = getattr(mod, "journal_outcome_label", None)
+                    outcomes[str(decision_id)] = (label(r) if callable(label) else
+                                                  "rejection requested; journal status not reported")
                     return r
 
             root = tr.tracer.trace("backtest_episode_end", metadata={**tr.meta,
