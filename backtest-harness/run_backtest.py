@@ -100,7 +100,15 @@ STARTING_EQUITY = 100_000.0
 # 4 (2026-10-07 integrity repair): candidate levels are observed-only with
 # provenance (S#/R#), plus a STOP EVIDENCE instruction; maverick's synthetic
 # percentage levels are no longer rendered.
-PROMPT_SCHEMA_VERSION = 4
+# 5 (2026-11-06 corrections): (a) every candidate/position carries an explicit
+# news status -- "No headlines found in the checked window" for a complete,
+# empty fetch vs. UNAVAILABLE -- instead of silently omitting the line; (b)
+# BUY share quantity is controller-owned (required_entry_quantity, computed
+# after Hermes' entry/stop, in proposal order against remaining cash). Hermes
+# no longer sends a BUY quantity; a legacy one is ignored. Runs/evidence rows
+# at version <= 4 used Hermes-chosen BUY quantities and are NOT comparable
+# decision-for-decision with version 5.
+PROMPT_SCHEMA_VERSION = 5
 # The masking seed used when nothing is stored yet and no --seed is given
 # (a fresh or --reset run) -- was argparse's own default before item 7's
 # seed-persistence fix; unchanged in value, only in where it lives.
@@ -1817,6 +1825,30 @@ def apply_state_dir(state_dir: "str | None") -> None:
 
 
 _ACTIVE_PROGRESS = None  # the run's WorkflowEmitter, flushed by main()'s finally
+_ACTIVE_TRACING = None  # the run's optional Langfuse TraceSession (backtest_tracing.py), closed by main()'s finally
+
+
+def _start_tracing(run_id: str, masking: "RunMasking", meta: dict) -> None:
+    """Optional, export-only, fail-open controller tracing (backtest_tracing.py). Off unless
+    ~/.hermes-trading-agent-backtest/tracing.env exists; never touches Hermes profiles or trading state."""
+    global _ACTIVE_TRACING
+    try:
+        import backtest_tracing
+        _ACTIVE_TRACING, status = backtest_tracing.start(sys.modules[__name__], run_id=run_id, masking=masking,
+                                                         meta=meta)
+    except Exception as exc:
+        _ACTIVE_TRACING, status = None, f"off ({type(exc).__name__})"
+    print(f"backtest tracing: {status}")
+
+
+def _close_active_tracing() -> None:
+    global _ACTIVE_TRACING
+    session, _ACTIVE_TRACING = _ACTIVE_TRACING, None
+    if session is not None:
+        try:
+            session.close()
+        except Exception:
+            pass
 
 
 def _close_active_progress() -> None:
@@ -2333,7 +2365,11 @@ asyncio.run(main())
     raw = json_from(run_in("alpaca-mcp", script))["news"]
     out: dict[str, list] = {}
     for t in tickers:
-        validated = _articles_in_decision_window(raw.get(t, []), start_dt, end_dt)
+        if t not in raw:
+            # No complete, verified result for t: leave it out so run_day marks its news UNAVAILABLE.
+            # Never default it to [] -- that would read as a checked window with no headlines.
+            continue
+        validated = _articles_in_decision_window(raw[t], start_dt, end_dt)
         if validated is None:
             raise RuntimeError(
                 f"{t}: a decision-time news article has a missing, malformed, or "
@@ -2614,6 +2650,27 @@ async def main():
 asyncio.run(main())
 '''
     return json_from(run_in("alpaca-mcp", script))["news"]
+
+
+NEWS_CHECKED, NEWS_UNAVAILABLE = "checked", "unavailable"
+NEWS_EMPTY_LINE = ("      news: No headlines found in the checked window (7 days to the decision cutoff). "
+                   "This is not proof that no adverse news exists.")
+NEWS_UNAVAILABLE_LINE = ("      news: UNAVAILABLE -- the headline check for this name could not be completed, "
+                         "so the adverse-news veto cannot be evaluated; no new entry may be opened on it.")
+
+
+def news_status(news: dict, ticker: str) -> str:
+    """fetch_news only returns a key for a ticker whose fetch was complete and timestamp-validated."""
+    return NEWS_CHECKED if ticker in news else NEWS_UNAVAILABLE
+
+
+def _news_lines(item: dict, limit: int = 3) -> list[str]:
+    """Headlines (masked rendering unchanged), or an explicit empty / unavailable status. A missing status is
+    treated as unavailable: an empty list alone never proves a complete check."""
+    articles = item.get("news") or []
+    if articles:
+        return [f"      news ({a['age_days']}d ago): {_decision_news_text(a)}" for a in articles[:limit]]
+    return [NEWS_EMPTY_LINE if item.get("news_status") == NEWS_CHECKED else NEWS_UNAVAILABLE_LINE]
 
 
 def _decision_news_text(a: dict) -> str:
@@ -4154,8 +4211,10 @@ def _validate_decision_shape(d: dict, i: int, fundamentals_enabled: bool = False
     if action not in ("BUY", "SELL"):
         raise ResponseValidationError(f"{tag}: action must be BUY or SELL, got {action!r}")
 
+    # Prompt schema 5: BUY quantity is controller-owned. A BUY's own "quantity" (legacy field) is ignored
+    # whatever its value -- run_day never reads it for sizing -- so it is not validated here. SELL unchanged.
     quantity = d.get("quantity")
-    if (
+    if action == "SELL" and (
         not isinstance(quantity, (int, float)) or isinstance(quantity, bool)
         or not math.isfinite(quantity) or quantity != int(quantity) or int(quantity) <= 0
     ):
@@ -4456,7 +4515,7 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         f"  For decision-time sizing, reserve {BUY_SLIPPAGE_BPS}bps above your proposed",
         "  entry -- this is a sizing margin, not a claim you know tomorrow's actual fill:",
         f"    sizing price       = round(entry + entry * ({BUY_SLIPPAGE_BPS} / 10000), 2)",
-        "  Then compute all three and take the smallest, floored to a whole share:",
+        "  The CONTROLLER computes every BUY's share quantity this way (you do not, and you send none):",
         f"    stop-based size    = floor(equity * ({limits.risk_budget_pct:.1f} / 100) / (sizing price - stop))",
         f"    concentration size = floor(equity * ({limits.max_position_pct:.1f} / 100) / sizing price)",
         "    cash size          = floor(remaining_cash / sizing price)",
@@ -4491,8 +4550,7 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
                     f"      RSI {t['rsi']:.1f} ({t['rsi_signal']}) | MACD {t['macd_signal']} "
                     f"| trend {t['trend']} | outlook {t['outlook']}"
                 )
-            for a in (p.get("news") or [])[:3]:
-                lines.append(f"      news ({a['age_days']}d ago): {_decision_news_text(a)}")
+            lines += _news_lines(p)
     else:
         lines.append("  (none)")
     lines.append("")
@@ -4518,14 +4576,13 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
             f" | outlook {t['outlook']}"
         )
         lines.append(_levels_line(t))
-        for a in c["news"][:3]:
-            lines.append(f"      news ({a['age_days']}d ago): {_decision_news_text(a)}")
+        lines += _news_lines(c)
         if fundamentals_enabled:
             lines += fundamentals_prompt_lines(c.get("fundamentals"))
     lines.append("")
 
     schema = (
-        '{"decisions": [{"alias": "...", "action": "BUY"|"SELL", "quantity": N,\n'
+        '{"decisions": [{"alias": "...", "action": "BUY"|"SELL", "quantity": N (SELL only -- omit on a BUY),\n'
         '  "entry_price": N, "stop_price": N, "target_price": N,\n'
         '  "confidence": 1-5, "primary_signal": "technical"|"sentiment"|"both"|"other",\n'
         '  "technical_basis": "rsi"|"macd"|"support_resistance"|"trend"|"multiple"|"other",\n'
@@ -4575,11 +4632,11 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         "Decide. You have no tools in this mode -- reply with ONLY a JSON "
         "object, no prose, no tool call, around it:\n"
         f"{schema}}}\n"
-        "For each BUY, quantity must equal the required quantity from the "
-        "POSITION SIZING block above -- computed against cash remaining "
-        "after earlier BUYs in this same decisions list, not the account's "
-        "starting cash; a one-share placeholder is invalid. State both §2a "
-        "and §2b's actual numbers in the reasoning. Return an empty "
+        "Omit quantity on a BUY: the controller sizes it from your entry_price "
+        "and stop_price exactly as the POSITION SIZING block describes, against "
+        "cash remaining after earlier BUYs in this same decisions list, and "
+        "ignores any BUY quantity you send. Choose the stop and target from the "
+        "evidence; do not do share arithmetic. Return an empty "
         "decisions list only when nothing qualifies, and give concrete "
         "reasons."
     )
@@ -5171,10 +5228,12 @@ def required_entry_quantity(trade: ProposedTrade, ctx: Context) -> int | None:
     why execution-time revalidation (resolve_queued_order) stays fully
     authoritative and can still reject the same order.
 
-    Returns None when the inputs are unusable; the ordinary risk checker
-    reports those violations. Execution-time checks deliberately do not
-    call this: a next-day gap may change the theoretical optimum, while the
-    queued quantity must remain the quantity Hermes actually chose.
+    Returns None when the inputs are unusable (run_day then rejects the BUY
+    explicitly). Prompt schema 5: run_day uses this result AS the BUY's
+    quantity (controller-owned sizing). Execution-time checks deliberately do
+    not call this: a next-day gap may change the theoretical optimum, while
+    the queued quantity must remain the one computed at decision time -- a
+    queued order is never resized at the open.
     """
     equity, cash, stop = ctx.account.equity, ctx.account.cash, trade.stop_price
     if (
@@ -5795,6 +5854,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             "sector": entry["sector"],
             "tech": masking.mask_technicals({**tech, "ticker": ticker}, day),
             "news": masking.mask_news(news.get(ticker, []), day),
+            "news_status": news_status(news, ticker),
         }
         if fundamentals_enabled:
             candidate["fundamentals"] = mask_fundamentals(fundamentals_raw[ticker])
@@ -5827,6 +5887,7 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             if t in held_technicals and "error" not in held_technicals[t] else None
         ),
         "news": masking.mask_news(news.get(t, []), day),
+        "news_status": news_status(news, t),
     } for t, h in working.holdings.items()]
 
     account_view = {
@@ -6200,14 +6261,29 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             summary["blocked"].append(line)
             activity.append(("risk_check", line, None))
             continue
-        try:
-            quantity = int(decision["quantity"])
-        except (KeyError, TypeError, ValueError):
-            summary["blocked"].append(f"{real_ticker}: missing/invalid quantity")
+        if action == "BUY" and next((c.get("news_status") for c in input_payload["candidates"]
+                                     if c["alias"] == decision["alias"]), None) != NEWS_CHECKED:
+            line = (
+                f"{real_ticker}: decision-time evidence check rejected -- §5a: news unavailable for alias "
+                f"{decision['alias']!r}; the adverse-news veto cannot be evaluated, so no entry "
+                f"[profile={working.profile_level} min_rr={active_min_rr}]"
+            )
+            summary["blocked"].append(line)
+            activity.append(("risk_check", line, None))
             continue
-        if quantity <= 0:
-            summary["blocked"].append(f"{real_ticker}: quantity must be positive")
-            continue
+        # Prompt schema 5: a BUY's quantity is computed by the controller below (after the stop/entry are
+        # known); Hermes' own BUY quantity, if it still sends one, is a legacy field and never used.
+        legacy_buy_quantity = decision.get("quantity") if action == "BUY" else None
+        quantity = 0
+        if action == "SELL":
+            try:
+                quantity = int(decision["quantity"])
+            except (KeyError, TypeError, ValueError):
+                summary["blocked"].append(f"{real_ticker}: missing/invalid quantity")
+                continue
+            if quantity <= 0:
+                summary["blocked"].append(f"{real_ticker}: quantity must be positive")
+                continue
         stop_price = decision.get("stop_price")
         target_price = decision.get("target_price")
         if action == "BUY" and (stop_price is None or target_price is None):
@@ -6258,6 +6334,22 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             summary["blocked"].append(line)
             activity.append(("risk_check", line, None))
             continue
+        if action == "BUY":
+            # Controller-owned sizing: RULES.md §2a/§2b/§3 from Hermes' entry and observed stop, against cash
+            # remaining after earlier BUYs in this list. No input is fabricated; unusable or zero -> rejected.
+            quantity = required_entry_quantity(proposal, decision_ctx)
+            if quantity is None or quantity <= 0:
+                why = ("unusable sizing inputs" if quantity is None else "zero shares")
+                line = (
+                    f"{real_ticker}: decision-time sizing rejected -- §2/§3: controller sizing gave {why} "
+                    f"(entry {entry_price!r}, stop {stop_price!r}, remaining cash {available_cash:.2f}) "
+                    f"[profile={working.profile_level} min_rr={active_min_rr}]"
+                )
+                summary["blocked"].append(line)
+                activity.append(("risk_check", line, None))
+                continue
+            proposal = dataclass_replace(proposal, quantity=quantity)
+            decision = {**decision, "quantity": quantity}
         decision_verdict = check_trade(proposal, decision_ctx, validate_timing=False)
         if not decision_verdict.allowed:
             reason = "; ".join(decision_verdict.violations)
@@ -6273,19 +6365,6 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
             summary["blocked"].append(line)
             activity.append(("risk_check", line, None))
             continue
-
-        if action == "BUY":
-            required_quantity = required_entry_quantity(proposal, decision_ctx)
-            if required_quantity is None or quantity != required_quantity:
-                line = (
-                    f"{real_ticker}: decision-time risk check rejected -- §2/§3: "
-                    f"quantity {quantity} does not equal required whole-share size "
-                    f"{required_quantity} from stop risk, concentration, and remaining cash "
-                    f"[profile={working.profile_level} min_rr={active_min_rr}]"
-                )
-                summary["blocked"].append(line)
-                activity.append(("risk_check", line, None))
-                continue
 
         decision_id = make_decision_id(run_key, day_index, real_ticker, action, f"queued_proposal[{i}]")
         _wf_queued[i] = decision_id
@@ -6328,6 +6407,9 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         if action == "BUY":
             available_cash -= quantity * entry_price
         line = f"{action} {real_ticker} ({decision['alias']}) x{quantity} queued for next trading day's open"
+        if action == "BUY":
+            line += (" (controller-sized" + (f"; Hermes quantity {repr(legacy_buy_quantity)[:24]} ignored)"
+                                             if legacy_buy_quantity is not None else ")"))
         summary["decisions"].append(line)
         summary["proposals"].append({
             "ticker": real_ticker, "alias": decision["alias"], "action": action,
@@ -6780,6 +6862,9 @@ def _run_backtest_main(args, isolation_report: dict, runtime: "HermesRuntime") -
         global _ACTIVE_MONITOR
         injection_monitor = _ACTIVE_MONITOR = _build_injection_monitor(run_id, args)
         print("injection monitor: ON (shadow only -- records privately, never blocks or alters news)")
+    _start_tracing(run_id, masking, {"run_kind": run_kind, "window_start": str(start), "window_end": end_str,
+                                     "sessions_requested": int(args.days), "resumed": bool(is_resume),
+                                     "selector_mode": selector_mode})
 
     # Workflow progress telemetry (dashboard-v2 Workflow page): best effort,
     # background-written, never read back -- see workflow_events.py.
@@ -6984,6 +7069,7 @@ def main() -> None:
     finally:
         _close_active_selector()
         _close_active_progress()
+        _close_active_tracing()
         _cleanup_ephemeral_hermes_runtime(runtime)
 
 

@@ -8,6 +8,15 @@ committed): experiments/laya_vs_random_2022_07.json.
     python backtest-harness/laya_vs_random.py check            # read-only readiness + counts
     python backtest-harness/laya_vs_random.py run --arm laya --laya-checkpoint <dir>
     python backtest-harness/laya_vs_random.py run --arm random
+    python backtest-harness/laya_vs_random.py --config <frozen config> run --arm laya ...   # another experiment
+
+`--config` selects another frozen, committed experiment config (default: the
+v1 pair below). The chosen config drives the code fingerprint, the run's
+marker identity and its output directory (.laya_vs_random/<experiment_id>/).
+A config may also pin `prompt_schema_version` (must equal the code's) and
+`authorized_arms` (arms outside it are refused). Optional backtest tracing
+(backtest_tracing.py) runs from the frozen masking through episode-end
+resolution and is closed in `finally`; it is export-only and fail-open.
 
 Not the ordinary backtest CLI and not eval_suite: neither exposes this paired
 selector design, and the fixed-watchlist manifest's approval is NOT this
@@ -55,6 +64,9 @@ CODE_FILES = (
     "backtest-harness/laya_adapter.py", "backtest-harness/laya_worker.py", "backtest-harness/laya_preflight.py",
     "backtest-harness/anonymize.py", "risk-checker/risk_checker.py", "RULES.md", "AGENTS.md", "SOUL.md",
     "docker-compose.yml",
+    # optional controller-side tracing (export-only) and the shared tracer it reuses
+    "backtest-harness/backtest_tracing.py", "live/tracing/__init__.py", "live/tracing/otlp.py",
+    "live/tracing/controller.py",
 )
 
 
@@ -72,10 +84,14 @@ def _git(*args: str) -> str:
 
 # ---------------------------------------------------------------- config + provenance
 def load_config(path: Path = CONFIG_PATH) -> dict:
-    """The frozen experiment config, verified: authorized, plan hash, pool."""
-    cfg = json.loads(Path(path).read_text(encoding="utf-8"))
+    """The frozen experiment config, verified: authorized, plan hash, pool, and (if pinned) prompt schema."""
+    path = Path(path)
+    cfg = json.loads(path.read_text(encoding="utf-8"))
     if cfg.get("status") != "authorized":
         raise SystemExit(f"{path.name}: status {cfg.get('status')!r} is not 'authorized'")
+    if "prompt_schema_version" in cfg and cfg["prompt_schema_version"] != rb.PROMPT_SCHEMA_VERSION:
+        raise SystemExit(f"{path.name}: prompt_schema_version {cfg['prompt_schema_version']!r} is not the "
+                         f"code's {rb.PROMPT_SCHEMA_VERSION!r}")
     if tuple(cfg["arms"]) != ARMS:
         raise SystemExit(f"{path.name}: arms must be exactly {ARMS} in that order")
     plan = REPO / cfg["plan"]["path"]
@@ -96,10 +112,11 @@ def load_pool(cfg: Mapping[str, Any]):
     return universe, pool
 
 
-def code_fingerprint() -> dict:
-    """HEAD plus the SHA-256 of every experiment file. Refuses uncommitted or
-    dirty experiment files (provenance must point at committed code)."""
-    files = (*CODE_FILES, str(CONFIG_PATH.relative_to(REPO)).replace("\\", "/"))
+def code_fingerprint(config_path: Path = CONFIG_PATH) -> dict:
+    """HEAD plus the SHA-256 of every experiment file and THIS run's config.
+    Refuses uncommitted or dirty experiment files (provenance must point at
+    committed code)."""
+    files = (*CODE_FILES, str(Path(config_path).resolve().relative_to(REPO.resolve())).replace("\\", "/"))
     dirty = _git("status", "--porcelain", "--", *files)
     if dirty:
         raise SystemExit(f"experiment files are not committed/clean:\n{dirty}")
@@ -129,6 +146,9 @@ def check_arm_allowed(cfg: Mapping[str, Any], arm: str, fingerprint: Mapping[str
     with the identical code fingerprint; nothing after a halted arm."""
     if arm not in ARMS:
         raise SystemExit(f"unknown arm {arm!r}")
+    if "authorized_arms" in cfg and arm not in cfg["authorized_arms"]:
+        raise SystemExit(f"arm {arm!r} is not authorized by {cfg['experiment_id']} "
+                         f"(authorized: {list(cfg['authorized_arms'])})")
     if _arm_dir(cfg, arm, root).exists():
         raise SystemExit(f"arm {arm!r} already started (no retries, no resumes): {_arm_dir(cfg, arm, root)}")
     if arm == "random":
@@ -196,11 +216,25 @@ def compare_facts(a_path: Path, b_path: Path) -> dict:
 
 
 # ---------------------------------------------------------------- the arm
-def run_arm(arm: str, laya_checkpoint: str | None) -> int:
-    cfg = load_config()
+def _start_tracing(run_id: str, masking: RunMasking, meta: dict):
+    """The arm's optional TraceSession (or None). Never raises; prints only an on/off status."""
+    try:
+        import backtest_tracing
+        session, status = backtest_tracing.start(rb, run_id=run_id, masking=masking, meta=meta)
+    except Exception as exc:
+        session, status = None, f"off ({type(exc).__name__})"
+    print(f"backtest tracing: {status}")
+    return session
+
+
+def run_arm(arm: str, laya_checkpoint: str | None, config_path: Path = CONFIG_PATH,
+            root: Path | None = None) -> int:
+    config_path = Path(config_path)
+    root = Path(root) if root is not None else OUT_ROOT
+    cfg = load_config(config_path)
     universe, _pool = load_pool(cfg)
-    fp = code_fingerprint()
-    check_arm_allowed(cfg, arm, fp)
+    fp = code_fingerprint(config_path)
+    check_arm_allowed(cfg, arm, fp, root)
     if arm == "laya":
         if not laya_checkpoint:
             raise SystemExit("--laya-checkpoint is required for the laya arm")
@@ -214,12 +248,14 @@ def run_arm(arm: str, laya_checkpoint: str | None) -> int:
     start, end = date.fromisoformat(cfg["window"]["start"]), date.fromisoformat(cfg["window"]["end"])
     seed = int(cfg["masking_seed"])
 
-    arm_dir = _arm_dir(cfg, arm)
+    arm_dir = _arm_dir(cfg, arm, root)
     isolation_report = rb.preflight()                # services incl. execution-sim + disposable Hermes profile
     runtime = isolation_report["runtime"]
-    selector = None
+    selector = tracing = None
     saved = {n: getattr(rb, n) for n in ("fetch_technicals", "fetch_news", "fetch_news_window")}
-    marker = {"experiment_id": cfg["experiment_id"], "arm": arm, "fingerprint": fp, "run_kind": RUN_KIND}
+    marker = {"experiment_id": cfg["experiment_id"], "arm": arm, "fingerprint": fp, "run_kind": RUN_KIND,
+              "config": {"path": config_path.name, "sha256": _sha_file(config_path)},
+              "prompt_schema_version": rb.PROMPT_SCHEMA_VERSION}
     try:
         prov = rb.build_run_provenance(isolation_report)
         want = cfg["model"]
@@ -238,6 +274,11 @@ def run_arm(arm: str, laya_checkpoint: str | None) -> int:
         alias_hash = hashlib.sha256(json.dumps(alias_mapping, sort_keys=True).encode()).hexdigest()
         rb.register_run_configuration(run_id, watchlist, rb._watchlist_hash(watchlist), alias_mapping, alias_hash,
                                       seed, cfg["window"]["start"], cfg["window"]["end"], False, provenance=prov)
+        # Optional tracing: from here through episode-end resolution; closed in `finally`.
+        tracing = _start_tracing(run_id, masking, {
+            "runner": "laya_vs_random", "experiment_id": cfg["experiment_id"], "arm": arm, "run_kind": RUN_KIND,
+            "window_start": cfg["window"]["start"], "window_end": cfg["window"]["end"],
+            "prompt_schema_version": rb.PROMPT_SCHEMA_VERSION, "fundamentals": False})
 
         facts = arm_dir / "facts.jsonl"
         facts.touch()
@@ -305,6 +346,11 @@ def run_arm(arm: str, laya_checkpoint: str | None) -> int:
                                         "error": f"{type(exc).__name__}: {str(exc)[:300]}"}, exclusive=False)
         raise
     finally:
+        if tracing is not None:
+            try:
+                tracing.close()                      # restores run_day and the episode-end helper
+            except Exception:
+                pass
         for n, f in saved.items():
             setattr(rb, n, f)
         if selector is not None:
@@ -357,6 +403,8 @@ asyncio.run(main())
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--config", type=Path, default=CONFIG_PATH,
+                    help="frozen, committed experiment config (default: the v1 Laya-vs-random pair)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("check", help="read-only: config/plan/pool/code verification and Neon counts")
     r = sub.add_parser("run", help="run ONE arm (laya first, then random); never retried")
@@ -364,11 +412,11 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--laya-checkpoint", default=None)
     a = ap.parse_args(argv)
     if a.cmd == "run":
-        return run_arm(a.arm, a.laya_checkpoint)
-    cfg = load_config()
+        return run_arm(a.arm, a.laya_checkpoint, a.config)
+    cfg = load_config(a.config)
     universe, _pool = load_pool(cfg)
     print(json.dumps({"config": cfg["experiment_id"], "pool_members": len(universe.members),
-                      "fingerprint": code_fingerprint(),
+                      "fingerprint": code_fingerprint(a.config),
                       "arms": {arm: _read_marker(cfg, arm) for arm in ARMS}}, indent=1))
     return 0
 

@@ -173,3 +173,134 @@ def test_config_must_be_authorized_and_pinned_to_the_plan(tmp_path, monkeypatch)
         p.write_text(json.dumps(bad))
         with pytest.raises(SystemExit):
             lvr.load_config(p)
+
+
+# -- --config selection and tracing (laya-schema5-2022-07-v2) -------------------------------------------------------
+
+V2 = lvr.HERE / "experiments" / "laya_schema5_2022_07_v2.json"
+
+
+def test_the_v2_config_is_authorized_for_laya_only_at_schema_5_and_keeps_v1s_frozen_inputs():
+    v1, v2 = lvr.load_config(), lvr.load_config(V2)
+    assert v2["experiment_id"] != v1["experiment_id"] and v2["prompt_schema_version"] == 5
+    for k in ("window", "pool", "masking_seed", "k", "starting_equity", "laya", "model"):
+        assert v2[k] == v1[k], k
+    assert v2["fundamentals_enabled"] is False and v2["authorized_arms"] == ["laya"]
+    universe, _ = lvr.load_pool(v2)
+    assert len(universe.members) == 48
+    with pytest.raises(SystemExit, match="not authorized"):
+        lvr.check_arm_allowed(v2, "random", {}, root=Path("unused-root"))
+
+
+def test_config_option_drives_fingerprint_identity_and_output_dir(tmp_path, monkeypatch):
+    monkeypatch.setattr(lvr, "_git", lambda *a: "" if a[0] == "status" else "HEAD")
+    fp = lvr.code_fingerprint(V2)
+    assert "backtest-harness/experiments/laya_schema5_2022_07_v2.json" in fp["files"]
+    assert "backtest-harness/experiments/laya_vs_random_2022_07.json" not in fp["files"]
+    assert "backtest-harness/backtest_tracing.py" in fp["files"] and "live/tracing/otlp.py" in fp["files"]
+    cfg = lvr.load_config(V2)
+    assert lvr._arm_dir(cfg, "laya", tmp_path) == tmp_path / "laya-schema5-2022-07-v2" / "laya"
+    seen = {}
+    monkeypatch.setattr(lvr, "run_arm", lambda arm, ckpt, config: seen.update(arm=arm, config=config) or 0)
+    assert lvr.main(["--config", str(V2), "run", "--arm", "laya", "--laya-checkpoint", "x"]) == 0
+    assert seen == {"arm": "laya", "config": V2}
+    monkeypatch.setattr(lvr.rb, "PROMPT_SCHEMA_VERSION", 4)
+    with pytest.raises(SystemExit, match="prompt_schema_version"):
+        lvr.load_config(V2)
+
+
+def _arm(tmp_path, monkeypatch, mode, pending=True):
+    """The REAL run_arm with only external I/O mocked: preflight/provenance/registration, the selector
+    context and run_day (which queues one pending BUY on the first session). mode: off | on | raising."""
+    import backtest_tracing as bt
+    import eval_suite as es
+    import run_backtest as rb
+    from test_backtest_tracing import Backend, env_dir
+    from unittest.mock import patch
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    plan = tmp_path / "plan.md"
+    plan.write_text("frozen plan")
+    cfg = {**json.loads(V2.read_text(encoding="utf-8")), "experiment_id": "test-exp", "plan": {"path": "plan.md",
+                                                                        "sha256": lvr._sha_file(plan)},
+           "window": {"start": "2022-07-01", "end": "2022-07-06"}}
+    cfg.pop("authorized_arms")
+    cfg_path = tmp_path / "cfg.json"
+    cfg_path.write_text(json.dumps(cfg))
+    monkeypatch.setattr(lvr, "REPO", tmp_path)
+
+    class Sel:
+        def __init__(self, **kw):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_run_day(day, day_index, portfolio, masking, watchlist, limits_ctx, run_id, **kw):
+        assert kw.get("selector") is not None and kw.get("fundamentals_enabled") is False
+        if pending and day_index == 0:
+            sym = watchlist[0]["symbol"]
+            portfolio.pending_orders.append(rb.QueuedOrder(
+                ticker=sym, alias=masking.alias(sym), action="BUY", quantity=7, stop_price=9.0,
+                target_price=13.0, entry_price=10.0, queued_day_index=0, decision={}, decision_id="dec-1"))
+        return portfolio, {"day": str(day), "decisions": [], "blocked": [], "exits": [], "fills": [],
+                           "proposals": [], "usage": {}}, (lambda: None)
+
+    journal = []
+    backend = Backend("raise" if mode == "raising" else 200)
+    if mode != "off":
+        env_dir(tmp_path)
+        monkeypatch.setattr(bt, "DEFAULT_DIR", tmp_path / "bt")
+        real_load = bt.__dict__.get("_unpatched_load", bt.load)      # never wrap an earlier wrapper
+        monkeypatch.setattr(bt, "_unpatched_load", real_load, raising=False)
+        monkeypatch.setattr(bt, "load", lambda *a, **kw: real_load(*a, **{**kw, "post": backend}))
+    model = cfg["model"]
+    with patch.object(lvr, "load_pool", return_value=(UNIVERSE, {})), \
+         patch.object(lvr, "code_fingerprint", return_value={"head": "h"}), \
+         patch.object(lvr, "check_arm_allowed", return_value=None), \
+         patch("run_backtest.preflight", return_value={"runtime": None}), \
+         patch("run_backtest.build_run_provenance",
+               return_value={f"hermes_runtime_{k}": v for k, v in model.items()}), \
+         patch("run_backtest.register_run"), patch("run_backtest.register_run_configuration"), \
+         patch("run_backtest.apply_state_dir"), patch("run_backtest._clear_checkpoint"), \
+         patch("run_backtest._cleanup_ephemeral_hermes_runtime"), \
+         patch("laya_experiment.RandomSelectorContext", Sel), \
+         patch("run_backtest.run_day", side_effect=fake_run_day) as fake, \
+         patch("eval_suite.resolve_trade_rejection", side_effect=lambda d, r: journal.append((d, r))):
+        rc = lvr.run_arm("random", None, cfg_path, root=tmp_path / "out")
+        assert rb.run_day is fake, "run_day restored after the arm"
+    assert es.resolve_episode_end_pending.__name__ == "resolve_episode_end_pending"
+    arm_dir = tmp_path / "out" / "test-exp" / "random"
+    marker = json.loads((arm_dir / "ARM.json").read_text())
+    result = json.loads((arm_dir / "result.json").read_text())
+    days = (arm_dir / "days.jsonl").read_text()
+    return rc, marker, result, days, journal, backend
+
+
+def test_run_arm_traces_days_and_episode_end_and_tracing_failure_changes_nothing(tmp_path, monkeypatch):
+    from test_backtest_tracing import _attrs, _io, _spans_from
+    off = _arm(tmp_path / "off", monkeypatch, "off")
+    on = _arm(tmp_path / "on", monkeypatch, "on")
+    boom = _arm(tmp_path / "boom", monkeypatch, "raising")
+
+    def same(r):
+        rc, marker, result, days, journal, _ = r
+        keep = {k: v for k, v in result.items() if k not in ("run_id", "finished_at")}
+        return rc, marker["status"], marker["config"]["path"], keep, days, journal
+    assert same(off) == same(on) == same(boom), "identical trading results with tracing off, on or failing"
+    assert list((tmp_path / "boom" / "bt" / "trace_spool").glob("*.jsonl")), "the failing tracer was live (spooled)"
+    rc, marker, result, *_ = on
+    assert rc == 0 and marker["status"] == "completed" and marker["experiment_id"] == "test-exp"
+    assert marker["config"]["path"] == "cfg.json" and marker["prompt_schema_version"] == 5
+    assert result["sessions_completed"] == 4 and len(result["terminal_pending_resolved"]) == 1
+
+    spans = _spans_from(on[5], tmp_path / "on" / "bt" / "trace_spool")
+    assert {_attrs(x)["langfuse.session.id"]["stringValue"] for x in spans} == {result["run_id"]}
+    assert len([x for x in spans if x["name"] == "backtest_day"]) == 4
+    end = [x for x in spans if x["name"] == "backtest_episode_end"]
+    assert len(end) == 1 and _io(end[0])["orders"][0]["outcome"] == "rejected; journal row written"
+    kid = next(x for x in spans if x["name"] == "journal.rejection")
+    assert kid["parentSpanId"] == end[0]["spanId"]
+    assert "laya_vs_random" in json.dumps(_attrs(next(x for x in spans if x["name"] == "backtest_day")))
+    sym = UNIVERSE.symbols[0]
+    assert sym not in json.dumps([_io(x) for x in spans]), "real ticker never exported"

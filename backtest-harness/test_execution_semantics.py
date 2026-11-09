@@ -1226,12 +1226,21 @@ def test_validate_hermes_response_accepts_the_real_day_50_checkpointed_sell_payl
 
 
 def test_validate_hermes_response_rejects_non_finite_and_bad_fields():
+    # Prompt schema 5: quantity is validated for a SELL only; a BUY's quantity is a legacy field the
+    # controller ignores (it sizes BUYs itself), so any value -- or none -- passes validation.
     for bad_qty in (0, -5, float("nan"), "ten", 3.5):
         try:
-            validate_hermes_response(_response(quantity=bad_qty), is_reflection_day=False)
-            raise AssertionError(f"quantity={bad_qty!r} should be rejected")
+            validate_hermes_response(_response(action="SELL", quantity=bad_qty), is_reflection_day=False)
+            raise AssertionError(f"SELL quantity={bad_qty!r} should be rejected")
         except ResponseValidationError:
             pass
+    for legacy in (0, -5, "ten", 3.5, None):
+        buy = dict(_VALID_DECISION, action="BUY")
+        if legacy is None:
+            buy.pop("quantity", None)
+        else:
+            buy["quantity"] = legacy
+        validate_hermes_response({"decisions": [buy], "no_action_reason": ""}, is_reflection_day=False)
     for bad_price in (0.0, -1.0, float("nan"), float("inf")):
         try:
             validate_hermes_response(_response(entry_price=bad_price), is_reflection_day=False)
@@ -2270,12 +2279,13 @@ def test_prompt_no_longer_exposes_obsolete_daily_weekly_breaker_figures():
           "and still shows the one real drawdown breaker")
 
 
-def test_decision_time_sizing_rejects_placeholder_accepts_exact_and_journals_timestamps():
-    """The real defect: a one-share placeholder must be rejected when the
-    RULES.md sizing formula implies something larger; the exact calculated
-    size must be accepted; and an accepted decision must journal a real,
-    non-null data_timestamps object with distinguishable technical/news
-    cutoff fields and the actual latest included news timestamp."""
+def test_decision_time_sizing_ignores_a_placeholder_queues_the_controller_size_and_journals_timestamps():
+    """Prompt schema 5 (controller-owned BUY sizing): a one-share placeholder
+    quantity from Hermes is ignored and the RULES.md size (199) is what gets
+    queued; an exact quantity is equally ignored (same 199); and an accepted
+    decision journals a real, non-null data_timestamps object with
+    distinguishable technical/news cutoff fields and the actual latest
+    included news timestamp."""
     tmp_dir = Path(tempfile.mkdtemp())
     run_start = date(2026, 2, 17)
     run_key = str(uuid.uuid4())
@@ -2297,11 +2307,10 @@ def test_decision_time_sizing_rejects_placeholder_accepts_exact_and_journals_tim
         portfolio, run_start, 0, run_key, masking, watchlist, [placeholder], tmp_dir,
         news_payload={"OLN": []},
     )
-    assert not queued1, "a one-share placeholder must never reach record_queued_decision"
-    assert any("§2/§3" in line and "199" in line for line in blocked1), blocked1
-    assert not working1.pending_orders, "the placeholder must not have been queued"
-    print("  ok  a one-share placeholder is rejected when the required size (199) is larger, "
-          "and never journaled")
+    assert len(queued1) == 1 and not blocked1, (queued1, blocked1)
+    assert [o.quantity for o in working1.pending_orders] == [199], "the controller size, not Hermes' 1"
+    assert working1.pending_orders[0].decision["quantity"] == 199, "journaled decision carries 199"
+    print("  ok  a one-share placeholder is ignored; the controller-computed 199 is queued and journaled")
 
     exact = dict(placeholder, quantity=199, reasoning="exact required size")
     news_with_article = {"OLN": [
@@ -2347,7 +2356,11 @@ def test_decision_time_multi_decision_response_coherence():
     for the same ticker; an accepted decision's estimated notional IS
     reserved; a later BUY's required size reflects that reservation; and
     a duplicate of an already-ACCEPTED ticker is blocked before it ever
-    reaches record_queued_decision."""
+    reaches record_queued_decision.
+
+    Prompt schema 5: quantities are controller-owned, so the first ALPHA
+    proposal's placeholder no longer matters -- it is queued at the computed
+    199 and every later ALPHA proposal is a §9.1 duplicate."""
     tmp_dir = Path(tempfile.mkdtemp())
     run_start = date(2026, 2, 17)
     run_key = str(uuid.uuid4())
@@ -2385,8 +2398,8 @@ def test_decision_time_multi_decision_response_coherence():
                "reasoning": notes}
 
     decisions = [
-        buy(alpha_alias, 1, "wrong placeholder for ALPHA"),           # 0: rejected (1 != 199)
-        buy(alpha_alias, 199, "corrected ALPHA proposal"),            # 1: accepted, reserves $19,900
+        buy(alpha_alias, 1, "placeholder for ALPHA"),                 # 0: queued at controller's 199
+        buy(alpha_alias, 199, "second ALPHA proposal"),               # 1: rejected (duplicate ticker)
         buy(alpha_alias, 199, "duplicate ALPHA proposal"),            # 2: rejected (duplicate ticker)
         # remaining cash after #1: 25000 - 19900 = 5100 -> cash_size =
         # floor(5100/100.05) = 50, now the binding constraint (unchanged
@@ -2401,14 +2414,12 @@ def test_decision_time_multi_decision_response_coherence():
 
     assert len(queued) == 2, queued
     assert queued[0]["ticker"] == "ALPHA" and queued[1]["ticker"] == "BETA"
-    print("  ok  exactly the two genuinely-correct decisions (ALPHA, BETA) were journaled "
-          "-- the placeholder and the duplicate never reached record_queued_decision")
+    print("  ok  exactly one ALPHA and one BETA were journaled -- the duplicates never "
+          "reached record_queued_decision")
 
     assert len(blocked) == 2, blocked
-    assert any("§2/§3" in line and "ALPHA" in line for line in blocked), blocked
-    assert any("§9.1" in line and "one queued decision per ticker" in line for line in blocked), blocked
-    print("  ok  the wrong-size ALPHA placeholder and the duplicate ALPHA proposal were "
-          "both rejected, for the right reasons")
+    assert all("§9.1" in line and "one queued decision per ticker" in line for line in blocked), blocked
+    print("  ok  both later ALPHA proposals were rejected as §9.1 duplicates")
 
     alpha_order = next(o for o in working.pending_orders if o.ticker == "ALPHA")
     beta_order = next(o for o in working.pending_orders if o.ticker == "BETA")
@@ -4643,8 +4654,8 @@ def test_build_prompt_embeds_masked_rules_md_and_bumps_schema_version():
     straight past the entire masking gate. Without a masking object
     (existing formula-only test call sites), the block is skipped
     entirely rather than ever risking an unmasked embed."""
-    assert PROMPT_SCHEMA_VERSION == 4, \
-        "build_prompt's shape changed (RULES.md block + no-tools notice; observed-only levels) -- the schema version must say so"
+    assert PROMPT_SCHEMA_VERSION == 5, \
+        "build_prompt's shape changed (news status lines; controller-owned BUY quantity) -- the schema version must say so"
 
     account = {"equity": 100_000.0, "cash": 100_000.0, "exposure_pct": 0.0,
               "daily_pl_pct": 0.0, "weekly_pl_pct": 0.0, "drawdown_pct": 0.0}

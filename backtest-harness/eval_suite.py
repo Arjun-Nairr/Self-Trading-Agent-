@@ -870,6 +870,26 @@ def resolve_episode_end_pending(portfolio: Portfolio) -> list:
     return dangling
 
 
+def _start_episode_tracing(run_id: str, masking: RunMasking, meta: dict):
+    """The run's TraceSession, or None. Never raises; prints only an on/off status line (no secret)."""
+    try:
+        import backtest_tracing
+        session, status = backtest_tracing.start(rb, run_id=run_id, masking=masking, meta=meta,
+                                                 run_day_owner=sys.modules[__name__])
+    except Exception as exc:
+        session, status = None, f"off ({type(exc).__name__})"
+    print(f"backtest tracing: {status}")
+    return session
+
+
+def _close_episode_tracing(session) -> None:
+    if session is not None:
+        try:
+            session.close()
+        except Exception:
+            pass
+
+
 def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
                  watchlist: list[dict], checkpoint_dir: Path,
                  manifest: dict,
@@ -921,63 +941,73 @@ def _run_episode(episode: dict, config: EpisodeConfig, run_kind: str,
     portfolio = Portfolio()
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    original_checkpoint_path = rb.CHECKPOINT_PATH
-    rb.CHECKPOINT_PATH = checkpoint_dir / f"{run_id}_checkpoint.json"
-    day_summaries: list[dict] = []
-    halted = False
+    # Optional, export-only Langfuse tracing (backtest_tracing.py): started once the real run id and masking
+    # exist, kept open through episode-end resolution, closed in `finally` (which restores every wrapped
+    # function). Fail-open: no tracing.env, or any tracing fault, leaves the episode exactly as it was.
+    tracing = _start_episode_tracing(run_id, masking, {
+        "run_kind": run_kind, "runner": "eval_suite._run_episode", "config_label": config.config_label,
+        "regime": episode.get("regime"), "window_start": episode["start"], "window_end": episode["end"],
+        "fundamentals": config.fundamentals_enabled})
     try:
-        cursor = start
-        while cursor <= end:
-            if cursor.weekday() >= 5:
+        original_checkpoint_path = rb.CHECKPOINT_PATH
+        rb.CHECKPOINT_PATH = checkpoint_dir / f"{run_id}_checkpoint.json"
+        day_summaries: list[dict] = []
+        halted = False
+        try:
+            cursor = start
+            while cursor <= end:
+                if cursor.weekday() >= 5:
+                    cursor += timedelta(days=1)
+                    continue
+                day_index = (cursor - start).days
+                limits_ctx = _limits_for_profile(portfolio.profile_level)
+                result, halted = _run_cycle_or_halt(
+                    lambda: run_day(cursor, day_index, portfolio, masking, watchlist,
+                                    limits_ctx, run_id, fundamentals_enabled=config.fundamentals_enabled,
+                                    runtime=(isolation_report or {}).get("runtime")),
+                    day_label=masking.day_index(cursor), run_id=run_id,
+                    # Explicit, not _run_cycle_or_halt's own default: a default
+                    # parameter binds to run_backtest.log_cycle_failure at THAT
+                    # module's def-time and is never re-resolved from this
+                    # module's own name at call time, so patching
+                    # "eval_suite.log_cycle_failure" would silently do nothing
+                    # against the implicit default -- found live 2026-09-15 when
+                    # test_run_configuration_halts_cleanly_without_advancing's
+                    # deliberately-raising fake run_day reached the REAL logger
+                    # and wrote a genuine 'cycle_failed' agent_activity row to
+                    # Neon despite the test's own claim of zero real I/O. Naming
+                    # it here makes it patchable at this module's own boundary,
+                    # same as register_run/fetch_fundamentals_assessment_counts
+                    # just above.
+                    fail_logger=log_cycle_failure,
+                )
+                if halted:
+                    break
+                portfolio, summary, do_observability = result
+                if "skipped" not in summary:
+                    day_summaries.append(summary)
+                    try:
+                        do_observability()
+                    except Exception:
+                        pass
+                rb._clear_checkpoint()
                 cursor += timedelta(days=1)
-                continue
-            day_index = (cursor - start).days
-            limits_ctx = _limits_for_profile(portfolio.profile_level)
-            result, halted = _run_cycle_or_halt(
-                lambda: run_day(cursor, day_index, portfolio, masking, watchlist,
-                                limits_ctx, run_id, fundamentals_enabled=config.fundamentals_enabled,
-                                runtime=(isolation_report or {}).get("runtime")),
-                day_label=masking.day_index(cursor), run_id=run_id,
-                # Explicit, not _run_cycle_or_halt's own default: a default
-                # parameter binds to run_backtest.log_cycle_failure at THAT
-                # module's def-time and is never re-resolved from this
-                # module's own name at call time, so patching
-                # "eval_suite.log_cycle_failure" would silently do nothing
-                # against the implicit default -- found live 2026-09-15 when
-                # test_run_configuration_halts_cleanly_without_advancing's
-                # deliberately-raising fake run_day reached the REAL logger
-                # and wrote a genuine 'cycle_failed' agent_activity row to
-                # Neon despite the test's own claim of zero real I/O. Naming
-                # it here makes it patchable at this module's own boundary,
-                # same as register_run/fetch_fundamentals_assessment_counts
-                # just above.
-                fail_logger=log_cycle_failure,
-            )
-            if halted:
-                break
-            portfolio, summary, do_observability = result
-            if "skipped" not in summary:
-                day_summaries.append(summary)
-                try:
-                    do_observability()
-                except Exception:
-                    pass
-            rb._clear_checkpoint()
-            cursor += timedelta(days=1)
-    finally:
-        rb.CHECKPOINT_PATH = original_checkpoint_path
+        finally:
+            rb.CHECKPOINT_PATH = original_checkpoint_path
 
-    # Correction pass item E.2 (prior audit M1): an episode never resumes
-    # (see this function's own docstring) -- whether it reached `end`
-    # cleanly or halted partway, any order still 'pending' in the journal
-    # at this point can NEVER be resolved by a later cycle the way the
-    # main harness's own next-invocation would. Resolve it honestly as
-    # rejected instead of leaving a permanently dangling pending row
-    # indistinguishable from one genuinely still awaiting execution.
-    # Best-effort (never masks the episode's own halted/report outcome,
-    # same discipline as do_observability above) -- but real: reuses the
-    # exact resolve_trade_rejection path the main harness itself uses.
-    dangling_pending_orders = resolve_episode_end_pending(portfolio)
+        # Correction pass item E.2 (prior audit M1): an episode never resumes
+        # (see this function's own docstring) -- whether it reached `end`
+        # cleanly or halted partway, any order still 'pending' in the journal
+        # at this point can NEVER be resolved by a later cycle the way the
+        # main harness's own next-invocation would. Resolve it honestly as
+        # rejected instead of leaving a permanently dangling pending row
+        # indistinguishable from one genuinely still awaiting execution.
+        # Best-effort (never masks the episode's own halted/report outcome,
+        # same discipline as do_observability above) -- but real: reuses the
+        # exact resolve_trade_rejection path the main harness itself uses.
+        dangling_pending_orders = resolve_episode_end_pending(portfolio)
+    finally:
+        _close_episode_tracing(tracing)
 
     fundamentals_assessment_counts = None
     if config.fundamentals_enabled and not halted:

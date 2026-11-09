@@ -452,7 +452,7 @@ def test_only_selected_names_trigger_full_evidence_fetches_and_hermes_sees_no_la
         assert token not in prompt, token
         assert token not in payload, token
     assert {tuple(sorted(c)) for c in cap["evidence"][0]["input_payload"]["candidates"]} == {
-        ("alias", "news", "sector", "tech")}
+        ("alias", "news", "news_status", "sector", "tech")}
     assert cap["summary"]["selector"]["status"] == "selected" and cap["summary"]["selector"]["selected"] == 10
 
 
