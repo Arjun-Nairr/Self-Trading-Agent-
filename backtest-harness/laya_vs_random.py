@@ -14,7 +14,10 @@ committed): experiments/laya_vs_random_2022_07.json.
 v1 pair below). The chosen config drives the code fingerprint, the run's
 marker identity and its output directory (.laya_vs_random/<experiment_id>/).
 A config may also pin `prompt_schema_version` (must equal the code's) and
-`authorized_arms` (arms outside it are refused). Optional backtest tracing
+`authorized_arms` (arms outside it are refused), and an explicit
+`pool_coverage_exception` (an experiment-only waiver of the pool's pre-start
+news-coverage rule, recorded in every arm's marker and result.json; daily news
+checks are unaffected). Optional backtest tracing
 (backtest_tracing.py) runs from the frozen masking through episode-end
 resolution and is closed in `finally`; it is export-only and fail-open.
 
@@ -97,7 +100,34 @@ def load_config(path: Path = CONFIG_PATH) -> dict:
     plan = REPO / cfg["plan"]["path"]
     if _sha_file(plan) != cfg["plan"]["sha256"]:
         raise SystemExit(f"{plan.name}: SHA-256 differs from the config's frozen plan hash")
+    coverage_exception(cfg, path.name)
     return cfg
+
+
+EXCEPTION_KEYS = ("scope", "rule", "window", "members", "failing", "price_coverage", "daily_news_checks",
+                  "preflight_report", "preflight_sha256")
+
+
+def coverage_exception(cfg: Mapping[str, Any], name: str = "config") -> dict | None:
+    """An experiment-only waiver of the pool's pre-start news-coverage rule, or None.
+
+    Explicit and checkable: the rule it waives must be the current one, its window must be the config's, and the
+    private preflight report it cites (git-ignored, under .laya_vs_random/) must exist with the pinned hash. It
+    waives only the pool-qualification rule; every daily decision-time and pre-fill news check stays in force."""
+    exc = cfg.get("pool_coverage_exception")
+    if exc is None:
+        return None
+    from laya_preflight import NEWS_RULE_VERSION
+    missing = [k for k in EXCEPTION_KEYS if k not in exc]
+    if missing:
+        raise SystemExit(f"{name}: pool_coverage_exception lacks {missing}")
+    if exc["scope"] != "this experiment only" or exc["rule"] != NEWS_RULE_VERSION or exc["window"] != cfg["window"]:
+        raise SystemExit(f"{name}: pool_coverage_exception must be scoped to this experiment, waive the current rule "
+                         f"{NEWS_RULE_VERSION!r} and cover exactly the config's window")
+    report = HERE / exc["preflight_report"]
+    if not report.is_file() or _sha_file(report) != exc["preflight_sha256"]:
+        raise SystemExit(f"{name}: preflight report {exc['preflight_report']} is missing or not the pinned version")
+    return dict(exc)
 
 
 def load_pool(cfg: Mapping[str, Any]):
@@ -255,7 +285,8 @@ def run_arm(arm: str, laya_checkpoint: str | None, config_path: Path = CONFIG_PA
     saved = {n: getattr(rb, n) for n in ("fetch_technicals", "fetch_news", "fetch_news_window")}
     marker = {"experiment_id": cfg["experiment_id"], "arm": arm, "fingerprint": fp, "run_kind": RUN_KIND,
               "config": {"path": config_path.name, "sha256": _sha_file(config_path)},
-              "prompt_schema_version": rb.PROMPT_SCHEMA_VERSION}
+              "prompt_schema_version": rb.PROMPT_SCHEMA_VERSION,
+              "pool_coverage_exception": coverage_exception(cfg)}
     try:
         prov = rb.build_run_provenance(isolation_report)
         want = cfg["model"]
@@ -345,6 +376,7 @@ def run_arm(arm: str, laya_checkpoint: str | None, config_path: Path = CONFIG_PA
             "portfolio": None if unreconciled else portfolio.to_dict(),
             "last_committed_portfolio": committed if unreconciled else None,
             "alias_mapping_hash": alias_hash, "masking_seed": seed, "provenance": prov,
+            "pool_coverage_exception": marker["pool_coverage_exception"],
         }
         (arm_dir / "result.json").write_text(json.dumps(final, indent=1, default=str), encoding="utf-8")
         _write_marker(arm_dir, {**marker, "status": final["status"], "run_id": run_id,
@@ -431,6 +463,7 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(a.config)
     universe, _pool = load_pool(cfg)
     print(json.dumps({"config": cfg["experiment_id"], "pool_members": len(universe.members),
+                      "pool_coverage_exception": coverage_exception(cfg),
                       "fingerprint": code_fingerprint(a.config),
                       "arms": {arm: _read_marker(cfg, arm) for arm in ARMS}}, indent=1))
     return 0

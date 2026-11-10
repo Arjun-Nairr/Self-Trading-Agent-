@@ -1,0 +1,61 @@
+{
+ "_comment": "Frozen config for one schema-6 Laya-vs-seeded-random pair, 2024-10: same pool, settings and code as the other two months of the batch; exploratory selector comparison.",
+ "experiment_id": "laya-vs-random-schema6-2024-10",
+ "status": "authorized",
+ "authorization": "User request in the Claude Code session of 2026-11-10: run the schema-6 Laya-vs-random evaluation for July 2022, September 2022 and October 2024, one arm at a time with each pair reconciled before the next month; scoped local commits; up to six historical simulation runs; pool news-coverage rule waived for this experiment only (user choice 'Waive news rule').",
+ "plan": {
+  "path": "docs/evaluations/laya_vs_random_schema6_plan_2026-11-10.md",
+  "sha256": "47a9a714cbe1634741be491fdac1115a8ee0caf630af8509f67486174c0cc11c"
+ },
+ "arms": [
+  "laya",
+  "random"
+ ],
+ "run_kind": "evaluation",
+ "prompt_schema_version": 6,
+ "buy_quantity_owner": "controller (run_backtest.required_entry_quantity)",
+ "window": {
+  "start": "2024-10-01",
+  "end": "2024-10-31"
+ },
+ "pool": {
+  "path": "watchlist/experimental_pools/candidates60-v1-pool-2022-07-01-aafefb19a6c5.json",
+  "content_sha256": "c56a46727b701ac18a209031e9e2f6736c3d3e38c090649e721c13a99919c318",
+  "evidence_sha256": "aafefb19a6c54908a4fc747514decfdf02c356728c18de3fe20526dde4a6b387",
+  "universe_hash": "1f3d88b61b00441316e5c79e03bc11c0033b3eb6bbcf94d2d160256450d64d34",
+  "members": 48
+ },
+ "masking_seed": 42,
+ "random_seed": "laya-vs-random-schema6-2024-10",
+ "k": 10,
+ "starting_equity": 100000,
+ "fundamentals_enabled": false,
+ "laya": {
+  "image": "hermes-laya-worker:2",
+  "image_id": "sha256:d423bbf734cfb4a887c8d108d81d78365daac7bc0dd6eb97d8f7267696822093",
+  "package_version": "0.3.23",
+  "checkpoint_revision": "55cf4c4ebb4ebe31b2550e8bdf3bd21b99753851",
+  "weights_sha256": "891102d372688fc2a094dac56a384bc537b87c63f21f9f3dac0be2b7cbc8d86c",
+  "question_format": "noul-criteria-v2"
+ },
+ "model": {
+  "model": "gpt-5.6-terra",
+  "provider": "openai-codex",
+  "reasoning_effort": "medium"
+ },
+ "tracing": "optional controller-side backtest tracing (backtest_tracing.py; ~/.hermes-trading-agent-backtest), export-only, fail-open",
+ "pool_coverage_exception": {
+  "scope": "this experiment only",
+  "rule": "pre-start-3x14d-distinct-v2",
+  "window": {
+   "start": "2024-10-01",
+   "end": "2024-10-31"
+  },
+  "members": 48,
+  "failing": 7,
+  "price_coverage": "48/48 pass (84 warm-up bars, 0 missing sessions)",
+  "daily_news_checks": "in force: a completed fetch with zero headlines clears the news gate (schema 6); failed or incomplete fetches block new BUYs; adverse headlines can still veto",
+  "preflight_report": ".laya_vs_random/laya-vs-random-schema6-2024-10/preflight_news_coverage.txt",
+  "preflight_sha256": "91e24d8835e8fa0a8925f463ce2908d9de679cce080b52f50c9fca23dac22902"
+ }
+}

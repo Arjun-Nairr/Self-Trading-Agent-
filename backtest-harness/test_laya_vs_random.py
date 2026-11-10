@@ -213,7 +213,7 @@ def test_config_option_drives_fingerprint_identity_and_output_dir(tmp_path, monk
         lvr.load_config(V2)
 
 
-def _arm(tmp_path, monkeypatch, mode, pending=True):
+def _arm(tmp_path, monkeypatch, mode, pending=True, extra=None):
     """The REAL run_arm with only external I/O mocked: preflight/provenance/registration, the selector
     context and run_day (which queues one pending BUY on the first session). mode: off | on | raising."""
     import backtest_tracing as bt
@@ -228,7 +228,7 @@ def _arm(tmp_path, monkeypatch, mode, pending=True):
     cfg = {**json.loads(V2.read_text(encoding="utf-8")), "experiment_id": "test-exp", "plan": {"path": "plan.md",
                                                                         "sha256": lvr._sha_file(plan)},
            "window": {"start": "2022-07-01", "end": "2022-07-06"},
-           "prompt_schema_version": rb.PROMPT_SCHEMA_VERSION}
+           "prompt_schema_version": rb.PROMPT_SCHEMA_VERSION, **(extra or {})}
     cfg.pop("authorized_arms")
     cfg_path = tmp_path / "cfg.json"
     cfg_path.write_text(json.dumps(cfg))
@@ -317,3 +317,36 @@ def test_the_frozen_july_schema_5_configs_cannot_be_rerun_under_the_current_prom
     for name in ("laya_schema5_2022_07_v2.json", "laya_schema5_2022_07_v3.json"):
         with pytest.raises(SystemExit, match="prompt_schema_version 5 is not the code's 6"):
             lvr.load_config(lvr.HERE / "experiments" / name)
+
+
+# -- explicit pool-level coverage exception (schema-6 batch) ---------------------------------------------------------
+
+def _exception(tmp_path, monkeypatch, window):
+    from laya_preflight import NEWS_RULE_VERSION
+    monkeypatch.setattr(lvr, "HERE", tmp_path)
+    report = tmp_path / "preflight.txt"
+    report.write_text("FAIL: 7 names below the news rule")
+    return {"scope": "this experiment only", "rule": NEWS_RULE_VERSION, "window": window, "members": 48,
+            "failing": 7, "price_coverage": "48/48 pass", "daily_news_checks": "in force",
+            "preflight_report": "preflight.txt", "preflight_sha256": lvr._sha_file(report)}
+
+
+def test_a_pool_coverage_exception_must_be_explicit_scoped_and_hash_pinned(tmp_path, monkeypatch):
+    window = {"start": "2024-10-01", "end": "2024-10-31"}
+    exc = _exception(tmp_path, monkeypatch, window)
+    assert lvr.coverage_exception({"window": window}) is None
+    assert lvr.coverage_exception({"window": window, "pool_coverage_exception": exc}) == exc
+    for bad in ({k: v for k, v in exc.items() if k != "failing"}, {**exc, "scope": "all experiments"},
+                {**exc, "rule": "some-older-rule"}, {**exc, "window": {"start": "2024-10-01", "end": "2024-10-30"}},
+                {**exc, "preflight_sha256": "0" * 64}, {**exc, "preflight_report": "missing.txt"}):
+        with pytest.raises(SystemExit, match="pool_coverage_exception|preflight report"):
+            lvr.coverage_exception({"window": window, "pool_coverage_exception": bad})
+
+
+def test_run_arm_records_the_coverage_exception_in_marker_and_result(tmp_path, monkeypatch):
+    (tmp_path / "x").mkdir()
+    exc = _exception(tmp_path / "x", monkeypatch, {"start": "2022-07-01", "end": "2022-07-06"})
+    rc, marker, result, *_ = _arm(tmp_path / "arm", monkeypatch, "off", extra={"pool_coverage_exception": exc})
+    assert rc == 0 and marker["pool_coverage_exception"] == exc == result["pool_coverage_exception"]
+    rc, marker, result, *_ = _arm(tmp_path / "plain", monkeypatch, "off")
+    assert marker["pool_coverage_exception"] is None and result["pool_coverage_exception"] is None
