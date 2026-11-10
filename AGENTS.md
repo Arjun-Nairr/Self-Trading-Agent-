@@ -120,8 +120,13 @@ For each such name:
    requires.
 4. Check headlines. Adverse news vetoes the entry. Positive news is never a
    reason to enter — it can only fail to block you. If the headline feed
-   errors or is unavailable, the veto cannot be evaluated: skip the entry
-   rather than treating missing evidence as "no adverse news."
+   errors or is unavailable, or its coverage is incomplete, the veto cannot
+   be evaluated: skip the entry rather than treating missing evidence as
+   "no adverse news." A check that completed and found zero headlines is
+   different: the veto was evaluated and nothing adverse was found, so the
+   news check is cleared (the entry still has to clear every other step).
+   The current coverage status takes precedence over any earlier
+   reflection that read "no headlines" as unavailable news.
 
    **If a candidate carries a FUNDAMENTALS line** (backtest-only, not
    every run): weigh it as contextual evidence, not a gate. It may

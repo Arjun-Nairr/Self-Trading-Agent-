@@ -184,10 +184,19 @@ investigation). Good news does not rescue a bad chart.
 > **Critical corollary — sentiment may NEVER block an exit.** Exits are
 > mechanical (§6). Without this, an attacker could plant reassuring news to
 > suppress a stop-loss, which converts the injection from "blocks a trade"
-> back into "causes an unbounded loss." Missing/unavailable news is treated
-> as an unevaluated veto check on entry (skip the entry — §5a's asymmetry
-> means missing evidence can never read as "no adverse news") and never
-> blocks an exit either way.
+> back into "causes an unbounded loss." Missing/unavailable news — a
+> headline check that failed or could not confirm complete coverage — is
+> treated as an unevaluated veto check on entry (skip the entry — §5a's
+> asymmetry means missing evidence can never read as "no adverse news") and
+> never blocks an exit either way.
+>
+> **A completed check with zero headlines is not missing news.** When the
+> headline check succeeded with complete coverage and found nothing, the
+> veto has been evaluated and found nothing adverse, so the news check is
+> cleared for that decision. That clears only the news check: the entry
+> still needs a valid technical setup and must pass every other rule. The
+> coverage status shown for the current decision takes precedence over any
+> earlier reflection that treated "no headlines" as unavailable news.
 
 ---
 

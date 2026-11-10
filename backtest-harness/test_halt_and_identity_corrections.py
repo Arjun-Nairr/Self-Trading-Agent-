@@ -33,7 +33,7 @@ RECORDED = [
 
 def _pool_masking():
     """The frozen 48-name pool and the v2 masking (same aliases as the halted run)."""
-    cfg = lvr.load_config(V2)
+    cfg = json.loads(V2.read_text(encoding="utf-8"))   # frozen at schema 5; only pool + masking are used
     universe, _ = lvr.load_pool(cfg)
     wl = rb._experimental_watchlist_entries(universe)
     return lvr.masking_for(universe, wl, cfg), wl
@@ -127,7 +127,8 @@ def _laya_arm(tmp_path, monkeypatch, mode):
     plan.write_text("frozen plan")
     cfg = {**json.loads(V2.read_text(encoding="utf-8")), "experiment_id": "halt-test",
            "plan": {"path": "plan.md", "sha256": lvr._sha_file(plan)},
-           "window": {"start": "2022-07-01", "end": "2022-07-08"}}
+           "window": {"start": "2022-07-01", "end": "2022-07-08"},
+           "prompt_schema_version": rb.PROMPT_SCHEMA_VERSION}
     cfg.pop("authorized_arms")
     cfg_path = tmp_path / "cfg.json"
     cfg_path.write_text(json.dumps(cfg))

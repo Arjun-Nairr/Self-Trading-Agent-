@@ -108,7 +108,13 @@ STARTING_EQUITY = 100_000.0
 # no longer sends a BUY quantity; a legacy one is ignored. Runs/evidence rows
 # at version <= 4 used Hermes-chosen BUY quantities and are NOT comparable
 # decision-for-decision with version 5.
-PROMPT_SCHEMA_VERSION = 5
+# 6 (2026-11-09, July 2022 v3 decision review): (a) a complete news check with
+# zero headlines now says it clears the news veto, plus a NEWS STATUS block
+# (current status takes precedence over older reflections) -- the controller already
+# allowed such BUYs; only the wording changed, with RULES.md §5a/AGENTS.md;
+# (b) held positions show age in trading sessions (the §6c time-stop counter),
+# not calendar days. Exit timing is unchanged. Not decision-comparable with 5.
+PROMPT_SCHEMA_VERSION = 6
 # The masking seed used when nothing is stored yet and no --seed is given
 # (a fresh or --reset run) -- was argparse's own default before item 7's
 # seed-persistence fix; unchanged in value, only in where it lives.
@@ -117,6 +123,11 @@ DEFAULT_MASKING_SEED = 42
 # 5 trading days, revised from 15. Deliberately short, for throughput --
 # see RULES.md §6c's own honest accounting of what this gives up.
 TIME_STOP_TRADING_DAYS = 5
+
+
+def holding_sessions(trading_days_elapsed: int, holding: "Holding") -> int:
+    """Trading sessions since entry (entry session = 0): the §6c time-stop counter, also shown in the prompt."""
+    return trading_days_elapsed - holding.entry_trading_day
 
 # -- Phase 1 aggressive profile: deterministic activity escalation --------
 # RULES.md §6b. Fixed, harness-controlled, approved by the user in advance
@@ -1355,7 +1366,7 @@ def simulate_trading_day(
                            "reason": reason, "exit_price": exit_price, "quantity": holding.quantity,
                            "entry_price": holding.entry_price, "bar_time": "09:30"})
             continue
-        if trading_days_elapsed - holding.entry_trading_day >= TIME_STOP_TRADING_DAYS:
+        if holding_sessions(trading_days_elapsed, holding) >= TIME_STOP_TRADING_DAYS:
             # Correction pass item G (freeform red-team R3): rounded to
             # the cent, same reasoning as evaluate_opening_gap/
             # evaluate_bar_stop_target's own fix (see those docstrings) --
@@ -2656,10 +2667,21 @@ asyncio.run(main())
 
 
 NEWS_CHECKED, NEWS_UNAVAILABLE = "checked", "unavailable"
-NEWS_EMPTY_LINE = ("      news: No headlines found in the checked window (7 days to the decision cutoff). "
-                   "This is not proof that no adverse news exists.")
+NEWS_EMPTY_LINE = ("      news: checked, 0 headlines in the window (7 days to the decision cutoff) -- the check "
+                   "completed, so the news veto is cleared for this decision; technicals and every other "
+                   "check still apply.")
 NEWS_UNAVAILABLE_LINE = ("      news: UNAVAILABLE -- the headline check for this name could not be completed, "
                          "so the adverse-news veto cannot be evaluated; no new entry may be opened on it.")
+NEWS_STATUS_BLOCK = [
+    "NEWS STATUS (RULES.md §5a -- the status shown below is the current one, and it takes precedence",
+    "over any earlier reflection that treated a checked window with no headlines as missing news)",
+    "  headlines            -> materially adverse company news vetoes a new entry; no headline",
+    "                          ever justifies one.",
+    "  checked, 0 headlines -> the check completed: the news veto is cleared for this decision.",
+    "                          The entry still needs a valid technical setup and every other check.",
+    "  UNAVAILABLE          -> the check failed or was incomplete: no new entry on that name.",
+    "",
+]
 
 
 def news_status(news: dict, ticker: str) -> str:
@@ -4546,6 +4568,7 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
         "  recorded as whichever it is.",
         "",
     ]
+    lines += NEWS_STATUS_BLOCK
 
     lines.append("OPEN POSITIONS")
     if positions:
@@ -4553,7 +4576,8 @@ def build_prompt(day_label: str, account: dict, positions: list[dict],
             lines.append(
                 f"  {p['alias']}: {p['quantity']} @ ${p['entry_price']:.2f} "
                 f"| now ${p['current_price']:.2f} | stop ${p['stop_price']:.2f} "
-                f"| target ${p['target_price']:.2f} | held {p['days_held']}d"
+                f"| target ${p['target_price']:.2f} | held {p['sessions_held']} trading "
+                f"session{'' if p['sessions_held'] == 1 else 's'}"
             )
             # Fresh point-in-time technicals/news for THIS position -- what
             # actually makes AGENTS.md §6d's thesis-invalidation check
@@ -5894,6 +5918,8 @@ def run_day(day: date, day_index: int, portfolio: Portfolio,
         "stop_price": h.stop_price, "target_price": h.target_price,
         "current_price": bars.get(t, {}).get("close", h.entry_price),
         "days_held": day_index - h.entry_day,
+        # What the prompt shows: the §6c time-stop counter (entry session = 0).
+        "sessions_held": holding_sessions(working.trading_days_elapsed, h),
         # None when a fetch error occurred for this ticker -- the position
         # itself is still shown (entry/current/stop/target above), just
         # without fresh evidence this cycle, same "skip, don't fabricate"

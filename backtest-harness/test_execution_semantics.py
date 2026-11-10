@@ -1335,7 +1335,7 @@ def test_build_prompt_renders_fresh_evidence_for_held_positions():
     position_with_evidence = {
         "alias": "ALPHA", "quantity": 90, "entry_price": 100.0,
         "current_price": 97.0, "stop_price": 93.0, "target_price": 115.0,
-        "days_held": 3,
+        "days_held": 3, "sessions_held": 2,
         "tech": {"rsi": 38.2, "rsi_signal": "neutral", "macd_signal": "bearish crossover",
                 "trend": "down", "outlook": "cautious"},
         "news": [{"age_days": 1, "headline": "ALPHA misses on guidance, shares slide"}],
@@ -1343,7 +1343,7 @@ def test_build_prompt_renders_fresh_evidence_for_held_positions():
     position_without_evidence = {
         "alias": "BRAVO", "quantity": 50, "entry_price": 50.0,
         "current_price": 51.0, "stop_price": 46.0, "target_price": 60.0,
-        "days_held": 1, "tech": None, "news": [],
+        "days_held": 1, "sessions_held": 1, "tech": None, "news": [],
     }
     prompt = build_prompt("Day 5", account, [position_with_evidence, position_without_evidence],
                           candidates=[], recent_insights=[])
@@ -1357,7 +1357,8 @@ def test_build_prompt_renders_fresh_evidence_for_held_positions():
 
     # A position with no fresh evidence this cycle (a fetch error) still
     # shows its base entry/current/stop/target line -- never fabricated.
-    assert "BRAVO: 50 @ $50.00" in prompt
+    assert "BRAVO: 50 @ $50.00" in prompt and "held 1 trading session\n" in prompt
+    assert "held 2 trading sessions" in prompt and "held 3d" not in prompt
     print("  ok  a held position without fresh evidence still shows its base line, nothing invented")
 
 
@@ -4654,8 +4655,8 @@ def test_build_prompt_embeds_masked_rules_md_and_bumps_schema_version():
     straight past the entire masking gate. Without a masking object
     (existing formula-only test call sites), the block is skipped
     entirely rather than ever risking an unmasked embed."""
-    assert PROMPT_SCHEMA_VERSION == 5, \
-        "build_prompt's shape changed (news status lines; controller-owned BUY quantity) -- the schema version must say so"
+    assert PROMPT_SCHEMA_VERSION == 6, \
+        "build_prompt's shape changed (news-veto wording; holding age in trading sessions) -- the schema version must say so"
 
     account = {"equity": 100_000.0, "cash": 100_000.0, "exposure_pct": 0.0,
               "daily_pl_pct": 0.0, "weekly_pl_pct": 0.0, "drawdown_pct": 0.0}

@@ -180,7 +180,9 @@ def test_config_must_be_authorized_and_pinned_to_the_plan(tmp_path, monkeypatch)
 V2 = lvr.HERE / "experiments" / "laya_schema5_2022_07_v2.json"
 
 
-def test_the_v2_config_is_authorized_for_laya_only_at_schema_5_and_keeps_v1s_frozen_inputs():
+def test_the_v2_config_is_authorized_for_laya_only_at_schema_5_and_keeps_v1s_frozen_inputs(monkeypatch):
+    # v2 is frozen at prompt schema 5; the current code (6) refuses it, so load it as the code it ran under.
+    monkeypatch.setattr(lvr.rb, "PROMPT_SCHEMA_VERSION", 5)
     v1, v2 = lvr.load_config(), lvr.load_config(V2)
     assert v2["experiment_id"] != v1["experiment_id"] and v2["prompt_schema_version"] == 5
     for k in ("window", "pool", "masking_seed", "k", "starting_equity", "laya", "model"):
@@ -194,6 +196,8 @@ def test_the_v2_config_is_authorized_for_laya_only_at_schema_5_and_keeps_v1s_fro
 
 def test_config_option_drives_fingerprint_identity_and_output_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(lvr, "_git", lambda *a: "" if a[0] == "status" else "HEAD")
+    # v2 is frozen at prompt schema 5; the current code (6) refuses it, so load it as the code it ran under.
+    monkeypatch.setattr(lvr.rb, "PROMPT_SCHEMA_VERSION", 5)
     fp = lvr.code_fingerprint(V2)
     assert "backtest-harness/experiments/laya_schema5_2022_07_v2.json" in fp["files"]
     assert "backtest-harness/experiments/laya_vs_random_2022_07.json" not in fp["files"]
@@ -223,7 +227,8 @@ def _arm(tmp_path, monkeypatch, mode, pending=True):
     plan.write_text("frozen plan")
     cfg = {**json.loads(V2.read_text(encoding="utf-8")), "experiment_id": "test-exp", "plan": {"path": "plan.md",
                                                                         "sha256": lvr._sha_file(plan)},
-           "window": {"start": "2022-07-01", "end": "2022-07-06"}}
+           "window": {"start": "2022-07-01", "end": "2022-07-06"},
+           "prompt_schema_version": rb.PROMPT_SCHEMA_VERSION}
     cfg.pop("authorized_arms")
     cfg_path = tmp_path / "cfg.json"
     cfg_path.write_text(json.dumps(cfg))
@@ -292,7 +297,7 @@ def test_run_arm_traces_days_and_episode_end_and_tracing_failure_changes_nothing
     assert list((tmp_path / "boom" / "bt" / "trace_spool").glob("*.jsonl")), "the failing tracer was live (spooled)"
     rc, marker, result, *_ = on
     assert rc == 0 and marker["status"] == "completed" and marker["experiment_id"] == "test-exp"
-    assert marker["config"]["path"] == "cfg.json" and marker["prompt_schema_version"] == 5
+    assert marker["config"]["path"] == "cfg.json" and marker["prompt_schema_version"] == lvr.rb.PROMPT_SCHEMA_VERSION
     assert result["sessions_completed"] == 4 and len(result["terminal_pending_resolved"]) == 1
 
     spans = _spans_from(on[5], tmp_path / "on" / "bt" / "trace_spool")
@@ -305,3 +310,10 @@ def test_run_arm_traces_days_and_episode_end_and_tracing_failure_changes_nothing
     assert "laya_vs_random" in json.dumps(_attrs(next(x for x in spans if x["name"] == "backtest_day")))
     sym = UNIVERSE.symbols[0]
     assert sym not in json.dumps([_io(x) for x in spans]), "real ticker never exported"
+
+
+def test_the_frozen_july_schema_5_configs_cannot_be_rerun_under_the_current_prompt():
+    assert lvr.rb.PROMPT_SCHEMA_VERSION == 6
+    for name in ("laya_schema5_2022_07_v2.json", "laya_schema5_2022_07_v3.json"):
+        with pytest.raises(SystemExit, match="prompt_schema_version 5 is not the code's 6"):
+            lvr.load_config(lvr.HERE / "experiments" / name)
