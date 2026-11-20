@@ -1,0 +1,6 @@
+# Experiment plans whose SHA-256 is pinned in backtest-harness/experiments/*.json. A checkout must reproduce the
+# exact bytes that were hashed, whatever the OS or core.autocrlf setting, or load_config refuses the config.
+docs/evaluations/laya_vs_random_plan_2026-10-06.md text eol=crlf
+docs/evaluations/laya_schema5_plan_v3_2026-11-09.md text eol=crlf
+docs/evaluations/laya_schema5_plan_2026-11-09.md text eol=lf
+docs/evaluations/laya_vs_random_schema6_plan_2026-11-10.md text eol=lf
