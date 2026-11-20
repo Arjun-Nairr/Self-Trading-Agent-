@@ -1,3 +1,6 @@
+> **ARCHIVED 2026-11-06 -- not an active context source.** Historical record only; do not read it at session
+> start, update it or recreate `HANDOFF.md`. Current state lives in the relevant ticket, spec, runbook and code.
+
 # Handoff briefing — trading agent built with the Hermes agentic harness
 
 *Compacted 2026-09-01. Full pre-compaction history:
@@ -25,20 +28,22 @@ own optional reading — **not** required context and not authoritative.
 This file and the repo's own source (`RULES.md`, `AGENTS.md`, `SOUL.md`,
 actual code) are.
 
-**Standing workflow:** read this file → implement → verify → update this file → commit.
-The handoff refresh is part of completion, not optional.
+**Standing workflow:** read this file → implement → verify → update this file → commit (the refresh is part of completion).
+**Per-ticket gate (engineering workflow only; not an agent instruction):** the user must explicitly invoke `/implement` in
+that chat before a ticket starts (a prompt or another chat does not count; if missing, ask and stop). If Docker is
+needed, tell the user to start it FIRST and never start it yourself. A ticket's "do not commit" overrides the skill.
 
 ---
 
 ## 2. Project purpose
 
-**Canonical terminology:** this project is an unnamed LLM-driven trading
-agent. It uses **Hermes**, an existing agentic harness; Hermes is neither the
-project being built nor the name of the trading agent. Use **the trading
-agent** for the project/decision-maker and **the Hermes harness** only when
-referring to the external agentic runtime, unless the user explicitly chooses
-a separate name for the trading agent later.
-
+**Canonical terminology:** **Hermes** is the third-party agentic runtime
+(gateway, context/memory, scheduler, and MCP tool loop), not this project's name
+or merely its LLM. The unnamed **trading agent** is the Hermes gateway configured
+with this project's model, instructions, and approved tools. The separate
+**backtest controller** wraps Hermes with masked point-in-time evidence and a
+simulated portfolio so historical tests are reproducible. Never call that
+controller "Hermes" or imply its backtest tool restrictions are a Hermes limit.
 The trading agent trades US equities — **long only, paper account,
 swing-trading horizon** (days to weeks) — reasoning over technicals and news
 and gated by a hard-coded risk checker before anything executes. It runs using
@@ -89,7 +94,7 @@ digest.
 
 | Service | Responsibility |
 |---|---|
-| `gateway` | Runs the trading agent through the Hermes harness. Backtest: the agent never calls a tool itself. Live: it calls tools directly. |
+| `gateway` | Hermes agentic runtime hosting the configured trading agent. Live: the agent calls approved MCP tools directly. Backtest: it receives one prepared evidence prompt from the separate controller. |
 | `maverick-mcp` | Technicals (RSI/MACD/support-resistance/trend) + price history, point-in-time gated. |
 | `google-news-rss-mcp` | Live-mode headlines only. |
 | `alpaca-mcp` | Live orders/account/positions + backtest's historical news and intraday-bar data. |
@@ -97,13 +102,16 @@ digest.
 | `execution-sim-mcp` | Backtest-only fill simulator (slippage-aware, real historical ranges). |
 | `dashboard` | V1, static frontend, local-only (`http://127.0.0.1:8842`, loopback-bound) — active dashboard, see §10. V2 (`dashboard-v2/`) is a separate, genuinely PUBLIC Cloudflare Pages preview — see §10. |
 
-**Backtest mode:** `backtest-harness/run_backtest.py` fetches everything,
-masks tickers/dates, hands the trading agent one prompt per simulated trading day.
-One "cycle" = one simulated trading day. A discretionary decision made on
-day T is queued and resolves no earlier than day T+1's real open — no
-same-day lookahead. Essential cycle data commits atomically before
-best-effort observability is attempted — a crash after commit can lose
-dashboard detail but never duplicate a trade or a trading-agent call.
+**Backtest mode:** the project-owned **backtest controller**
+(`backtest-harness/run_backtest.py`) fetches historical inputs, applies
+point-in-time gates and alias masking, then invokes Hermes once with one
+prepared prompt per simulated day. This deliberately bypasses Hermes's normal
+tool loop; it measures judgment from a fixed evidence packet, not autonomous
+tool selection. The controller also owns simulated portfolio state, next-day
+fills, deterministic validation, checkpoints, and evaluation isolation. One
+"cycle" = one simulated trading day. A decision made on day T resolves no
+earlier than day T+1's real open. Essential data commits atomically before
+best-effort observability, so a crash cannot duplicate a trade or Hermes call.
 
 **Live mode:** the `live/` controller (not the gateway's default profile) runs a durable reconcile →
 manage → research → plan → validate → submit loop on Alpaca's paper account. Hermes runs in an isolated
@@ -271,10 +279,30 @@ commands and evidence: `docs/live_paper_runbook.md`; rules for live Hermes: `liv
   research call; zero orders. **No real paper-order lifecycle (entry, OCO, cancel, replace, partial
   fill) has been verified**, and the 20-name pool path has not run on real data.
 
-**Next, in order:** (1) record the wider-pool snapshot (prerequisite) — `watchlist/scalable_screener.py
---write` on a Saturday/Sunday UTC, usable from the following Monday — then repeat the read-only dry
-run on the default `--universe screened`; (2) a separately authorized, supervised paper session
-(`python live/run_live.py cycle`, watched; no unattended `loop`); (3) only then deployment preparation.
+**Hosting (zero-cost requirement):** Oracle Always Free Ampere A1 (ARM; 2 OCPU / 12 GB) is the preferred
+candidate, not yet obtained. 2026-10-09 compatibility check (metadata only; nothing built or run):
+**proceed with prerequisites, no hard blocker** — `docs/research/oracle_arm_compatibility.md`. Pinned
+images all have `linux/arm64`; the four custom service images and the Laya worker need a native ARM
+rebuild; Linux config items (`${USERPROFILE}` mount, uid-10000 ownership, Laya checkpoint must be real
+files not HF symlinks, a `backtest` base profile, device-code model login). Unknown: ARM runtime, **RAM
+(unmeasured on target)**, unattended model-auth lifetime, Oracle idle-reclamation (likely applies), Oracle
+signup/capacity (user-side).
+
+**Next, in order:** (1) ARM compatibility check — done, above; (2) **orders-disabled cloud validation**
+on an A1 instance: `pytest live/` + `python verify.py` on Linux/ARM, native image builds, read-only
+`dry-run`, RAM measurement; (3) **separately authorized, supervised paper pilot** (`python live/run_live.py
+cycle`, watched; no unattended `loop`), then deployment hardening. The frozen ten-name universe
+(`--universe watchlist`) stays an explicit initial testing option; **wider-pool readiness is a separate
+check** — record the weekly snapshot (`watchlist/scalable_screener.py --write`, Sat/Sun UTC, usable from the
+following Monday) and repeat the dry run on `--universe screened` before relying on 20-name shortlists.
+
+**Tracing (Langfuse) — Tickets 1–3 PARTIAL (2026-11-06):** off by default; controller, Hermes model/tool calls, Laya
+selection (real inference verified locally), broker/journal/engine events and the weekly screen (own trace,
+`live/trace_screen.py`) are traced (`pytest live/` 225, `verify.py` 13/13); hosted trace verified 2026-11-06 (no
+hosted tool span yet: the model made no tool call). **Blocker:** one-shot `cycle`/`dry-run` lose their final
+spans/root by design (no waits) — approve the exit-spool proposal or accept the loss. Verification uses
+`dry-run --trace-drain` only. Status/next steps (incl. §7 correction pass): `docs/research/langfuse_tracing_acceptance.md`; runbook
+`docs/live_tracing_runbook.md`; tickets `.scratch/langfuse-live-tracing/issues/`.
 
 **Paused tracks (not cancelled; links only):** evaluation — the 50-cycle report recommends improving
 measurement first (`docs/evaluations/round2_50cycle_evaluation_extract.md`; §7, §14), no training,

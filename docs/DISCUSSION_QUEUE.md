@@ -1,13 +1,13 @@
 # Discussion queue — unresolved architecture/product decisions
 
 Tracks open decisions this project hasn't settled, not a chronological
-journal, not an implementation spec, and not a duplicate of `HANDOFF.md`
-(current verified state) or `docs/PROJECT_BACKLOG.md` (approved/candidate
-work items). An item lives here only while it's genuinely unresolved.
+journal, not an implementation spec, and not a duplicate of the tickets,
+specs and runbooks (current verified state) or `docs/PROJECT_BACKLOG.md`
+(approved/candidate work items). An item lives here only while it's genuinely unresolved.
 
 **When a discussion becomes an approved implementation:** move its
-distilled requirement to `docs/PROJECT_BACKLOG.md` or `HANDOFF.md` (as
-appropriate) and remove it from this file. Never duplicate completed
+distilled requirement to `docs/PROJECT_BACKLOG.md` or the relevant ticket/spec
+(as appropriate) and remove it from this file. Never duplicate completed
 history in both places.
 
 Each item: current decision · why it matters · current conclusion or

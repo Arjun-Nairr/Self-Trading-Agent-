@@ -1,7 +1,7 @@
 # Live-paper runbook (Alpaca paper account)
 
-Operator guide for `live/`. Current project state and the next step live in
-`HANDOFF.md` §10; the rules Hermes follows live in `live/LIVE_POLICY.md`
+Operator guide for `live/`. The next step (first supervised session) and its evaluation live in
+`docs/evaluations/live_paper_evaluation_plan.md`; the rules Hermes follows live in `live/LIVE_POLICY.md`
 (with `RULES.md`, which still binds every numeric limit). This file holds
 commands, prerequisites, verification evidence and known limits.
 

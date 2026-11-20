@@ -2,8 +2,9 @@
 
 The single permanent store for possible and approved future work,
 organized by stable engineering sector — not a scattered feature list.
-`HANDOFF.md` is current verified operational state; this file never
-restates it. `docs/DISCUSSION_QUEUE.md` is unresolved decisions only;
+Current operational state lives in the relevant ticket, spec, runbook
+and code (the former `HANDOFF.md` is archived in `docs/history/`); this
+file never restates it. `docs/DISCUSSION_QUEUE.md` is unresolved decisions only;
 once a discussion resolves into an approved or candidate item, it moves
 here (and is removed there — never duplicated in both places).
 
