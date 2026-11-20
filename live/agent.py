@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -82,12 +83,26 @@ def parse_reply(raw: str, held: set[str]) -> tuple[dict | None, list[str]]:
     return (None if errs else r), errs
 
 
-def call_hermes(prompt: str) -> tuple[str, str]:
+_TRACE_ENV = {"HERMES_TRACE_ID": r"[0-9a-f]{32}", "HERMES_TRACE_PARENT": r"[0-9a-f]{16}",
+              "HERMES_TRACE_SESSION": r"[A-Za-z0-9_.\-]{1,64}",
+              "HERMES_TRACE_DIAGNOSTIC_DRAIN_S": r"(?:10|[0-9])(?:\.[0-9])?"}   # dry-run --trace-drain only
+
+
+def trace_env_flags(trace_env: dict | None) -> list[str]:
+    """`-e K=V` flags for the correlation ids only (allowlisted names, strict value shapes; never a secret)."""
+    flags: list[str] = []
+    for k, v in (trace_env or {}).items():
+        if k in _TRACE_ENV and isinstance(v, str) and re.fullmatch(_TRACE_ENV[k], v):
+            flags += ["-e", f"{k}={v}"]
+    return flags
+
+
+def call_hermes(prompt: str, trace_env: dict | None = None) -> tuple[str, str]:
     """(raw reply, prompt sha256). Prompt travels over stdin, never argv
-    (same mechanism as the backtest's _call_hermes)."""
+    (same mechanism as the backtest's _call_hermes). `trace_env` carries only the tracing correlation ids."""
     result = subprocess.run(
-        ["docker", "compose", "exec", "-T", "-e", f"HERMES_HOME={LIVE_HERMES_HOME}", "--workdir",
-         LIVE_HERMES_WORKDIR, "gateway", "xargs", "-0", "-I{}", "hermes", "-z", "{}"],
+        ["docker", "compose", "exec", "-T", "-e", f"HERMES_HOME={LIVE_HERMES_HOME}", *trace_env_flags(trace_env),
+         "--workdir", LIVE_HERMES_WORKDIR, "gateway", "xargs", "-0", "-I{}", "hermes", "-z", "{}"],
         input=prompt.encode("utf-8"), capture_output=True, cwd=REPO, timeout=HERMES_TIMEOUT_S)
     if result.returncode != 0:
         raise RuntimeError(f"hermes failed: {result.stderr[-800:].decode('utf-8', 'replace')}")

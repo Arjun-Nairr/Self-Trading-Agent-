@@ -1,0 +1,10 @@
+name: hermes-trace
+version: "1.0.0"
+description: "Project-owned, observational Langfuse tracing for the live Hermes profile (model requests, tool calls). Stdlib only; bounded background export; redacts before export. Replaces, and must not be enabled together with, observability/langfuse."
+author: hermes-trading-agent
+hooks:
+  - pre_api_request
+  - post_api_request
+  - pre_tool_call
+  - post_tool_call
+  - post_llm_call

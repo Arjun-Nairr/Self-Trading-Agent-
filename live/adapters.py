@@ -13,6 +13,7 @@ import subprocess
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 REPO = Path(__file__).resolve().parent.parent
 # maverick's dependencies live in its uv environment (same invocation as the backtest harness)
@@ -54,6 +55,9 @@ def card_history(tickers, day: date, chunk: int = 20) -> dict:
         script = script.replace("print(json.dumps(", "print('OUT ' + json.dumps(")
         out.update(run_in("maverick-mcp", script, timeout=300)["history"])
     return out
+
+
+ET = ZoneInfo("America/New_York")
 
 
 class AlpacaBroker:
@@ -108,11 +112,15 @@ class AlpacaBroker:
                       "r.raise_for_status(); out = r.json()", d=day)
         return {"open": cal[0]["open"], "close": cal[0]["close"]} if cal else None
 
-    def last_completed_session(self, today: str, is_open: bool) -> date:
+    def last_completed_session(self, today: str, is_open: bool, now: datetime | None = None) -> date:
+        """The latest session whose close has passed: today's only after its (possibly early) close, never before
+        the open -- a closed market is either pre-market or after the close."""
         start = (date.fromisoformat(today) - timedelta(days=14)).isoformat()
         cal = _alpaca("r = await c.get(f'{B}/v2/calendar', params={'start': P['a'], 'end': P['b']}, headers=H); "
                       "r.raise_for_status(); out = r.json()", a=start, b=today)
-        done = [d["date"] for d in cal if d["date"] < today or not is_open]
+        now_et = (now or datetime.now(timezone.utc)).astimezone(ET)
+        closed = lambda d: datetime.fromisoformat(f"{d['date']}T{d['close']}").replace(tzinfo=ET) <= now_et  # noqa: E731
+        done = [d["date"] for d in cal if d["date"] < today or (not is_open and closed(d))]
         return date.fromisoformat(max(done))
 
     def daily_bars(self, symbol: str, n: int) -> list:

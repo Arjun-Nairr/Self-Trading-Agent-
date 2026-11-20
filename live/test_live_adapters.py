@@ -145,6 +145,22 @@ def test_calendar_helpers_follow_the_broker_calendar(stub):
     assert br.last_completed_session("2026-10-08", False) == date(2026, 10, 8)
 
 
+def test_a_closed_market_before_the_open_has_not_completed_today(stub):
+    """Regression (hosted dry run 2026-11-06 04:27 ET): pre-market, today's session has not happened, so the last
+    completed one is the previous session; after today's close it is today (including an early close)."""
+    from datetime import datetime, timezone
+    cal = [{"date": "2026-10-07", "open": "09:30", "close": "16:00"},
+           {"date": "2026-10-08", "open": "09:30", "close": "13:00"}]
+    stub.routes[("GET", f"{B}/v2/calendar")] = (200, lambda p: [d for d in cal if p["start"] <= d["date"] <= p["end"]])
+    br = AlpacaBroker()
+    at = lambda hhmm_utc: datetime.fromisoformat(f"2026-10-08T{hhmm_utc}:00").replace(tzinfo=timezone.utc)  # noqa: E731
+    assert br.last_completed_session("2026-10-08", False, now=at("08:27")) == date(2026, 10, 7), "04:27 ET"
+    assert br.last_completed_session("2026-10-08", False, now=at("16:59")) == date(2026, 10, 7), "12:59 ET, open"
+    assert br.last_completed_session("2026-10-08", False, now=at("17:00")) == date(2026, 10, 8), "13:00 ET close"
+    assert br.last_completed_session("2026-10-08", False, now=at("22:00")) == date(2026, 10, 8), "after close"
+    assert br.last_completed_session("2026-10-08", True, now=at("15:00")) == date(2026, 10, 7), "during the session"
+
+
 def test_news_is_requested_for_the_symbol_and_window(stub):
     out = AlpacaBroker().news("OLN", 72)
     assert out["complete"] is True and out["symbol"] == "OLN"
