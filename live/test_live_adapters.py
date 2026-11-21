@@ -29,8 +29,11 @@ class Resp:
         return self._body
 
     def raise_for_status(self):
+        """Like httpx >= 0.25 (the container runs 0.28.1): returns the response itself, never None. A stub that
+        returned None hid a live bug (pilot 2026-11-20): `r.raise_for_status() or r.json()` yielded the Response."""
         if self.status_code >= 400:
             raise RuntimeError(f"HTTP {self.status_code}")
+        return self
 
 
 class Stub:
@@ -104,6 +107,35 @@ def test_order_lookup_by_client_id_returns_none_on_404_and_the_order_otherwise(s
     stub.routes[("GET", url)] = (200, {"id": "o1", "client_order_id": "lv-x-entry0", "status": "filled"})
     assert br.order_by_client_id("lv-x-entry0")["status"] == "filled"
     assert stub.requests[-1]["params"] == {"client_order_id": "lv-x-entry0", "nested": "true"}
+
+
+def test_order_lookup_against_a_real_httpx_response(monkeypatch):
+    """The same container script, run against REAL httpx Responses through an offline MockTransport: the pilot
+    defect lived in how a real Response behaves, which a hand-written stub can get wrong."""
+    httpx = pytest.importorskip("httpx")
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        cid = request.url.params["client_order_id"]
+        if cid == "lv-missing":
+            return httpx.Response(404, json={"message": "order not found"})
+        if cid == "lv-broken":
+            return httpx.Response(500, json={"message": "internal error"})
+        return httpx.Response(200, json={"id": "o1", "client_order_id": cid, "status": "filled", "qty": "621"})
+
+    Stub().install(monkeypatch)                                   # server/_headers and run_in, as for every test
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(
+        AsyncClient=lambda **kw: httpx.AsyncClient(transport=transport, **kw)))
+    br = AlpacaBroker()
+    assert br.order_by_client_id("lv-x-entry0") == {"id": "o1", "client_order_id": "lv-x-entry0", "status": "filled",
+                                                    "qty": "621"}
+    assert br.order_by_client_id("lv-missing") is None
+    with pytest.raises(RuntimeError, match="500"):
+        br.order_by_client_id("lv-broken")
+    assert str(seen[0].url).startswith(f"{B}/v2/orders:by_client_order_id")
+    assert seen[0].url.params["nested"] == "true" and seen[0].headers["APCA"] == "secret-not-printed"
 
 
 def test_submit_posts_the_exact_body_and_a_broker_refusal_raises(stub):

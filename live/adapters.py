@@ -76,8 +76,8 @@ class AlpacaBroker:
 
     def order_by_client_id(self, client_order_id: str) -> dict | None:
         return _alpaca("r = await c.get(f'{B}/v2/orders:by_client_order_id', params={'client_order_id': "
-                       "P['id'], 'nested': 'true'}, headers=H)\nout = None if r.status_code == 404 else "
-                       "(r.raise_for_status() or r.json())", id=client_order_id)
+                       "P['id'], 'nested': 'true'}, headers=H)\nif r.status_code == 404:\n    out = None\n"
+                       "else:\n    r.raise_for_status()\n    out = r.json()", id=client_order_id)
 
     def submit(self, body: dict) -> dict:
         return _alpaca("r = await c.post(f'{B}/v2/orders', json=P['b'], headers=H); r.raise_for_status(); "
